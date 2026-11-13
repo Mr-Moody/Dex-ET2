@@ -143,3 +143,38 @@ def test_watchdog_logs_poll_errors() -> None:
     wd = _watchdog(fake, 2, lambda: None)
     wd.run()
     assert any(e.startswith("error: kaput") for _, e in wd.events)
+
+
+class StrictBackend(FakeBackend):
+    """Rejects configure while the hotspot is on."""
+
+    def configure(self, ssid: str, password: str, band: str) -> None:
+        if self._state == "on":
+            raise RuntimeError("busy")
+        super().configure(ssid, password, band)
+
+
+def test_reconfigure_while_on_falls_back_to_restart() -> None:
+    fake = StrictBackend(state="on", ssid="Drifted", band="2.4GHz")
+    events = Hotspot(fake, password=PASSWORD).ensure_up()
+    assert events == ["restarted-for-reconfigure"]
+    assert fake.state() == "on"
+    assert fake.current_config() == (DEFAULT_SSID, "2.4GHz")
+
+
+def test_reconfigure_backoff() -> None:
+    class Never(FakeBackend):
+        def configure(self, ssid: str, password: str, band: str) -> None:
+            self.configured.append((ssid, password, band))  # silently ignored
+
+    fake = Never(state="on", ssid="Drifted", band="2.4GHz")
+    now = [0]
+    hs = Hotspot(fake, password=PASSWORD, clock=lambda: now[0])
+    assert hs.ensure_up() == ["error: reconfigure did not apply"]
+    attempts = len(fake.configured)
+    now[0] = 30_000_000_000
+    assert hs.ensure_up() == []
+    assert len(fake.configured) == attempts
+    now[0] = 61_000_000_000
+    assert hs.ensure_up() == ["error: reconfigure did not apply"]
+    assert len(fake.configured) > attempts

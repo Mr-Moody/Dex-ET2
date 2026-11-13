@@ -88,7 +88,13 @@ class WinRTTetheringBackend:
         cfg.ssid = ssid
         cfg.passphrase = password
         cfg.band = self._band_enum(band)
-        _run(self._mgr.configure_access_point_async(cfg))
+        result = _run(self._mgr.configure_access_point_async(cfg))
+        if result is not None and hasattr(result, "status"):
+            self._check(result, "configure access point")
+        # IAsyncAction is void: read back to verify the apply took effect.
+        got = self.current_config()
+        if got != (ssid, band):
+            raise WinRTBackendError(f"configure did not apply (now ssid={got[0]!r} band={got[1]})")
 
     def _check(self, result: Any, what: str) -> None:
         status = result.status

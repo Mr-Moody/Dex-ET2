@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SSID = "Router? I barely know 'er"
 DEFAULT_BAND = "2.4GHz"
+RECONFIG_BACKOFF_NS = 60_000_000_000
 
 HotspotState = Literal["on", "off", "transitioning", "unknown"]
 
@@ -53,7 +54,10 @@ class Hotspot:
         *,
         password: str,
         band: str = DEFAULT_BAND,
+        clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
+        self._clock = clock
+        self._next_reconfig_ns = 0
         self._backend = backend
         self._ssid = ssid
         self._password = password
@@ -68,13 +72,36 @@ class Hotspot:
         if not self._idle_disabled:
             self._backend.disable_idle_timeout()
             self._idle_disabled = True
-        if self._backend.current_config() != (self._ssid, self._band):
-            self._backend.configure(self._ssid, self._password, self._band)
-            events.append("reconfigured")
+        want = (self._ssid, self._band)
+        if self._backend.current_config() != want and self._clock() >= self._next_reconfig_ns:
+            events.extend(self._reconfigure(want))
         if self._backend.state() != "on":
             self._backend.start()
             events.append("started")
         return events
+
+    def _try_configure(self, want: tuple[str, str]) -> bool:
+        try:
+            self._backend.configure(self._ssid, self._password, self._band)
+        except Exception as exc:
+            log.warning("hotspot configure rejected: %s", exc)
+            return False
+        return self._backend.current_config() == want
+
+    def _reconfigure(self, want: tuple[str, str]) -> list[str]:
+        if self._try_configure(want):
+            self._next_reconfig_ns = 0
+            return ["reconfigured"]
+        if self._backend.state() == "on":
+            # Some Windows builds reject reconfiguration while tethering is on.
+            self._backend.stop()
+            applied = self._try_configure(want)
+            self._backend.start()
+            if applied:
+                self._next_reconfig_ns = 0
+                return ["restarted-for-reconfigure"]
+        self._next_reconfig_ns = self._clock() + RECONFIG_BACKOFF_NS
+        return ["error: reconfigure did not apply"]
 
     def stop(self) -> None:
         self._backend.stop()
