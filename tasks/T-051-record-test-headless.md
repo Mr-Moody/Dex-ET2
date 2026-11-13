@@ -1,7 +1,7 @@
 ---
 id: T-051
 title: Run the record integration test headless
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: fix/T-051-record-test-headless
 depends_on: [T-050]
