@@ -1,7 +1,7 @@
 ---
 id: T-021
 title: Bimanual scene, lift-cube task, SimSink, fixed-rate loop
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-021-scene-sink-loop
 depends_on: [T-020]
