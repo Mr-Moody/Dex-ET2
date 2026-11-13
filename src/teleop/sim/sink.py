@@ -9,18 +9,25 @@ from typing import Any
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 
+from teleop.sim.mjtypes import MjDataLike, MjModelLike
 from teleop.types import SIDES, JointTargets, Pose, RobotState, Side, WristTarget
 
 mj: Any = _mujoco
 
 
 class SimSink:
-    def __init__(self, model: Any, data: Any, physics_hz: int, control_hz: int) -> None:
+    def __init__(
+        self,
+        model: MjModelLike,
+        data: MjDataLike,
+        physics_hz: int,
+        control_hz: int,
+    ) -> None:
         self.model = model
         self.data = data
-        if physics_hz % control_hz != 0:
+        if control_hz <= 0 or physics_hz % control_hz != 0:
             raise ValueError(
-                f"physics_hz {physics_hz} must be a multiple of control_hz {control_hz}"
+                f"physics_hz {physics_hz} must be a positive multiple of control_hz {control_hz}"
             )
         self.substeps = physics_hz // control_hz
         model.opt.timestep = 1.0 / physics_hz

@@ -124,6 +124,6 @@ def build_spec(hand: HandSpec, task: Task, cameras: Sequence[CameraConfig]) -> A
     return spec
 
 
-def build_scene(hand: HandSpec, task: Task, cameras: Sequence[CameraConfig]) -> _mujoco.MjModel:  # pyright: ignore
-    """Compile the bimanual scene into an ``mj.MjModel``."""
-    return build_spec(hand, task, cameras).compile()  # pyright: ignore
+def build_scene(hand: HandSpec, task: Task, cameras: Sequence[CameraConfig]) -> _mujoco.MjModel:  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownParameterType]
+    """Compile the bimanual scene into an ``mujoco.MjModel``."""
+    return build_spec(hand, task, cameras).compile()  # pyright: ignore[reportUnknownVariableType]

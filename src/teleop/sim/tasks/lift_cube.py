@@ -7,6 +7,7 @@ from typing import Any
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 
+from teleop.sim.mjtypes import MjDataLike, MjModelLike
 from teleop.types import TaskScore
 
 mj: Any = _mujoco
@@ -43,7 +44,7 @@ class LiftCube:
             friction=[1.0, 0.005, 0.0001],
         )
 
-    def reset(self, model: Any, data: Any, seed: int) -> None:
+    def reset(self, model: MjModelLike, data: MjDataLike, seed: int) -> None:
         rng = np.random.default_rng(seed)
         dx, dy = rng.uniform(-RANDOM_XY, RANDOM_XY, size=2)
         adr = int(model.joint("cube_free").qposadr[0])
@@ -61,7 +62,7 @@ class LiftCube:
         mj.mj_forward(model, data)
         self._reset_state(float(data.time))
 
-    def score(self, model: Any, data: Any) -> TaskScore:
+    def score(self, model: MjModelLike, data: MjDataLike) -> TaskScore:
         adr = int(model.joint("cube_free").qposadr[0])
         z = float(data.qpos[adr + 2])
         t = float(data.time)

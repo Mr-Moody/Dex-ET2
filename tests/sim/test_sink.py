@@ -76,7 +76,8 @@ def test_nonfinite_targets_dropped(scene):
     assert sink.nonfinite == 1 and data.ctrl[i] == 0
 
 
-def test_bad_rate_ratio_rejected(scene):
+@pytest.mark.parametrize(("physics", "control"), [(500, 60), (600, 0)])
+def test_bad_rate_ratio_rejected(scene, physics, control):
     model, data, _ = scene
     with pytest.raises(ValueError):
-        SimSink(model, data, 500, 60)
+        SimSink(model, data, physics, control)

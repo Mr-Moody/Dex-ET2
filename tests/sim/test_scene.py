@@ -41,7 +41,7 @@ def test_no_hand_contacts_at_home(scene):
     model, data, _ = scene
     for _ in range(300):
         mj.mj_step(model, data)
-    for c in data.contact[: data.ncon]:
-        for g in (c.geom1, c.geom2):
-            body = model.body(model.geom_bodyid[g]).name
-            assert not body.startswith(("left/", "right/")), body
+        for c in data.contact[: data.ncon]:
+            for g in (c.geom1, c.geom2):
+                body = model.body(model.geom_bodyid[g]).name
+                assert not body.startswith(("left/", "right/")), body
