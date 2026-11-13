@@ -1,7 +1,7 @@
 ---
 id: T-020
 title: Hand models and per-hand config
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-020-hand-models
 depends_on: [T-003]
