@@ -20,8 +20,10 @@ class Annotation:
 
 
 class Annotator(Protocol):
+    """``episode_frames`` maps camera name -> HWC uint8 frames of the (trimmed) episode."""
+
     def annotate(
-        self, episode_frames: Sequence[np.ndarray[Any, Any]], meta: Mapping[str, Any]
+        self, episode_frames: Mapping[str, Sequence[np.ndarray[Any, Any]]], meta: Mapping[str, Any]
     ) -> Annotation: ...
 
 
@@ -29,7 +31,7 @@ class RuleAnnotator:
     """Label by the recorded ``success`` flag, falling back to ``score`` >= ``SUCCESS_SCORE``."""
 
     def annotate(
-        self, episode_frames: Sequence[np.ndarray[Any, Any]], meta: Mapping[str, Any]
+        self, episode_frames: Mapping[str, Sequence[np.ndarray[Any, Any]]], meta: Mapping[str, Any]
     ) -> Annotation:
         score = meta.get("score")
         success = meta.get("success")

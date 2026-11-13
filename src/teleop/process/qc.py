@@ -38,6 +38,7 @@ class QCResult:
     trim: tuple[int, int]  # [start, end) frame range within the episode
     score: float | None = None
     source_root: Path | None = field(default=None, compare=False)
+    warnings: list[str] = field(default_factory=lambda: [], compare=False)
 
 
 def _open_dataset(root: Path) -> Any:
@@ -120,9 +121,12 @@ def _reasons(
     th: QCThresholds,
     ranges: Mapping[str, tuple[float, float]] | None,
 ) -> list[str]:
+    """Rule evaluation. Sidecar contract with T-050: ``source_status`` is a dict with
+    ``connected: bool`` and ``max_gap_s: float`` (longest input gap in the episode). Missing
+    keys skip the dropout rule; ``run_qc`` counts them in its warnings."""
     reasons: list[str] = []
     n = len(actions)
-    if n / fps < th.min_len_s:
+    if n == 0 or n / fps < th.min_len_s:
         reasons.append("too_short")
     status: Any = meta.get("source_status")
     if isinstance(status, Mapping):
@@ -165,8 +169,18 @@ def run_qc(
         row = ds.meta.episodes[ep]
         lo, hi = int(row["dataset_from_index"]), int(row["dataset_to_index"])
         col = ds.hf_dataset[lo:hi]["action"]
-        actions = np.stack([np.asarray(a, dtype=np.float32) for a in col])
+        actions = (
+            np.stack([np.asarray(a, dtype=np.float32) for a in col])
+            if hi > lo
+            else np.zeros((0, max(len(names), 1)), np.float32)
+        )
         meta = sidecar.get(ep, {})
+        warns: list[str] = []
+        status: Any = meta.get("source_status")
+        if not isinstance(status, Mapping):
+            warns.append("no_source_status")
+        elif "max_gap_s" not in status:
+            warns.append("no_max_gap_s")
         reasons = _reasons(actions, names, fps, meta, thresholds, ranges)
         trim = compute_trim(
             actions, fps, thresholds.idle_vel_eps, _score_frames(meta, len(actions))
@@ -180,6 +194,7 @@ def run_qc(
                 trim,
                 float(score) if isinstance(score, int | float) else None,
                 root,
+                warns,
             )
         )
     return results
@@ -222,6 +237,17 @@ def _write_reports(
     frames_written: int,
     empty_reason: str | None,
 ) -> None:
+    n_no_status = sum("no_source_status" in r.warnings for r in results)
+    n_no_gap = sum("no_max_gap_s" in r.warnings for r in results)
+    qc_warnings: list[str] = []
+    if n_no_status:
+        qc_warnings.append(
+            f"{n_no_status} episode(s) had no source_status; input_dropout was not checked"
+        )
+    if n_no_gap:
+        qc_warnings.append(
+            f"{n_no_gap} episode(s) had source_status without max_gap_s; gap check skipped"
+        )
     kept = sum(r.keep for r in results)
     totals = {
         "episodes": len(results),
@@ -233,6 +259,7 @@ def _write_reports(
         "inputs": [str(p) for p in inputs],
         "totals": totals,
         "empty_reason": empty_reason,
+        "qc_warnings": qc_warnings,
         "episodes": [
             {
                 "source_root": str(r.source_root) if r.source_root else None,
@@ -249,6 +276,7 @@ def _write_reports(
     lines = ["# QC report", ""]
     if empty_reason:
         lines += [f"**{empty_reason}**", ""]
+    lines += [f"Warning: {w}" for w in qc_warnings] + ([""] if qc_warnings else [])
     lines += ["| episode | keep | reasons | trim | score |", "|---|---|---|---|---|"]
     for r in results:
         src = f"{r.source_root.name}:" if r.source_root else ""
@@ -295,13 +323,19 @@ def write_clean(
     if kept:
         datasets: dict[Path, Any] = {}
         sidecars: dict[Path, dict[int, dict[str, Any]]] = {}
+        for r in kept:  # validate every source before anything is written
+            src = r.source_root or Path(ds_root)
+            if src not in datasets:
+                datasets[src] = _open_dataset(src)
+                sidecars[src] = _read_sidecar(src)
+        first = next(iter(datasets.values()))
+        for src, d in datasets.items():
+            if int(d.fps) != int(first.fps) or _clean_features(d) != _clean_features(first):
+                raise ValueError(f"{src} has a different fps or schema than the first input")
         rec: EpisodeRecorder | None = None
         try:
             for r in kept:
                 src = r.source_root or Path(ds_root)
-                if src not in datasets:
-                    datasets[src] = _open_dataset(src)
-                    sidecars[src] = _read_sidecar(src)
                 ds = datasets[src]
                 if rec is None:
                     rec = EpisodeRecorder(
@@ -311,8 +345,6 @@ def write_clean(
                         _clean_features(ds),
                         str(ds.meta.robot_type or "unknown"),
                     )
-                elif int(ds.fps) != rec.fps or _clean_features(ds) != rec.features:
-                    raise ValueError(f"{src} has a different fps or schema than the first input")
                 start = int(ds.meta.episodes[r.episode_index]["dataset_from_index"])
                 frames = _frame_arrays(ds, start + r.trim[0], start + r.trim[1])
                 meta = dict(sidecars[src].get(r.episode_index, {}))
@@ -320,8 +352,12 @@ def write_clean(
                 meta["source_root"] = str(src)
                 meta["source_episode_index"] = r.episode_index
                 if annotator is not None:
-                    cam_frames = [next(iter(f["images"].values())) for f in frames if f["images"]]
-                    ann = annotator.annotate(cam_frames, meta)
+                    cams = (
+                        {k: [f["images"][k] for f in frames] for k in frames[0]["images"]}
+                        if frames
+                        else {}
+                    )
+                    ann = annotator.annotate(cams, meta)
                     meta["annotation"] = {
                         "label": ann.label,
                         "success": ann.success,

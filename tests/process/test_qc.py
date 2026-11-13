@@ -195,9 +195,9 @@ def test_rule_annotator():
     from teleop.process.annotate import Annotation, RuleAnnotator
 
     ann = RuleAnnotator()
-    assert ann.annotate([], {"success": True, "score": 6}) == Annotation("success", True, "score=6")
-    assert ann.annotate([], {"score": 1.0}).label == "failure"
-    assert ann.annotate([], {}).success is None
+    assert ann.annotate({}, {"success": True, "score": 6}) == Annotation("success", True, "score=6")
+    assert ann.annotate({}, {"score": 1.0}).label == "failure"
+    assert ann.annotate({}, {}).success is None
 
 
 def test_cli_process(tmp_path, capsys):
@@ -208,3 +208,86 @@ def test_cli_process(tmp_path, capsys):
     rc = main(["process", "--in", str(a), "--in", str(b), "--out", str(out), "--annotator", "rule"])
     assert rc == 0
     assert (out / "qc_report.json").exists()
+
+
+def test_missing_max_gap_no_dropout_but_warned(tmp_path):
+    from teleop.process.qc import write_clean
+
+    root = _build(tmp_path / "a", [_good(source_status={"connected": True}), _good()])
+    r = _qc(root)
+    assert all(x.keep for x in r)
+    assert r[0].warnings == ["no_max_gap_s"] and r[1].warnings == ["no_source_status"]
+    out = tmp_path / "out"
+    write_clean(root, r, out)
+    report = json.loads((out / "qc_report.json").read_text())
+    assert len(report["qc_warnings"]) == 2
+
+
+def test_merge_mismatched_schema_raises_before_writing(tmp_path):
+    from teleop.process.qc import QCThresholds, run_qc, write_clean
+
+    a = _build(tmp_path / "a", [_good()])
+    cam = CameraConfig(name="front", width=32, height=32)
+    feats = build_features(["a", "b", "c", "d"], ["x", "y", "z"], [cam])
+    rec = EpisodeRecorder("local/b", tmp_path / "b", 20, feats, "test_robot")
+    rec.start_episode("lift")
+    for act in _ramp(60, 5, 55):
+        rec.add_frame(np.zeros(4, np.float32), act, {"front": np.zeros((32, 32, 3), np.uint8)})
+    rec.end_episode({"score": 5.0})
+    rec.close()
+    results = run_qc(a, QCThresholds()) + run_qc(tmp_path / "b", QCThresholds())
+    assert all(r.keep for r in results)
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="different fps or schema"):
+        write_clean(a, results, out)
+    assert not out.exists()
+
+
+def test_all_rejected(tmp_path):
+    from teleop.process.qc import write_clean
+
+    root = _build(tmp_path / "a", [_good(12), _good(source_status={"connected": False})])
+    r = _qc(root)
+    out = tmp_path / "out"
+    write_clean(root, r, out)
+    report = json.loads((out / "qc_report.json").read_text())
+    assert report["totals"]["kept"] == 0 and "all 2 episodes" in report["empty_reason"]
+    assert not (out / "meta").exists()
+
+
+def test_annotator_gets_all_cameras(tmp_path):
+    from teleop.process.annotate import Annotation
+    from teleop.process.qc import write_clean
+
+    seen = {}
+
+    class Spy:
+        def annotate(self, episode_frames, meta):
+            seen.update({k: len(v) for k, v in episode_frames.items()})
+            return Annotation("x", None, "")
+
+    root = _build(tmp_path / "a", [_good()])
+    r = _qc(root)
+    write_clean(root, r, tmp_path / "out", annotator=Spy())
+    assert seen == {"front": r[0].trim[1] - r[0].trim[0]}
+
+
+def test_cli_ranges_from_missing_hand_warns(tmp_path, capsys):
+    from teleop.cli import main
+
+    root = _build(tmp_path / "a", [_good()])
+    argv = ["process", "--in", str(root), "--out", str(tmp_path / "o")]
+    assert main([*argv, "--ranges-from-hand", "nope"]) == 0
+    assert "warning" in capsys.readouterr().err
+
+
+def test_hand_ranges_from_mjcf():
+    from teleop.commands.process import _hand_ranges
+
+    ranges = _hand_ranges("inspire")
+    if ranges is None:
+        pytest.skip("hand MJCF not fetched (third_party)")
+    assert any(k.startswith("left/") for k in ranges) and any(
+        k.startswith("right/") for k in ranges
+    )
+    assert all(lo < hi for lo, hi in ranges.values())
