@@ -1,12 +1,12 @@
 ---
 id: T-012
 title: Latest-value buffer, threaded source base, Synthetic + Replay sources
-status: todo
-owner: null
-branch: null
+status: done
+owner: lead-laptop
+branch: feat/T-012-sources
 depends_on: [T-003]
 plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-012-buffer-sources
-claimed_at: null
+claimed_at: '2026-11-13T22:18:39+00:00'
 ---
 
 Acceptance (from the plan):
