@@ -1,0 +1,21 @@
+# LEAP hand (Menagerie): 3 fingers + thumb, 16 position actuators. Only flexion joints are
+# mapped; the *_rot (abduction) and th_axl actuators stay at their default targets.
+name: leap
+mirror_left: false
+base_body: palm
+mjcf:
+  left: third_party/menagerie/leap_hand/left_hand.xml
+  right: third_party/menagerie/leap_hand/right_hand.xml
+flex:
+  - {actuator: if_mcp_act, joints: [index_proximal], axis: x}
+  - {actuator: if_pip_act, joints: [index_intermediate], axis: x}
+  - {actuator: if_dip_act, joints: [index_distal], axis: x}
+  - {actuator: mf_mcp_act, joints: [middle_proximal], axis: x}
+  - {actuator: mf_pip_act, joints: [middle_intermediate], axis: x}
+  - {actuator: mf_dip_act, joints: [middle_distal], axis: x}
+  - {actuator: rf_mcp_act, joints: [ring_proximal], axis: x}
+  - {actuator: rf_pip_act, joints: [ring_intermediate], axis: x}
+  - {actuator: rf_dip_act, joints: [ring_distal], axis: x}
+  - {actuator: th_cmc_act, joints: [thumb_metacarpal], axis: x}
+  - {actuator: th_mcp_act, joints: [thumb_proximal], axis: x}
+  - {actuator: th_ipl_act, joints: [thumb_distal], axis: x}

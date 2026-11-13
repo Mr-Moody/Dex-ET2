@@ -1,0 +1,16 @@
+# Inspire RH56DFX: 6 position actuators; distal joints are coupled by equality constraints.
+# Paths are relative to the repo root. Flex axis "x" = rotation about the OpenXR local
+# lateral axis, i.e. curling toward the palm (assumption; T-030 calibrates sign via `invert`).
+name: inspire
+mirror_left: false
+base_body: base
+mjcf:
+  left: third_party/inspire/inspire/inspire_left.xml
+  right: third_party/inspire/inspire/inspire_right.xml
+flex:
+  - {actuator: thumb_yaw, joints: [thumb_metacarpal], axis: x}
+  - {actuator: thumb_proximal, joints: [thumb_proximal, thumb_distal], axis: x}
+  - {actuator: index, joints: [index_proximal, index_intermediate], axis: x}
+  - {actuator: middle, joints: [middle_proximal, middle_intermediate], axis: x}
+  - {actuator: ring, joints: [ring_proximal, ring_intermediate], axis: x}
+  - {actuator: pinky, joints: [little_proximal, little_intermediate], axis: x}
