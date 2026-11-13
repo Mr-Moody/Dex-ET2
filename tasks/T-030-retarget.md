@@ -1,7 +1,7 @@
 ---
 id: T-030
 title: Flexion, calibration, DirectRetargeter
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-030-retarget
 depends_on: [T-003, T-020]
