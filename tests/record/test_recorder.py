@@ -86,3 +86,33 @@ def test_close_idempotent(tmp_path):
     rec = _two(tmp_path)
     rec.close()
     rec.close()
+
+
+def test_existing_root_raises_clear_error(tmp_path):
+    from teleop.record.recorder import RecorderRootExistsError
+
+    root = tmp_path / "ds"
+    root.mkdir()
+    (root / "x").write_text("y")
+    with pytest.raises(RecorderRootExistsError, match="fresh session"):
+        EpisodeRecorder(REPO, root, 10, _features(), "test_robot")
+
+
+def test_discard_then_new_episode_indexes_correctly(tmp_path):
+    rec = _rec(tmp_path)
+    _episode(rec, 6)
+    rec.discard_episode()
+    _episode(rec, 6)
+    assert rec.end_episode({}) == 0
+    _episode(rec, 6)
+    assert rec.end_episode({}) == 1
+    rec.close()
+
+
+def test_close_with_zero_episodes_does_not_raise(tmp_path):
+    rec = _rec(tmp_path)
+    rec.close()
+    rec2 = _rec(tmp_path / "b")
+    rec2.start_episode("t")
+    rec2.discard_episode()
+    rec2.close()

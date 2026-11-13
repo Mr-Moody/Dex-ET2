@@ -22,12 +22,21 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+class RecorderRootExistsError(FileExistsError):
+    """The dataset root already exists and is not empty."""
+
+
 class EpisodeRecorder:
     def __init__(
         self, repo_id: str, root: Path, fps: int, features: dict[str, Any], robot_type: str
     ) -> None:
         self.repo_id = repo_id
         self.root = Path(root)
+        if self.root.exists() and any(self.root.iterdir()):
+            raise RecorderRootExistsError(
+                f"dataset root {self.root} already exists and is not empty; "
+                "use a fresh session directory"
+            )
         self.fps = fps
         self.features: dict[str, Any] = features
         self.robot_type = robot_type
@@ -35,7 +44,6 @@ class EpisodeRecorder:
         self._task: str | None = None
         self._open = False
         self._closed = False
-        self._next_index = 0
 
     def _dataset(self) -> Any:
         if self._ds is None:
@@ -79,8 +87,7 @@ class EpisodeRecorder:
         ds = self._dataset()
         ds.save_episode()
         self._open = False
-        index = self._next_index
-        self._next_index += 1
+        index = int(ds.meta.total_episodes) - 1
         sidecar = self.root / "meta" / "teleop_episodes.jsonl"
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         with sidecar.open("a", encoding="utf-8") as f:
