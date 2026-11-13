@@ -30,14 +30,22 @@ class CoilWrist:
         pos = (base[0] + r[0], base[1] + r[1], base[2] + r[2])
         return WristTarget(side=frame.side, pose=Pose(orientation=pose.orientation, position=pos))
 
+    def recenter_to(self, side: Side, frame: HandFrame, target: Vec3) -> None:
+        """Map the frame's current Coil position onto `target` (sim coordinates).
+
+        Applied on top of the config scale and offset. Raises ValueError if the frame
+        has no position or belongs to the other side.
+        """
+        if frame.side != side:
+            raise ValueError(f"frame is for {frame.side}, expected {side}")
+        _, base = self._base(frame)
+        self._recenter[side] = (target[0] - base[0], target[1] - base[1], target[2] - base[2])
+
     def recenter(self, frame_left: HandFrame | None, frame_right: HandFrame | None) -> None:
         """Map each given side's current Coil position onto its home pose.
 
-        The correction is applied on top of the config scale and offset.
+        Raises ValueError for a given frame without a position.
         """
         for frame in (frame_left, frame_right):
-            if frame is None:
-                continue
-            _, base = self._base(frame)
-            h = self._home(frame.side)
-            self._recenter[frame.side] = (h[0] - base[0], h[1] - base[1], h[2] - base[2])
+            if frame is not None:
+                self.recenter_to(frame.side, frame, self._home(frame.side))

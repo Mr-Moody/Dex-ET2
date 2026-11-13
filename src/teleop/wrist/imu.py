@@ -28,7 +28,7 @@ class ImuWrist:
         self._nudge[side] = (0.0, 0.0, 0.0)
 
     @staticmethod
-    def _orientation(frame: HandFrame) -> Quat:
+    def orientation(frame: HandFrame) -> Quat:
         if frame.wrist is not None:
             return frame.wrist.orientation
         return frame.joints.get("wrist", _IDENTITY)
@@ -38,5 +38,5 @@ class ImuWrist:
         n = self._nudge[frame.side]
         pos = (h[0] + n[0], h[1] + n[1], h[2] + n[2])
         return WristTarget(
-            side=frame.side, pose=Pose(orientation=self._orientation(frame), position=pos)
+            side=frame.side, pose=Pose(orientation=self.orientation(frame), position=pos)
         )

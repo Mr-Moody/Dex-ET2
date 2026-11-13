@@ -119,3 +119,47 @@ def test_auto_no_jump_on_switch() -> None:
     assert approx(first_imu, last)
     # Per side: the other hand never saw Coil and sits at its home.
     assert approx(auto.wrist(make_frame("left", wrist=False)).pose.position, cfg.home_left)
+
+
+def test_auto_modes_per_side_mixed() -> None:
+    clock = FakeClock()
+    auto = AutoWrist(WristConfig(), hold_s=0.5, clock=clock)
+    assert auto.mode == "imu"
+    auto.wrist(make_frame("left", (0.0, 0.0, 1.0)))
+    auto.wrist(make_frame("right", wrist=False))
+    assert auto.mode_for("left") == "coil"
+    assert auto.mode_for("right") == "imu"
+    assert auto.mode == "mixed"
+    auto.wrist(make_frame("left", (0.0, 0.0, 1.0)))
+    assert auto.modes == {"left": "coil", "right": "imu"}
+    auto.wrist(make_frame("right", (0.0, 0.0, 1.0)))
+    assert auto.mode == "coil"
+
+
+def test_auto_no_jump_imu_to_coil() -> None:
+    clock = FakeClock()
+    auto = AutoWrist(WristConfig(), hold_s=0.5, clock=clock)
+    auto.wrist(make_frame(pos=(0.1, 0.0, 1.0)))
+    clock.advance(0.6)
+    imu_pos = auto.wrist(make_frame(wrist=False)).pose.position
+    assert imu_pos is not None
+    back = auto.wrist(make_frame(pos=(0.5, 0.3, 1.4))).pose.position
+    assert auto.mode == "coil"
+    assert approx(back, imu_pos)
+    nxt = auto.wrist(make_frame(pos=(0.6, 0.3, 1.4))).pose.position
+    assert approx(nxt, (imu_pos[0] + 0.1, imu_pos[1], imu_pos[2]))
+
+
+def test_auto_rehandover_after_nudge() -> None:
+    clock = FakeClock()
+    auto = AutoWrist(WristConfig(), hold_s=0.5, clock=clock)
+    auto.wrist(make_frame(pos=(0.0, 0.0, 1.0)))
+    clock.advance(0.6)
+    auto.imu.nudge("right", 0.05, 0.0, 0.0)
+    nudged = auto.wrist(make_frame(wrist=False)).pose.position
+    back = auto.wrist(make_frame(pos=(0.2, 0.0, 1.0))).pose.position
+    assert approx(back, nudged)
+    last_coil = auto.wrist(make_frame(pos=(0.3, 0.1, 1.0))).pose.position
+    clock.advance(0.6)
+    again = auto.wrist(make_frame(wrist=False)).pose.position
+    assert approx(again, last_coil)
