@@ -1,12 +1,12 @@
 ---
 id: T-011
 title: Studio raw capture + StudioSource parser
-status: todo
-owner: null
-branch: null
+status: done
+owner: lead-laptop
+branch: feat/T-011-studio-parser
 depends_on: [T-003]
 plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-011-studio-source
-claimed_at: null
+claimed_at: '2026-11-13T22:39:13+00:00'
 ---
 
 **Hardware laptop for Step 1 only; teammates' agents take the rest after fixtures exist.**
