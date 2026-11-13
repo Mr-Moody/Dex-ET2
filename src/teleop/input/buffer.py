@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
 
 from teleop.types import BimanualFrame, HandFrame, Side, SourceStatus
+
+logger = logging.getLogger(__name__)
 
 
 class LatestBuffer:
@@ -59,16 +62,28 @@ class ThreadedSource(ABC):
         self._buffer = LatestBuffer()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self.last_error: BaseException | None = None
 
     @abstractmethod
     def _run(self, stop: threading.Event) -> None: ...
+
+    def _guarded_run(self, stop: threading.Event) -> None:
+        try:
+            self._run(stop)
+        except Exception as exc:
+            self.last_error = exc
+            logger.exception("input source %r thread died", self.name)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event = threading.Event()
+        self.last_error = None
         self._thread = threading.Thread(
-            target=self._run, args=(self._stop_event,), name=f"source-{self.name}", daemon=True
+            target=self._guarded_run,
+            args=(self._stop_event,),
+            name=f"source-{self.name}",
+            daemon=True,
         )
         self._thread.start()
 

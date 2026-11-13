@@ -36,3 +36,33 @@ def test_replay_uses_injected_parser(tmp_path: Path):
 def test_replay_missing_file_raises_filenotfound(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         ReplaySource(tmp_path / "nope.jsonl")
+
+
+def _line(t_ns: int, src: str = "studio") -> str:
+    return json.dumps({"t_ns": t_ns, "src": src, "payload_b64": base64.b64encode(b"x").decode()})
+
+
+def test_replay_unknown_src_raises_at_construction(tmp_path: Path):
+    p = tmp_path / "cap.jsonl"
+    p.write_text(_line(0, "mystery") + "\n")
+    with pytest.raises(ValueError, match="mystery"):
+        ReplaySource(p)
+
+
+def test_replay_skips_malformed_lines(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    p = tmp_path / "cap.jsonl"
+    p.write_text(
+        "\n".join([_line(0), "{not json", '{"src": "studio"}', _line(1_000_000), _line(2_000_000)])
+        + "\n"
+    )
+    src = ReplaySource(p, parser=FakeParser(), speed=100, loop=False)
+    with caplog.at_level("WARNING"):
+        src.start()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and src.status().frames < 3:
+            time.sleep(0.01)
+        time.sleep(0.05)
+    src.stop()
+    assert src.status().frames == 3
+    assert src.last_error is None
+    assert any("2 malformed" in r.getMessage() for r in caplog.records)

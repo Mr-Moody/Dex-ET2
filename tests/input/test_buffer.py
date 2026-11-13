@@ -36,3 +36,24 @@ def test_timestamp_anomaly_counted():
     assert st.frames == 3
     got = b.get().left
     assert got is not None and got.device_time_us == 15
+
+
+def test_run_exception_is_logged_and_stored(caplog):
+    import threading
+    import time
+
+    from teleop.input.buffer import ThreadedSource
+
+    class Boom(ThreadedSource):
+        def _run(self, stop: threading.Event) -> None:
+            raise RuntimeError("boom")
+
+    src = Boom("boom")
+    with caplog.at_level("ERROR"):
+        src.start()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and src.last_error is None:
+            time.sleep(0.01)
+    src.stop()
+    assert isinstance(src.last_error, RuntimeError)
+    assert any("boom" in r.getMessage() or r.exc_info for r in caplog.records)
