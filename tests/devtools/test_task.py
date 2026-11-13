@@ -160,3 +160,17 @@ def test_list_shows_owner_and_ready(
     assert "agentA" in capsys.readouterr().out
     assert main(["list", "--ready"]) == 0
     assert "T-1" not in capsys.readouterr().out
+
+
+def test_reclaim_after_remote_release(repos: tuple[Path, Path, Path], monkeypatch) -> None:
+    _, a, b = repos
+    monkeypatch.chdir(a)
+    assert main(["claim", "T-1", "--agent", "agentA"]) == 0
+    monkeypatch.chdir(b)
+    assert main(["claim", "T-1", "--agent", "agentB"]) == 1  # fetches A's ref into b
+    assert git(b, "show-ref", "refs/claims/T-1").returncode == 0
+    monkeypatch.chdir(a)
+    assert main(["release", "T-1"]) == 0
+    monkeypatch.chdir(b)
+    assert main(["claim", "T-1", "--agent", "agentB"]) == 0
+    assert load_tasks(b / "tasks")[0].owner == "agentB"

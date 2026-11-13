@@ -161,7 +161,7 @@ def cmd_claim(root: Path, tid: str, agent: str, fetch: bool) -> int:
         _err(f"unknown task {tid}")
         return 1
     if fetch:
-        r = _git("fetch", "origin", "+refs/claims/*:refs/claims/*", cwd=root)
+        r = _git("fetch", "--prune", "origin", "+refs/claims/*:refs/claims/*", cwd=root)
         if r.returncode != 0:
             _err(f"warning: could not fetch claims from origin (offline?): {r.stderr.strip()}")
     now = datetime.now(UTC).isoformat(timespec="seconds")
