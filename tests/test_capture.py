@@ -46,3 +46,19 @@ def test_capture_port_in_use_message(tmp_path: Path, capsys: pytest.CaptureFixtu
         )  # fmt: skip
     assert rc == 1
     assert "cannot bind" in capsys.readouterr().err
+
+
+def test_capture_bad_out_path_message(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    rc = main(
+        ["--port", str(port), "--seconds", "0.1", "--out", str(blocker / "x.jsonl"),
+         "--host", "127.0.0.1"]
+    )  # fmt: skip
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "cannot write output file" in err
+    assert "cannot bind" not in err

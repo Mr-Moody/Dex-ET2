@@ -11,14 +11,21 @@ import time
 from pathlib import Path
 
 
+class CaptureBindError(OSError):
+    """Binding the UDP socket failed (as opposed to file I/O on the output path)."""
+
+
 def record_raw(host: str, port: int, seconds: float, out: Path) -> int:
     """Receive datagrams for ``seconds`` and write one ``{t_ns, src, payload_b64}`` per line."""
-    out.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.bind((host, port))
+        try:
+            sock.bind((host, port))
+        except OSError as exc:
+            raise CaptureBindError(str(exc)) from exc
         sock.settimeout(0.2)
+        out.parent.mkdir(parents=True, exist_ok=True)  # only after a successful bind
         deadline = time.monotonic() + seconds
         with out.open("w", encoding="utf-8", newline="\n") as fh:
             while time.monotonic() < deadline:
@@ -53,6 +60,13 @@ def main(argv: list[str]) -> int:
     try:
         n = record_raw(ns.host, ns.port, ns.seconds, ns.out)
     except OSError as exc:
+        if not isinstance(exc, CaptureBindError):
+            print(
+                f"teleop capture: cannot write output file {ns.out} ({exc})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
         print(
             f"teleop capture: cannot bind UDP {ns.host}:{ns.port} ({exc}); "
             "is another capture or teleop process using the port?",

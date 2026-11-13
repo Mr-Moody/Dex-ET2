@@ -250,11 +250,11 @@ def test_studio_source_tees_raw(tmp_path: Path):
 
 def test_nan_timestamp_keeps_frames():
     base = json.loads(load_payloads("coil_on")[0])
-    for bad in ("NaN", "Infinity", True, 1e400):
+    for bad in (float("nan"), float("inf"), float("-inf"), True, "NaN"):
         base["scene"]["timestamp"] = bad
         raw = json.dumps(base).encode()
-        if bad == 1e400:
-            raw = raw.replace(b"Infinity", b"1e999")
+        if isinstance(bad, float):
+            assert b'"timestamp": ' + json.dumps(bad).encode() in raw  # real non-finite literal
         frames = StudioParser().parse(raw, 1)
         assert len(frames) == 2
         assert all(f.device_time_us is None for f in frames)
@@ -274,6 +274,9 @@ def test_tee_write_error_does_not_kill_source(tmp_path: Path):
     src = StudioSource(StudioConfig(host="127.0.0.1", port=0, tee_raw=tmp_path / "t.jsonl"))
     src.start()
     try:
+        real_tee = src._tee  # pyright: ignore[reportPrivateUsage]
+        assert real_tee is not None
+        real_tee.close()  # release the Windows file lock
         src._tee = _FailingTee()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
         _send_some(src.bound_port(), payload, 5)
         deadline = time.monotonic() + 1.0
@@ -293,3 +296,15 @@ def test_start_failure_does_not_leak_socket(tmp_path: Path):
     with pytest.raises(OSError):
         src.start()
     assert src._sock is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_bind_failure_does_not_truncate_tee(tmp_path: Path):
+    tee_path = tmp_path / "keep.jsonl"
+    tee_path.write_text("previous recording\n")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        port = holder.getsockname()[1]
+        src = StudioSource(StudioConfig(host="127.0.0.1", port=port, tee_raw=tee_path))
+        with pytest.raises(OSError):
+            src.start()
+    assert tee_path.read_text() == "previous recording\n"

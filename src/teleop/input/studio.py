@@ -262,18 +262,16 @@ class StudioSource(ThreadedSource):
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        tee: IO[str] | None = None
-        if self._cfg.tee_raw is not None:  # open before binding so a failure cannot leak the socket
-            self._cfg.tee_raw.parent.mkdir(parents=True, exist_ok=True)
-            tee = self._cfg.tee_raw.open("w", encoding="utf-8", newline="\n")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tee: IO[str] | None = None
         try:
             sock.bind((self._cfg.host, self._cfg.port))
             sock.settimeout(0.1)
+            if self._cfg.tee_raw is not None:  # only after a successful bind (open truncates)
+                self._cfg.tee_raw.parent.mkdir(parents=True, exist_ok=True)
+                tee = self._cfg.tee_raw.open("w", encoding="utf-8", newline="\n")
         except OSError:
             sock.close()
-            if tee is not None:
-                tee.close()
             raise
         self._sock = sock
         self._tee = tee
