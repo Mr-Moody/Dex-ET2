@@ -16,6 +16,7 @@ from teleop.input.buffer import ThreadedSource
 from teleop.protocols import PacketParser
 
 logger = logging.getLogger(__name__)
+_LOOP_GAP_S = 1.0 / 60.0  # nominal frame period between loop passes
 
 
 class ReplaySource(ThreadedSource):
@@ -105,5 +106,5 @@ class ReplaySource(ThreadedSource):
                 logger.warning("replay %s: skipped %d malformed line(s)", self._path, skipped)
             if not self._loop:
                 return
-            if stop.wait(0.001):  # never spin hot on tiny or zero-delta files
+            if stop.wait(_LOOP_GAP_S / self._speed):  # bound rate on tiny/zero-delta files
                 return

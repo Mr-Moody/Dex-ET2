@@ -61,8 +61,21 @@ def test_replay_skips_malformed_lines(tmp_path: Path, caplog: pytest.LogCaptureF
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and src.status().frames < 3:
             time.sleep(0.01)
-        time.sleep(0.05)
+        while time.monotonic() < deadline and not any(
+            "malformed" in r.getMessage() for r in caplog.records
+        ):
+            time.sleep(0.01)
     src.stop()
     assert src.status().frames == 3
     assert src.last_error is None
     assert any("2 malformed" in r.getMessage() for r in caplog.records)
+
+
+def test_replay_loop_zero_delta_rate_bounded(tmp_path: Path):
+    p = tmp_path / "cap.jsonl"
+    p.write_text(_line(0) + "\n")
+    src = ReplaySource(p, parser=FakeParser(), speed=1.0, loop=True)
+    src.start()
+    time.sleep(0.5)
+    src.stop()
+    assert 1 <= src.status().frames <= 40
