@@ -246,3 +246,50 @@ def test_studio_source_tees_raw(tmp_path: Path):
     assert recs[0]["src"] == "studio"
     assert base64.b64decode(recs[0]["payload_b64"]) == payload
     assert isinstance(recs[0]["t_ns"], int)
+
+
+def test_nan_timestamp_keeps_frames():
+    base = json.loads(load_payloads("coil_on")[0])
+    for bad in ("NaN", "Infinity", True, 1e400):
+        base["scene"]["timestamp"] = bad
+        raw = json.dumps(base).encode()
+        if bad == 1e400:
+            raw = raw.replace(b"Infinity", b"1e999")
+        frames = StudioParser().parse(raw, 1)
+        assert len(frames) == 2
+        assert all(f.device_time_us is None for f in frames)
+
+
+class _FailingTee:
+    def write(self, _s: str) -> int:
+        raise OSError("disk full")
+
+    def flush(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+def test_tee_write_error_does_not_kill_source(tmp_path: Path):
+    payload = load_payloads("coil_on")[0]
+    src = StudioSource(StudioConfig(host="127.0.0.1", port=0, tee_raw=tmp_path / "t.jsonl"))
+    src.start()
+    try:
+        src._tee = _FailingTee()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        _send_some(src.bound_port(), payload, 5)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and src.status().frames < 2:
+            time.sleep(0.01)
+        assert src.latest().right is not None
+        assert src.last_error is None
+        assert src._thread is not None and src._thread.is_alive()  # pyright: ignore[reportPrivateUsage]
+    finally:
+        src.stop()
+
+
+def test_start_failure_does_not_leak_socket(tmp_path: Path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    src = StudioSource(StudioConfig(host="127.0.0.1", port=0, tee_raw=blocker / "tee.jsonl"))
+    with pytest.raises(OSError):
+        src.start()
+    assert src._sock is None  # pyright: ignore[reportPrivateUsage]

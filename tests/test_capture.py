@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from teleop.commands.capture import main
 
 
@@ -32,3 +34,15 @@ def test_capture_writes_raw_jsonl(tmp_path: Path):
     assert recs[0]["src"] == "studio"
     assert base64.b64decode(recs[0]["payload_b64"]) == b'{"hello": 1}'
     assert recs[0]["t_ns"] <= recs[-1]["t_ns"]
+
+
+def test_capture_port_in_use_message(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        port = holder.getsockname()[1]
+        rc = main(
+            ["--port", str(port), "--seconds", "0.1", "--out", str(tmp_path / "x.jsonl"),
+             "--host", "127.0.0.1"]
+        )  # fmt: skip
+    assert rc == 1
+    assert "cannot bind" in capsys.readouterr().err

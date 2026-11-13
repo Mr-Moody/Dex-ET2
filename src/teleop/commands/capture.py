@@ -6,6 +6,7 @@ import argparse
 import base64
 import json
 import socket
+import sys
 import time
 from pathlib import Path
 
@@ -49,7 +50,16 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ns = ap.parse_args(argv)
     print(f"capturing UDP {ns.host}:{ns.port} for {ns.seconds:g}s -> {ns.out}", flush=True)
-    n = record_raw(ns.host, ns.port, ns.seconds, ns.out)
+    try:
+        n = record_raw(ns.host, ns.port, ns.seconds, ns.out)
+    except OSError as exc:
+        print(
+            f"teleop capture: cannot bind UDP {ns.host}:{ns.port} ({exc}); "
+            "is another capture or teleop process using the port?",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     print(f"wrote {n} datagrams to {ns.out}", flush=True)
     if n == 0:
         print("teleop capture: no packets received; check Studio streaming target/IP", flush=True)

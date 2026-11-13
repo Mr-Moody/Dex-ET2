@@ -7,6 +7,7 @@ Studio sends per-bone *world* rotations; ``HandFrame.joints`` holds *local* rota
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib
 import json
 import logging
@@ -188,7 +189,12 @@ class StudioParser:
         meta = _as_dict(actor.get("meta"))
         body = _as_dict(actor["body"])
         ts = scene.get("timestamp")
-        device_us = int(float(ts) * 1e6) if isinstance(ts, int | float) else None
+        device_us: int | None = None
+        if isinstance(ts, int | float) and not isinstance(ts, bool):
+            try:
+                device_us = int(float(ts) * 1e6)
+            except (ValueError, OverflowError):  # NaN / inf
+                device_us = None
         frames: list[HandFrame] = []
         sides: tuple[tuple[Side, str], ...] = (("left", "hasLeftGlove"), ("right", "hasRightGlove"))
         for side, flag in sides:
@@ -256,17 +262,21 @@ class StudioSource(ThreadedSource):
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        tee: IO[str] | None = None
+        if self._cfg.tee_raw is not None:  # open before binding so a failure cannot leak the socket
+            self._cfg.tee_raw.parent.mkdir(parents=True, exist_ok=True)
+            tee = self._cfg.tee_raw.open("w", encoding="utf-8", newline="\n")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.bind((self._cfg.host, self._cfg.port))
+            sock.settimeout(0.1)
         except OSError:
             sock.close()
+            if tee is not None:
+                tee.close()
             raise
-        sock.settimeout(0.1)
         self._sock = sock
-        if self._cfg.tee_raw is not None:
-            self._cfg.tee_raw.parent.mkdir(parents=True, exist_ok=True)
-            self._tee = self._cfg.tee_raw.open("w", encoding="utf-8", newline="\n")
+        self._tee = tee
         super().start()
 
     def bound_port(self) -> int:
@@ -295,13 +305,20 @@ class StudioSource(ThreadedSource):
             except ConnectionResetError:  # Windows ICMP reset noise
                 continue
             now = time.monotonic_ns()
-            if self._tee is not None:
+            tee = self._tee
+            if tee is not None:
                 rec = {
                     "t_ns": now,
                     "src": "studio",
                     "payload_b64": base64.b64encode(data).decode("ascii"),
                 }
-                self._tee.write(json.dumps(rec, separators=(",", ":")) + "\n")
-                self._tee.flush()
+                try:
+                    tee.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                    tee.flush()
+                except (OSError, ValueError):
+                    logger.exception("studio tee write failed; disabling raw tee")
+                    self._tee = None
+                    with contextlib.suppress(OSError, ValueError):
+                        tee.close()
             for frame in self._parser.parse(data, now):
                 self._buffer.put(frame)
