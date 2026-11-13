@@ -1,7 +1,7 @@
 ---
 id: T-010
 title: Hotspot manager + keep-alive watchdog (Windows)
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-010-hotspot
 depends_on: [T-003]
