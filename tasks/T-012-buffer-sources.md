@@ -1,7 +1,7 @@
 ---
 id: T-012
 title: Latest-value buffer, threaded source base, Synthetic + Replay sources
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-012-sources
 depends_on: [T-003]
