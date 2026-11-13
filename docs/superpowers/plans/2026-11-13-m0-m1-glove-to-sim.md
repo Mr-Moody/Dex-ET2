@@ -25,7 +25,7 @@ M2 (booth app, processing/QC) and M3 (train/eval/attract) get their own plan, wr
 - Robot, task, input source, wrist source and sink are chosen by config string through `teleop.registry`. Never hard-code them.
 - No test or CI job may need gloves, Studio, the hotspot, a GPU or a display. Hardware-only checks are marked `@pytest.mark.hardware` and deselected by default.
 - Never commit `.env`, licences, `data/`, `outputs/`. The exception is small trimmed captures under `tests/fixtures/` (each <200 KB).
-- Conventional Commits `type(scope): summary`, scopes `input|sim|retarget|record|train|cli|infra|docs|tasks|net`. Branch `<type>/T-NNN-<kebab>`. Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Conventional Commits `type(scope): summary`, scopes `input|sim|retarget|record|train|cli|infra|docs|tasks|net`. Branch `<type>/T-NNN-<kebab>`. No AI co-author trailers or "Generated with" lines in commits or PRs.
 - Verification before any PR: `uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest` all pass. Paste the output in the PR.
 
 ## Review Focus
