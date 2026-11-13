@@ -6,7 +6,9 @@ Plan: `docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md`.
 ## Rules
 
 - `main` is protected. No direct pushes. Every change lands via a PR into `main`, squash-merged.
-- Branch names: `<type>/<task-id>-<kebab-summary>`, e.g. `feat/T-007-rgmp-parser`.
+- Branch names: `<type>/<kebab-summary>`, a real descriptive name, e.g. `feat/rgmp-parser`.
+  Worktree directories use the same summary, e.g. `rgmp-parser`. Do not include agent names,
+  wave numbers or task IDs (`T-NNN`) in branch or worktree names; reference the task in the PR.
 - Commit messages and PR titles follow Conventional Commits 1.0: `type(scope): imperative summary`.
   - Types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`, `style`, `revert`.
   - Scopes: `input`, `sim`, `retarget`, `record`, `train`, `cli`, `infra`, `docs`, `tasks`, `net`.
