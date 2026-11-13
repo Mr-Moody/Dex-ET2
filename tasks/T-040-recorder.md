@@ -1,12 +1,12 @@
 ---
 id: T-040
 title: LeRobot episode recorder
-status: todo
-owner: null
-branch: null
+status: done
+owner: lead-laptop
+branch: feat/T-040-recorder
 depends_on: [T-003]
 plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-040-recorder
-claimed_at: null
+claimed_at: '2026-11-13T22:30:19+00:00'
 ---
 
 Acceptance (from the plan):
