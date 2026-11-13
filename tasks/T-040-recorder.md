@@ -1,7 +1,7 @@
 ---
 id: T-040
 title: LeRobot episode recorder
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-040-recorder
 depends_on: [T-003]
