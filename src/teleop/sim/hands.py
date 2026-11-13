@@ -64,3 +64,16 @@ def joint_names(spec: HandSpec, side: Side) -> list[str]:
     """Unprefixed joint names, in model order."""
     m = _model(spec, side)
     return [str(m.joint(i).name) for i in range(int(m.njnt))]
+
+
+def actuator_ranges(spec: HandSpec, side: Side) -> dict[str, tuple[float, float]]:
+    """Unprefixed actuator name -> ctrlrange, for ctrl-limited actuators only."""
+    m = _model(spec, side)
+    return {
+        str(m.actuator(i).name): (
+            float(m.actuator_ctrlrange[i][0]),
+            float(m.actuator_ctrlrange[i][1]),
+        )
+        for i in range(int(m.nu))
+        if bool(m.actuator_ctrllimited[i])
+    }
