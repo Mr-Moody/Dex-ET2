@@ -1,7 +1,7 @@
 ---
 id: T-011
 title: Studio raw capture + StudioSource parser
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-011-studio-parser
 depends_on: [T-003]
