@@ -1,12 +1,12 @@
 ---
 id: T-020
 title: Hand models and per-hand config
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: lead-laptop
+branch: feat/T-020-hand-models
 depends_on: [T-003]
 plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-020-hand-models
-claimed_at: null
+claimed_at: '2026-11-13T22:19:00+00:00'
 ---
 
 Acceptance (from the plan):

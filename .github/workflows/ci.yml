@@ -17,6 +17,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-groups
+      - name: fetch hand models
+        run: uv run python scripts/fetch_models.py
       - name: ruff check
         run: uv run ruff check .
       - name: ruff format
