@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libegl1
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libosmesa6
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -26,4 +26,6 @@ jobs:
       - name: pyright
         run: uv run pyright
       - name: pytest
+        env:
+          MUJOCO_GL: osmesa
         run: uv run pytest

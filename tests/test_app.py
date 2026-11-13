@@ -239,6 +239,7 @@ def test_calibrate_from_replay_writes_ranges(tmp_path: Path, capsys) -> None:
 
 @needs_leap
 @pytest.mark.lerobot
+@pytest.mark.usefixtures("offscreen_render_ok")
 def test_record_two_short_episodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("lerobot")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
