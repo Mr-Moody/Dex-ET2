@@ -1,0 +1,67 @@
+[project]
+name = "teleop"
+version = "0.1.0"
+description = "Rokoko glove teleoperation booth: gloves to MuJoCo to LeRobot datasets"
+authors = [
+    { name = "Mr-Moody", email = "118393511+Mr-Moody@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "draccus>=0.10.0",
+    "lz4>=4.4.5",
+    "mujoco>=4.0.1",
+    "numpy>=2.0",
+    "python-dotenv>=1.2.4",
+    "pyyaml>=6.0.3",
+    "winrt-runtime>=4.1.0 ; sys_platform == 'win32'",
+    "winrt-windows-foundation>=4!10.0.28000.2957 ; sys_platform == 'win32'",
+    "winrt-windows-networking-connectivity>=4!10.0.28000.2957 ; sys_platform == 'win32'",
+    "winrt-windows-networking-networkoperators>=4!10.0.28000.2957 ; sys_platform == 'win32'",
+]
+
+[project.scripts]
+teleop = "teleop.cli:main"
+task = "teleop.devtools.task:main"
+
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "conventional-pre-commit>=4.5.0",
+    "hypothesis>=6.170.15",
+    "pre-commit>=4.7.0",
+    "pyright>=1.1.414",
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.5",
+]
+train = [
+    "lerobot>=0.4",
+]
+viz = [
+    "rerun-sdk>=0.43.2",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["src/teleop/net/winrt_backend.py"]
+typeCheckingMode = "basic"
+strict = ["src/teleop"]
+pythonVersion = "3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = '-m "not hardware"'
+markers = [
+    "hardware: needs gloves, Studio, the hotspot, a GPU or a display (deselected by default)",
+    "lerobot: needs the optional lerobot (train group); use pytest.importorskip",
+]
