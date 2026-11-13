@@ -1,11 +1,11 @@
 ---
 id: T-060
 title: Booth app
-status: blocked
+status: todo
 owner: null
 branch: null
 depends_on: [T-050]
-plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-060-booth-app
+plan: docs/superpowers/plans/2026-11-14-m2-m3-booth-train.md#task-t-060
 claimed_at: null
 ---
 

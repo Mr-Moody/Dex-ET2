@@ -1,11 +1,11 @@
 ---
 id: T-061
 title: Process and QC
-status: blocked
+status: todo
 owner: null
 branch: null
 depends_on: [T-040]
-plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-061-process-qc
+plan: docs/superpowers/plans/2026-11-14-m2-m3-booth-train.md#task-t-061
 claimed_at: null
 ---
 
