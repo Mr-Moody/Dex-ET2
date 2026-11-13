@@ -1,11 +1,11 @@
 ---
 id: T-070
 title: Train, eval, attract mode
-status: blocked
+status: todo
 owner: null
 branch: null
 depends_on: [T-061]
-plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-070-train-eval-attract
+plan: docs/superpowers/plans/2026-11-14-m2-m3-booth-train.md#task-t-070
 claimed_at: null
 ---
 
