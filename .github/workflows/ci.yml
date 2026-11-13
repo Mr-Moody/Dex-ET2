@@ -26,4 +26,6 @@ jobs:
       - name: pyright
         run: uv run pyright
       - name: pytest
+        # Offscreen-render tests self-skip via the offscreen_render_ok probe when EGL can't render (no GPU).
+        # MUJOCO_GL=osmesa segfaults when torchvision is imported alongside it, so stay on egl.
         run: uv run pytest
