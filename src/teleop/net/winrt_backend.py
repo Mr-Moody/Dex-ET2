@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from typing import Any
+
+from teleop.net.hotspot import wait_for_config
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +25,8 @@ def _run(awaitable: Any) -> Any:
 
 
 class WinRTTetheringBackend:
-    def __init__(self) -> None:
+    def __init__(self, sleep: Callable[[float], object] = time.sleep) -> None:
+        self._sleep = sleep
         try:
             import winrt.windows.networking.connectivity as conn
             import winrt.windows.networking.networkoperators as ops
@@ -92,7 +97,7 @@ class WinRTTetheringBackend:
         if result is not None and hasattr(result, "status"):
             self._check(result, "configure access point")
         # IAsyncAction is void: read back to verify the apply took effect.
-        got = self.current_config()
+        got = wait_for_config(self.current_config, (ssid, band), sleep=self._sleep)
         if got != (ssid, band):
             raise WinRTBackendError(f"configure did not apply (now ssid={got[0]!r} band={got[1]})")
 

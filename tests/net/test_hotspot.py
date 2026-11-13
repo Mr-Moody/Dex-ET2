@@ -13,6 +13,7 @@ from teleop.net.hotspot import (
     HotspotConfigError,
     HotspotWatchdog,
     load_password,
+    wait_for_config,
 )
 
 PASSWORD = "supersecret"
@@ -178,3 +179,61 @@ def test_reconfigure_backoff() -> None:
     now[0] = 61_000_000_000
     assert hs.ensure_up() == ["error: reconfigure did not apply"]
     assert len(fake.configured) > attempts
+
+
+class Rejecting(FakeBackend):
+    def configure(self, ssid: str, password: str, band: str) -> None:
+        self.configured.append((ssid, password, band))  # never applies
+        self.stops = getattr(self, "stops", 0)
+
+    def stop(self) -> None:
+        self.stops = getattr(self, "stops", 0) + 1
+        super().stop()
+
+
+def test_restart_fallback_capped_per_10min() -> None:
+    fake = Rejecting(state="on", ssid="Drifted", band="2.4GHz")
+    now = [0]
+    hs = Hotspot(fake, password=PASSWORD, clock=lambda: now[0])
+    for t in (0, 61, 122, 183, 300, 599):
+        now[0] = t * 1_000_000_000
+        assert hs.ensure_up() == ["error: reconfigure did not apply"]
+    assert fake.stops == 1
+    now[0] = 660 * 1_000_000_000
+    hs.ensure_up()
+    assert fake.stops == 2
+
+
+def test_readback_waits_for_async_apply() -> None:
+    want = (DEFAULT_SSID, "2.4GHz")
+    reads = 0
+
+    def read() -> tuple[str, str]:
+        nonlocal reads
+        reads += 1
+        return want if reads >= 3 else ("Old", "5GHz")
+
+    sleeps: list[float] = []
+    assert wait_for_config(read, want, sleep=sleeps.append) == want
+    assert reads == 3
+    assert len(sleeps) == 2
+    # never applies: gives up after the timeout
+    got = wait_for_config(lambda: ("Old", "5GHz"), want, sleep=lambda _s: None)
+    assert got == ("Old", "5GHz")
+
+
+def test_readback_exception_is_failed_attempt() -> None:
+    fake = FakeBackend(state="on", ssid="Drifted", band="2.4GHz")
+    calls = 0
+    real = fake.current_config
+
+    def flaky() -> tuple[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the read-back right after the first configure
+            raise RuntimeError("readback boom")
+        return real()
+
+    fake.current_config = flaky  # type: ignore[method-assign]
+    events = Hotspot(fake, password=PASSWORD).ensure_up()
+    assert events == ["restarted-for-reconfigure"]

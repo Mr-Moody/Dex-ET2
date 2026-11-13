@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 DEFAULT_SSID = "Router? I barely know 'er"
 DEFAULT_BAND = "2.4GHz"
 RECONFIG_BACKOFF_NS = 60_000_000_000
+RESTART_COOLDOWN_NS = 600_000_000_000
 
 HotspotState = Literal["on", "off", "transitioning", "unknown"]
 
@@ -46,6 +47,23 @@ def load_password(env_file: Path = Path(".env")) -> str:
     return value
 
 
+def wait_for_config(
+    read: Callable[[], tuple[str, str]],
+    want: tuple[str, str],
+    timeout_s: float = 2.0,
+    interval_s: float = 0.2,
+    sleep: Callable[[float], object] = time.sleep,
+) -> tuple[str, str]:
+    """Poll ``read`` until it returns ``want`` or the timeout elapses; return the last value."""
+    got = read()
+    waited = 0.0
+    while got != want and waited < timeout_s:
+        sleep(interval_s)
+        waited += interval_s
+        got = read()
+    return got
+
+
 class Hotspot:
     def __init__(
         self,
@@ -58,6 +76,7 @@ class Hotspot:
     ) -> None:
         self._clock = clock
         self._next_reconfig_ns = 0
+        self._last_restart_ns: int | None = None
         self._backend = backend
         self._ssid = ssid
         self._password = password
@@ -83,17 +102,23 @@ class Hotspot:
     def _try_configure(self, want: tuple[str, str]) -> bool:
         try:
             self._backend.configure(self._ssid, self._password, self._band)
+            return self._backend.current_config() == want
         except Exception as exc:
-            log.warning("hotspot configure rejected: %s", exc)
+            log.warning("hotspot configure failed: %s", exc)
             return False
-        return self._backend.current_config() == want
 
     def _reconfigure(self, want: tuple[str, str]) -> list[str]:
         if self._try_configure(want):
             self._next_reconfig_ns = 0
             return ["reconfigured"]
-        if self._backend.state() == "on":
+        now = self._clock()
+        bounce_ok = self._last_restart_ns is None or now - self._last_restart_ns >= (
+            RESTART_COOLDOWN_NS
+        )
+        if self._backend.state() == "on" and bounce_ok:
             # Some Windows builds reject reconfiguration while tethering is on.
+            # A bounce drops clients, so it is rate limited.
+            self._last_restart_ns = now
             self._backend.stop()
             applied = self._try_configure(want)
             self._backend.start()
