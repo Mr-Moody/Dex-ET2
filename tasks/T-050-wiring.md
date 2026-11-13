@@ -1,12 +1,12 @@
 ---
 id: T-050
 title: teleop sim / calibrate / record wiring, latency, live check
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: lead-laptop
+branch: feat/T-050-teleop-sim
 depends_on: [T-011, T-012, T-021, T-030, T-031, T-040]
 plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-050-wiring
-claimed_at: null
+claimed_at: '2026-11-13T22:54:30+00:00'
 ---
 
 **Step 6 is hardware laptop only.**
