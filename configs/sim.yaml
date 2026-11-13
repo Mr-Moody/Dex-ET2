@@ -1,0 +1,23 @@
+source: synthetic
+hand: inspire
+task: lift_cube
+sink: sim
+retargeter: direct
+control_hz: 60
+physics_hz: 600
+record_fps: 30
+headless: false
+studio:
+  host: 0.0.0.0
+  port: 14043
+wrist:
+  mode: auto
+  home_left: [-0.25, 0.0, 0.25]
+  home_right: [0.25, 0.0, 0.25]
+  studio_to_sim_offset: [0.0, 0.0, 0.0]
+  studio_to_sim_scale: 1.0
+  nudge_step_m: 0.01
+cameras:
+  - name: front
+    width: 224
+    height: 224
