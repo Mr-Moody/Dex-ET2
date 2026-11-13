@@ -32,7 +32,7 @@ class HandSpec:
     flex: list[FlexMap]
 
 
-def load_hand(name: str, configs_dir: Path = Path("configs/hands")) -> HandSpec:
+def load_hand(name: str, configs_dir: Path = REPO_ROOT / "configs" / "hands") -> HandSpec:
     """Load ``<configs_dir>/<name>.yaml``. Relative MJCF paths resolve from the repo root."""
     raw = yaml.safe_load((configs_dir / f"{name}.yaml").read_text(encoding="utf-8"))
 

@@ -44,7 +44,9 @@ SOURCES = (
 
 
 def git(*args: str, cwd: Path) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=300
+    )
     return result.stdout.strip()
 
 
@@ -78,6 +80,9 @@ def main() -> int:
     try:
         for src in SOURCES:
             fetch(src)
+    except subprocess.TimeoutExpired as exc:
+        print(f"git timed out: {exc.cmd}", file=sys.stderr)
+        return 1
     except subprocess.CalledProcessError as exc:
         print(f"git failed: {exc.cmd}\n{exc.stderr}", file=sys.stderr)
         return 1

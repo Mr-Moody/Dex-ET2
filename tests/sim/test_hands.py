@@ -9,18 +9,27 @@ from teleop.types import OPENXR_JOINTS, SIDES
 ROOT = Path(__file__).resolve().parents[2]
 HANDS = ["inspire", "leap"]
 
-pytestmark = pytest.mark.skipif(
-    not (ROOT / "third_party" / "menagerie").exists()
-    or not (ROOT / "third_party" / "inspire").exists(),
-    reason="third_party/ models missing; run `uv run python scripts/fetch_models.py`",
-)
+
+def _mjcf_present(name: str) -> bool:
+    try:
+        spec = load_hand(name, ROOT / "configs" / "hands")
+    except FileNotFoundError:
+        return False
+    return all(p.is_file() for p in spec.mjcf.values())
+
+
+def needs_models(name: str):
+    return pytest.mark.skipif(
+        not _mjcf_present(name),
+        reason="hand MJCFs missing; run `uv run python scripts/fetch_models.py`",
+    )
 
 
 def spec_for(name: str) -> HandSpec:
     return load_hand(name, ROOT / "configs" / "hands")
 
 
-@pytest.mark.parametrize("name", HANDS)
+@pytest.mark.parametrize("name", [pytest.param(n, marks=needs_models(n)) for n in HANDS])
 def test_hand_loads_in_mujoco(name: str) -> None:
     spec = spec_for(name)
     for side in SIDES:
@@ -33,7 +42,7 @@ def test_hand_loads_in_mujoco(name: str) -> None:
         assert spec.base_body in [model.body(i).name for i in range(model.nbody)]
 
 
-@pytest.mark.parametrize("name", HANDS)
+@pytest.mark.parametrize("name", [pytest.param(n, marks=needs_models(n)) for n in HANDS])
 def test_flexmap_actuators_exist(name: str) -> None:
     spec = spec_for(name)
     for side in SIDES:
@@ -49,3 +58,8 @@ def test_flexmap_joints_are_openxr(name: str) -> None:
         assert fm.axis in ("x", "y", "z")
         for joint in fm.joints:
             assert joint in OPENXR_JOINTS, joint
+
+
+def test_load_hand_from_other_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert load_hand("inspire").name == "inspire"
