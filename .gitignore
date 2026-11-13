@@ -220,8 +220,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Project
-data/
-outputs/
+/data/
+/outputs/
 .env
 third_party/*
 !third_party/README.md
