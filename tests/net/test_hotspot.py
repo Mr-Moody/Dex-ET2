@@ -1,0 +1,239 @@
+"""Hotspot manager and watchdog tests against an in-memory backend."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import pytest
+
+from teleop.net.hotspot import (
+    DEFAULT_SSID,
+    Hotspot,
+    HotspotConfigError,
+    HotspotWatchdog,
+    load_password,
+    wait_for_config,
+)
+
+PASSWORD = "supersecret"
+
+
+class FakeBackend:
+    def __init__(self, state: str = "off", ssid: str = "Other", band: str = "5GHz") -> None:
+        self._state = state
+        self.ssid = ssid
+        self.band = band
+        self.supported = True
+        self.idle_calls = 0
+        self.configured: list[tuple[str, str, str]] = []
+
+    def state(self) -> Literal["on", "off", "transitioning", "unknown"]:
+        return self._state  # type: ignore[return-value]
+
+    def client_count(self) -> int:
+        return 0
+
+    def current_config(self) -> tuple[str, str]:
+        return (self.ssid, self.band)
+
+    def band_supported(self, band: str) -> bool:
+        return self.supported
+
+    def configure(self, ssid: str, password: str, band: str) -> None:
+        self.ssid, self.band = ssid, band
+        self.configured.append((ssid, password, band))
+
+    def start(self) -> None:
+        self._state = "on"
+
+    def stop(self) -> None:
+        self._state = "off"
+
+    def disable_idle_timeout(self) -> None:
+        self.idle_calls += 1
+
+
+def test_password_validation(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    with pytest.raises(HotspotConfigError, match=r"\.env"):
+        load_password(tmp_path / "missing.env")
+    for bad in ("1234567", "x" * 64):
+        env.write_text(f"HOTSPOT_PASSWORD={bad}\n")
+        with pytest.raises(HotspotConfigError, match=r"\.env"):
+            load_password(env)
+    env.write_text("HOTSPOT_PASSWORD=12345678\n")
+    assert load_password(env) == "12345678"
+
+
+def test_ensure_up_configures_and_starts() -> None:
+    fake = FakeBackend()
+    events = Hotspot(fake, password=PASSWORD).ensure_up()
+    assert events == ["reconfigured", "started"]
+    assert fake.state() == "on"
+    assert fake.current_config() == (DEFAULT_SSID, "2.4GHz")
+
+
+def test_ensure_up_noop_when_correct() -> None:
+    fake = FakeBackend(state="on", ssid=DEFAULT_SSID, band="2.4GHz")
+    assert Hotspot(fake, password=PASSWORD).ensure_up() == []
+
+
+def test_band_unsupported_raises() -> None:
+    fake = FakeBackend()
+    fake.supported = False
+    with pytest.raises(HotspotConfigError, match=r"2\.4GHz"):
+        Hotspot(fake, password=PASSWORD).ensure_up()
+
+
+def _watchdog(fake: FakeBackend, polls_before_stop: int, mutate: object) -> HotspotWatchdog:
+    hs = Hotspot(fake, password=PASSWORD)
+    box: list[HotspotWatchdog] = []
+    count = 0
+
+    def sleep(_s: float) -> None:
+        nonlocal count
+        count += 1
+        if count == 1:
+            mutate()  # type: ignore[operator]
+        if count >= polls_before_stop:
+            box[0].stop()
+
+    ticks = iter(range(10**6))
+    wd = HotspotWatchdog(hs, interval_s=0.0, sleep=sleep, clock=lambda: next(ticks))
+    box.append(wd)
+    return wd
+
+
+def test_watchdog_restarts_when_off() -> None:
+    fake = FakeBackend(state="on", ssid=DEFAULT_SSID, band="2.4GHz")
+    wd = _watchdog(fake, 3, fake.stop)
+    wd.run()
+    assert "started" in [e for _, e in wd.events]
+    assert fake.state() == "on"
+
+
+def test_reconfigures_on_drift() -> None:
+    fake = FakeBackend(state="on", ssid=DEFAULT_SSID, band="2.4GHz")
+
+    def drift() -> None:
+        fake.ssid = "Evil"
+
+    wd = _watchdog(fake, 3, drift)
+    wd.run()
+    assert "reconfigured" in [e for _, e in wd.events]
+    assert fake.ssid == DEFAULT_SSID
+
+
+def test_disable_idle_timeout_called_once() -> None:
+    fake = FakeBackend()
+    hs = Hotspot(fake, password=PASSWORD)
+    hs.ensure_up()
+    hs.ensure_up()
+    assert fake.idle_calls == 1
+
+
+def test_watchdog_logs_poll_errors() -> None:
+    fake = FakeBackend(state="on", ssid=DEFAULT_SSID, band="2.4GHz")
+
+    def boom() -> int:
+        raise RuntimeError("kaput")
+
+    fake.client_count = boom  # type: ignore[method-assign]
+    fake.state = boom  # type: ignore[method-assign,assignment]
+    wd = _watchdog(fake, 2, lambda: None)
+    wd.run()
+    assert any(e.startswith("error: kaput") for _, e in wd.events)
+
+
+class StrictBackend(FakeBackend):
+    """Rejects configure while the hotspot is on."""
+
+    def configure(self, ssid: str, password: str, band: str) -> None:
+        if self._state == "on":
+            raise RuntimeError("busy")
+        super().configure(ssid, password, band)
+
+
+def test_reconfigure_while_on_falls_back_to_restart() -> None:
+    fake = StrictBackend(state="on", ssid="Drifted", band="2.4GHz")
+    events = Hotspot(fake, password=PASSWORD).ensure_up()
+    assert events == ["restarted-for-reconfigure"]
+    assert fake.state() == "on"
+    assert fake.current_config() == (DEFAULT_SSID, "2.4GHz")
+
+
+def test_reconfigure_backoff() -> None:
+    class Never(FakeBackend):
+        def configure(self, ssid: str, password: str, band: str) -> None:
+            self.configured.append((ssid, password, band))  # silently ignored
+
+    fake = Never(state="on", ssid="Drifted", band="2.4GHz")
+    now = [0]
+    hs = Hotspot(fake, password=PASSWORD, clock=lambda: now[0])
+    assert hs.ensure_up() == ["error: reconfigure did not apply"]
+    attempts = len(fake.configured)
+    now[0] = 30_000_000_000
+    assert hs.ensure_up() == []
+    assert len(fake.configured) == attempts
+    now[0] = 61_000_000_000
+    assert hs.ensure_up() == ["error: reconfigure did not apply"]
+    assert len(fake.configured) > attempts
+
+
+class Rejecting(FakeBackend):
+    def configure(self, ssid: str, password: str, band: str) -> None:
+        self.configured.append((ssid, password, band))  # never applies
+        self.stops = getattr(self, "stops", 0)
+
+    def stop(self) -> None:
+        self.stops = getattr(self, "stops", 0) + 1
+        super().stop()
+
+
+def test_restart_fallback_capped_per_10min() -> None:
+    fake = Rejecting(state="on", ssid="Drifted", band="2.4GHz")
+    now = [0]
+    hs = Hotspot(fake, password=PASSWORD, clock=lambda: now[0])
+    for t in (0, 61, 122, 183, 300, 599):
+        now[0] = t * 1_000_000_000
+        assert hs.ensure_up() == ["error: reconfigure did not apply"]
+    assert fake.stops == 1
+    now[0] = 660 * 1_000_000_000
+    hs.ensure_up()
+    assert fake.stops == 2
+
+
+def test_readback_waits_for_async_apply() -> None:
+    want = (DEFAULT_SSID, "2.4GHz")
+    reads = 0
+
+    def read() -> tuple[str, str]:
+        nonlocal reads
+        reads += 1
+        return want if reads >= 3 else ("Old", "5GHz")
+
+    sleeps: list[float] = []
+    assert wait_for_config(read, want, sleep=sleeps.append) == want
+    assert reads == 3
+    assert len(sleeps) == 2
+    # never applies: gives up after the timeout
+    got = wait_for_config(lambda: ("Old", "5GHz"), want, sleep=lambda _s: None)
+    assert got == ("Old", "5GHz")
+
+
+def test_readback_exception_is_failed_attempt() -> None:
+    fake = FakeBackend(state="on", ssid="Drifted", band="2.4GHz")
+    calls = 0
+    real = fake.current_config
+
+    def flaky() -> tuple[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the read-back right after the first configure
+            raise RuntimeError("readback boom")
+        return real()
+
+    fake.current_config = flaky  # type: ignore[method-assign]
+    events = Hotspot(fake, password=PASSWORD).ensure_up()
+    assert events == ["restarted-for-reconfigure"]
