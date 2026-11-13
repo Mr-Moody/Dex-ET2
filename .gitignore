@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project
+/data/
+/outputs/
+.env
+third_party/*
+!third_party/README.md
+.venv/
