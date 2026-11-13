@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libosmesa6
+        run: sudo apt-get update && sudo apt-get install -y libegl1
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -26,6 +26,6 @@ jobs:
       - name: pyright
         run: uv run pyright
       - name: pytest
-        env:
-          MUJOCO_GL: osmesa
+        # Offscreen-render tests self-skip via the offscreen_render_ok probe when EGL can't render (no GPU).
+        # MUJOCO_GL=osmesa segfaults when torchvision is imported alongside it, so stay on egl.
         run: uv run pytest
