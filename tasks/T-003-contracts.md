@@ -1,7 +1,7 @@
 ---
 id: T-003
 title: Shared contracts, registry, config, dataset schema
-status: todo
+status: done
 owner: null
 branch: null
 depends_on: [T-001, T-002]
