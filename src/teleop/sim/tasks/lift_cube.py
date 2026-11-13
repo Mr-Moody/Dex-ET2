@@ -1,14 +1,15 @@
 """Lift-cube task: pick a 4 cm cube off the table and hold it above 12 cm for 0.5 s."""
-# pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 
 from __future__ import annotations
 
 from typing import Any
 
-import mujoco  # pyright: ignore[reportMissingTypeStubs]
+import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 
 from teleop.types import TaskScore
+
+mj: Any = _mujoco
 
 CUBE_HALF = 0.02
 CUBE_START = (0.0, 0.1, CUBE_HALF)
@@ -32,10 +33,10 @@ class LiftCube:
 
     def add_to_spec(self, spec: Any) -> None:
         body = spec.worldbody.add_body(name="cube", pos=list(CUBE_START))
-        body.add_joint(name="cube_free", type=mujoco.mjtJoint.mjJNT_FREE)
+        body.add_joint(name="cube_free", type=mj.mjtJoint.mjJNT_FREE)
         body.add_geom(
             name="cube_geom",
-            type=mujoco.mjtGeom.mjGEOM_BOX,
+            type=mj.mjtGeom.mjGEOM_BOX,
             size=[CUBE_HALF] * 3,
             mass=0.05,
             rgba=[0.9, 0.2, 0.2, 1],
@@ -57,7 +58,7 @@ class LiftCube:
         ]
         vadr = int(model.joint("cube_free").dofadr[0])
         data.qvel[vadr : vadr + 6] = 0.0
-        mujoco.mj_forward(model, data)
+        mj.mj_forward(model, data)
         self._reset_state(float(data.time))
 
     def score(self, model: Any, data: Any) -> TaskScore:

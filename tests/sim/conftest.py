@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-# pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 from pathlib import Path
+from typing import Any
 
-import mujoco
+import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import pytest
 
 from teleop.config import CameraConfig
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.sim.scene import build_scene
 from teleop.sim.tasks.lift_cube import LiftCube
+
+mj: Any = _mujoco
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,6 +39,6 @@ def hand() -> HandSpec:
 def scene(hand: HandSpec):
     task = LiftCube()
     model = build_scene(hand, task, [CameraConfig()])
-    data = mujoco.MjData(model)
+    data = mj.MjData(model)
     task.reset(model, data, 0)
     return model, data, task
