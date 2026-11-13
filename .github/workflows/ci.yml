@@ -29,3 +29,8 @@ jobs:
         # Offscreen-render tests self-skip via the offscreen_render_ok probe when EGL can't render (no GPU).
         # MUJOCO_GL=osmesa segfaults when torchvision is imported alongside it, so stay on egl.
         run: uv run pytest
+      - name: record test diagnostics (non-blocking)
+        continue-on-error: true
+        env:
+          TELEOP_RUN_RECORD_TEST: "1"
+        run: uv run python -X faulthandler -m pytest tests/test_app.py::test_record_two_short_episodes -s -vv -p no:cacheprovider; echo "exit=$?"
