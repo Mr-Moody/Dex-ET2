@@ -1,7 +1,7 @@
 ---
 id: T-031
 title: Wrist sources (Coil Pro, IMU contingency, auto)
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-031-wrist
 depends_on: [T-012]
