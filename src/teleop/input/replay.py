@@ -106,5 +106,7 @@ class ReplaySource(ThreadedSource):
                 logger.warning("replay %s: skipped %d malformed line(s)", self._path, skipped)
             if not self._loop:
                 return
-            if stop.wait(_LOOP_GAP_S / self._speed):  # bound rate on tiny/zero-delta files
+            if stop.wait(
+                max(_LOOP_GAP_S / self._speed, 0.001)
+            ):  # bound rate on tiny/zero-delta files
                 return
