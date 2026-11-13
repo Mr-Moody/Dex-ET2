@@ -1,7 +1,7 @@
 ---
 id: T-050
 title: teleop sim / calibrate / record wiring, latency, live check
-status: claimed
+status: done
 owner: lead-laptop
 branch: feat/T-050-teleop-sim
 depends_on: [T-011, T-012, T-021, T-030, T-031, T-040]

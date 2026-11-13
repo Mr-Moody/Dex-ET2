@@ -1,7 +1,7 @@
 ---
 id: T-061
 title: Process and QC
-status: in_review
+status: done
 owner: lead-laptop
 branch: feat/T-061-process-qc
 depends_on: [T-040]
