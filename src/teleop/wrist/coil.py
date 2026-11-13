@@ -1,0 +1,43 @@
+"""Wrist source backed by Rokoko Coil Pro world positions."""
+
+from __future__ import annotations
+
+from teleop.config import WristConfig
+from teleop.types import SIDES, HandFrame, Pose, Side, Vec3, WristTarget
+
+
+class CoilWrist:
+    mode = "coil"
+
+    def __init__(self, cfg: WristConfig) -> None:
+        self._cfg = cfg
+        self._recenter: dict[Side, Vec3] = {s: (0.0, 0.0, 0.0) for s in SIDES}
+
+    def _home(self, side: Side) -> Vec3:
+        return self._cfg.home_left if side == "left" else self._cfg.home_right
+
+    def _base(self, frame: HandFrame) -> tuple[Pose, Vec3]:
+        if frame.wrist is None or frame.wrist.position is None:
+            raise ValueError("CoilWrist needs frame.wrist.position (Coil Pro not tracking)")
+        p = frame.wrist.position
+        k = self._cfg.studio_to_sim_scale
+        o = self._cfg.studio_to_sim_offset
+        return frame.wrist, (p[0] * k + o[0], p[1] * k + o[1], p[2] * k + o[2])
+
+    def wrist(self, frame: HandFrame) -> WristTarget:
+        pose, base = self._base(frame)
+        r = self._recenter[frame.side]
+        pos = (base[0] + r[0], base[1] + r[1], base[2] + r[2])
+        return WristTarget(side=frame.side, pose=Pose(orientation=pose.orientation, position=pos))
+
+    def recenter(self, frame_left: HandFrame | None, frame_right: HandFrame | None) -> None:
+        """Map each given side's current Coil position onto its home pose.
+
+        The correction is applied on top of the config scale and offset.
+        """
+        for frame in (frame_left, frame_right):
+            if frame is None:
+                continue
+            _, base = self._base(frame)
+            h = self._home(frame.side)
+            self._recenter[frame.side] = (h[0] - base[0], h[1] - base[1], h[2] - base[2])
