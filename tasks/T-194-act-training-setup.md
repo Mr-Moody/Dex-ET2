@@ -1,12 +1,12 @@
 ---
 id: T-194
 title: CUDA PyTorch group, ACT training wrapper and Verda runbook
-status: in_review
-owner: claude-code
-branch: feat/act-training-setup
+status: done
+owner: null
+branch: null
 depends_on: [T-190]
 plan: docs/superpowers/plans/2026-11-14-act-recovery-plan.md
-claimed_at: '2026-11-14T18:05:14+00:00'
+claimed_at: null
 ---
 
 Makes ACT trainable on a Verda GPU instance and runnable on the laptop GPU.
