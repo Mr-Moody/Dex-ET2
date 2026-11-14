@@ -1,12 +1,12 @@
 ---
 id: T-195
 title: Batched ACT inference worker and live ACT recovery
-status: todo
-owner: null
-branch: null
+status: in_review
+owner: claude-code
+branch: feat/act-runtime
 depends_on: [T-191]
 plan: docs/superpowers/plans/2026-11-14-act-recovery-plan.md
-claimed_at: null
+claimed_at: '2026-11-14T18:14:22+00:00'
 ---
 
 Runs one ACT checkpoint for every bay in ACT recovery in one batched call on a worker thread,
