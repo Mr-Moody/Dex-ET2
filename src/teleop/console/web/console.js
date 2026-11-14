@@ -57,6 +57,7 @@ const ui = {
   slots: new Map(), // slot -> { el, img, url, last }
   sparks: new Map(), // bay -> { row, canvas, val }
   lastEventKey: null,
+  lastAuditKey: null,
   telemetry: null,
   lastActionSeq: null, // null until the first telemetry, so a reload does not replay old toasts
   briefKey: null,
@@ -1097,9 +1098,127 @@ function render(t) {
   updateBrief(t);
   updateDummy(t);
   updateActions(t);
-  $("compliance").textContent = t.compliance;
+  updateCompliance(t);
   $("reasoning").textContent = t.reasoning;
   $("unoq").textContent = t.unoq;
+}
+
+function buildAuditItem(comp) {
+  const item = document.createElement("div");
+  item.className = "audit__item";
+
+  const meta = document.createElement("div");
+  meta.className = "audit__row audit__row--meta";
+
+  const kindEl = document.createElement("span");
+  kindEl.className = "audit__kind";
+  kindEl.textContent = comp.kind || "AUDIT_EVENT";
+  kindEl.dataset.kind = comp.kind || "AUDIT_EVENT";
+
+  const bayEl = document.createElement("span");
+  bayEl.className = "audit__bay";
+  bayEl.textContent = comp.bay_id ? `Bay ${comp.bay_id}` : "Fleet";
+
+  const stateEl = document.createElement("span");
+  const st = comp.state || "local";
+  stateEl.className = "audit__pill";
+  stateEl.dataset.state = st;
+  stateEl.textContent = st.toUpperCase();
+
+  meta.append(kindEl, bayEl, stateEl);
+
+  const hashRow = document.createElement("div");
+  hashRow.className = "audit__row audit__row--hash";
+
+  const label = document.createElement("span");
+  label.className = "audit__label";
+  label.textContent = "Hash";
+
+  const hashEl = document.createElement("a");
+  hashEl.className = "audit__hash-link";
+  hashEl.target = "_blank";
+  hashEl.rel = "noopener";
+
+  const digest = comp.digest || null;
+  const txSig = comp.tx_signature || null;
+  let url = comp.explorer_url || null;
+  if (!url && txSig) {
+    url = "http" + "s://explorer.solana.com/tx/" + txSig + "?cluster=devnet";
+  }
+
+  const hex = digest || txSig;
+  const cleanHex = hex ? (hex.startsWith("0x") ? hex : "0x" + hex) : "0x" + "0".repeat(12);
+  const shortHex = cleanHex.length > 18 ? `${cleanHex.slice(0, 8)}…${cleanHex.slice(-6)}` : cleanHex;
+
+  if (url) {
+    hashEl.href = url;
+    hashEl.textContent = `${shortHex} ↗`;
+    hashEl.title = `View on-chain transaction on Solana Explorer:\nTx: ${txSig || url}\nDigest: ${digest || "N/A"}`;
+  } else {
+    hashEl.textContent = shortHex;
+    hashEl.title = `Local SHA-256 hash chain (not anchored on-chain yet):\n${digest || ""}\n(Click to copy)`;
+    hashEl.addEventListener("click", () => {
+      if (digest && navigator.clipboard) {
+        navigator.clipboard.writeText(digest).then(() => {
+          toast("COPY", "Local SHA-256 hash copied", "info");
+        }).catch(() => {});
+      }
+    });
+  }
+
+  hashRow.append(label, hashEl);
+  item.append(meta, hashRow);
+  return item;
+}
+
+function updateCompliance(t) {
+  const history = Array.isArray(t.compliance_history) && t.compliance_history.length
+    ? t.compliance_history
+    : (t.compliance_detail ? [t.compliance_detail] : []);
+
+  const badge = $("audit-badge");
+  const countEl = $("audit-count");
+  const list = $("audit-list");
+
+  const key = history.length
+    ? history.map((c) => `${c.digest || ""}:${c.state || ""}:${c.tx_signature || ""}`).join("|")
+    : "empty";
+  if (key === ui.lastAuditKey) return;
+  ui.lastAuditKey = key;
+
+  if (countEl) countEl.textContent = history.length ? `(${history.length})` : "";
+
+  if (!history.length) {
+    if (badge) {
+      badge.textContent = "IDLE";
+      badge.dataset.state = "idle";
+    }
+    if (list) {
+      list.replaceChildren();
+      const empty = document.createElement("p");
+      empty.className = "audit__empty";
+      empty.id = "compliance";
+      empty.textContent = "No compliance events recorded yet";
+      list.append(empty);
+    }
+    return;
+  }
+
+  const latest = history[history.length - 1];
+  const latestState = latest.state || "local";
+  if (badge) {
+    badge.textContent = latestState.toUpperCase();
+    badge.dataset.state = latestState;
+  }
+
+  if (list) {
+    const wasScrolled = list.scrollTop > 8;
+    list.replaceChildren();
+    for (const comp of [...history].reverse()) {
+      list.append(buildAuditItem(comp));
+    }
+    if (!wasScrolled) list.scrollTop = 0;
+  }
 }
 
 // ------------------------------------------------------------------ frames

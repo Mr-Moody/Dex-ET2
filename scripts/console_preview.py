@@ -45,37 +45,96 @@ def scene(t: float, hold_rescue: bool) -> HudView:
     queue: tuple[int, ...] = ()
     rescue = RescueStatus()
     gate = GateStatus()
-    compliance = "Solana devnet: no events yet"
+    compliance = "Audit Trail: no events yet"
+    compliance_detail: dict[str, object] | None = None
     reasoning = "Fleet advisor idle"
     selected: int | None = None
-    if 6 <= t < 7:
-        b1 = _snap(1, BayState.STALLED, 0.21)
-        compliance = "Solana devnet: STALL_ALERT bay 1, tx 4f2a…9c1e"
-    elif 7 <= t < 9:
-        b1 = _snap(1, BayState.QUEUED, 0.18, queue_position=0)
-        queue = (1,)
-        compliance = "Solana devnet: STALL_ALERT bay 1, tx 4f2a…9c1e"
-        reasoning = "Bay 1: raised stopper flap, likely a sprung latch. Recommend rescue."
-    elif 9 <= t < 19:
-        b1 = _snap(1, BayState.RESCUE, 0.35 + 0.05 * math.sin(t * 3))
-        selected = 1
-        rescue = RescueStatus(1, t >= 10, t - 9)
-        compliance = "Solana devnet: STALL_ALERT bay 1, tx 4f2a…9c1e"
+    if 6 <= t < 19:
+        if t < 7:
+            b1 = _snap(1, BayState.STALLED, 0.21)
+        elif t < 9:
+            b1 = _snap(1, BayState.QUEUED, 0.18, queue_position=0)
+            queue = (1,)
+        else:
+            b1 = _snap(1, BayState.RESCUE, 0.35 + 0.05 * math.sin(t * 3))
+            selected = 1
+            rescue = RescueStatus(1, t >= 10, t - 9)
+        sig1 = (
+            "4xvReuQwZe48artEGCbtTe3gA74tjV8QWVmfhSX4J3zARcEohBz2b8Th4GT6zt"
+            "yJDKB2z8S3qB8YHnDJmKwANQte"
+        )
+        compliance = "Audit Trail: STALL_ALERT bay 1 [anchored]"
+        compliance_detail = {
+            "kind": "STALL_ALERT",
+            "bay_id": 1,
+            "digest": "4f2a9c1e0b2a3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e",
+            "state": "anchored",
+            "tx_signature": sig1,
+            "explorer_url": f"https://explorer.solana.com/tx/{sig1}?cluster=devnet",
+            "summary": "Stall alert on Bay 1",
+            "part_sku_id": SKU,
+            "timestamp_ns": 1700000000000000000,
+        }
         reasoning = "Bay 1: raised stopper flap, likely a sprung latch. Recommend rescue."
     elif 19 <= t < 20.5:
         b1 = _snap(1, BayState.VALIDATING, 0.9)
         gate = GateStatus(fit_ms=14.0)
-        compliance = "Solana devnet: RESCUE_LOGGED bay 1, tx 8b03…77fd"
-    if t >= 20.5:
+        sig2 = (
+            "3pEzLkgSEaNDEFaZgkAbtcu3wSx5sNyb9gtV7NckWDMVKH1xUro5tGv8wbBBEP"
+            "TSn69zv2GLSzaeth5fLTrpE49t"
+        )
+        compliance = "Audit Trail: RESCUE_LOGGED bay 1 [anchored]"
+        compliance_detail = {
+            "kind": "RESCUE_LOGGED",
+            "bay_id": 1,
+            "digest": "8b031d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c",
+            "state": "anchored",
+            "tx_signature": sig2,
+            "explorer_url": f"https://explorer.solana.com/tx/{sig2}?cluster=devnet",
+            "summary": "Rescue completed on Bay 1",
+            "part_sku_id": SKU,
+            "timestamp_ns": 1700000000000000000,
+        }
+    elif t >= 20.5:
         gate = GateStatus(14.0, 3, 3, 0.41, True)
-        compliance = "Solana devnet: SKILL_DEPLOYED skill-1, tx 1d9e…a402"
+        sig3 = (
+            "35PcSNjgMqxghynKiccRfWueqSXRqFWzW7CPrwUagvMUreYBM6cAHM1AeoiE8M"
+            "dC7MciKBTNoBtiXYnTooU2ZFow"
+        )
+        compliance = "Audit Trail: SKILL_DEPLOYED skill-1 [anchored]"
+        compliance_detail = {
+            "kind": "SKILL_DEPLOYED",
+            "bay_id": 1,
+            "digest": "1d9ea4020b2a3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e",
+            "state": "anchored",
+            "tx_signature": sig3,
+            "explorer_url": f"https://explorer.solana.com/tx/{sig3}?cluster=devnet",
+            "summary": "Validated skill deployed to fleet",
+            "part_sku_id": SKU,
+            "timestamp_ns": 1700000000000000000,
+        }
     if 26 <= t < 27:
         b2 = _snap(2, BayState.STALLED, 0.24)
     elif 27 <= t < 31:
         b2 = _snap(2, BayState.AUTONOMOUS_SKILL, 0.88, active_skill_id="skill-1")
     elif 34 <= t < LOOP_S:
         b2 = _snap(2, BayState.OOD_ESCALATED, 0.12)
-        compliance = "Solana devnet: OOD_REFUSAL bay 2, tx 6c55…02be"
+        sig4 = (
+            "3t1Uy6yiY7UByesownnRG3P5X2J2QcAbTqBDvYvrbdunE7DedgEbFrASwJVonP"
+            "J1BEkCJo63S1B6aWMYLL9HUrtQ"
+        )
+        compliance = "Audit Trail: OOD_REFUSAL bay 2 [anchored]"
+        compliance_detail = {
+            "kind": "OOD_REFUSAL",
+            "bay_id": 2,
+            "digest": "6c5502be0b2a3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e",
+            "state": "anchored",
+            "tx_signature": sig4,
+            "explorer_url": f"https://explorer.solana.com/tx/{sig4}?cluster=devnet",
+            "summary": "OOD stall refused, human intervention required",
+            "part_sku_id": SKU,
+            "timestamp_ns": 1700000000000000000,
+        }
         reasoning = "Bay 2: bolt pinned at 0 cm, unlike the learned jam. Skill transfer refused."
     return HudView(
         bays=(b1, b2),
@@ -88,6 +147,7 @@ def scene(t: float, hold_rescue: bool) -> HudView:
         reasoning=reasoning,
         beat="",
         unoq="UNO Q local loopback | compliance devnet | reasoner offline (preview)",
+        compliance_detail=compliance_detail,
     )
 
 

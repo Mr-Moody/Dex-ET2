@@ -271,3 +271,19 @@ def test_touch_and_gate_lines_reach_the_event_log() -> None:
     assert "Bay 1 touched latch: pose corrected 3.1 mm" in texts
     assert any("17/20" in t and "failed at +23% friction, 2.8 mm y error" in t for t in texts)
     assert msg["gate"]["conditions"] == "randomized pose, friction, flap spring and rest angle"  # type: ignore[index]
+
+
+def test_telemetry_carries_compliance_detail() -> None:
+    detail = {
+        "kind": "STALL_ALERT",
+        "bay_id": 1,
+        "digest": "4f2a9c1e0b2a3d4e",
+        "state": "anchored",
+        "tx_signature": "sig123",
+        "explorer_url": "https://explorer.solana.com/tx/sig123?cluster=devnet",
+    }
+    view = _view(_snap(1), compliance="Audit Trail STALL_ALERT bay 1", compliance_detail=detail)
+    a = _adapter()
+    msg = a.build(view, 1.0, GRID, {})
+    assert msg["compliance"] == "Audit Trail STALL_ALERT bay 1"
+    assert msg["compliance_detail"] == detail

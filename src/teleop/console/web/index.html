@@ -98,25 +98,43 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel panel--queue" id="panel-queue">
         <h2>Rescue queue</h2>
         <ol class="queue" id="queue"></ol>
       </section>
+
+      <section class="panel panel--audit" id="panel-audit">
+        <div class="audit__head">
+          <h2>Compliance Audit Trail <span class="panel__note" id="audit-count"></span></h2>
+          <span class="audit__badge" id="audit-badge" data-state="idle">IDLE</span>
+        </div>
+        <div class="audit__list" id="audit-list" tabindex="0" aria-label="Compliance audit history">
+          <p class="audit__empty" id="compliance">No compliance events recorded yet</p>
+        </div>
+      </section>
+
+      <section class="panel panel--advisor" id="panel-advisor">
+        <div class="advisor__head">
+          <h2>Fleet Advisor <span class="advisor__tag">AI CO-PILOT</span></h2>
+        </div>
+        <div class="advisor__box">
+          <p id="reasoning">Idle</p>
+        </div>
+      </section>
+
       <section class="panel">
-        <h2>Confidence <span class="panel__note" id="threshold-note"></span></h2>
+        <h2>Bay Telemetry <span class="panel__note" id="threshold-note"></span></h2>
         <div class="sparks" id="sparks"></div>
       </section>
+
       <section class="panel">
-        <h2>Learned skill</h2>
+        <h2>Skill Gate</h2>
         <div class="gate" id="gate"></div>
       </section>
+
       <section class="panel panel--grow">
         <h2>Activity <span class="panel__note" id="activity-count"></span></h2>
         <ol class="log" id="log" tabindex="0" aria-label="Activity history"></ol>
-      </section>
-      <section class="panel panel--hooks">
-        <div class="hook"><h3>Audit trail</h3><p id="compliance">No events yet</p></div>
-        <div class="hook"><h3>Fleet advisor</h3><p id="reasoning">Idle</p></div>
       </section>
       <footer class="rail__foot" id="unoq"></footer>
     </aside>

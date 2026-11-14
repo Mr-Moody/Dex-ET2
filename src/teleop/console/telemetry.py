@@ -299,6 +299,8 @@ class TelemetryAdapter:
                 "gate": gate,
                 "events": list(self._events),
                 "compliance": view.compliance,
+                "compliance_detail": view.compliance_detail,
+                "compliance_history": list(view.compliance_history),
                 "reasoning": view.reasoning,
                 "beat": view.beat,
                 "unoq": view.unoq,
