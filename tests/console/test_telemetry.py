@@ -1,0 +1,194 @@
+"""HudView -> console telemetry JSON (wire protocol in the fleet ops console plan)."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from datetime import datetime
+
+from teleop.atc.hud import GateStatus, HudView, RescueStatus
+from teleop.atc.types import BaySnapshot, BayState
+from teleop.console.layout import feed_layout
+from teleop.console.telemetry import EVENT_LOG_LEN, HISTORY_LEN, THRESHOLD, TelemetryAdapter
+
+SKU = "EV-LATCH-01"
+GRID = feed_layout([1, 2, 3, 4], None)
+
+
+def _clock() -> datetime:
+    return datetime(2026, 11, 15, 10, 2, 31)
+
+
+def _snap(
+    bay: int, state: BayState = BayState.NOMINAL, c: float = 0.95, **kw: object
+) -> BaySnapshot:
+    return BaySnapshot(bay, state, c, 0.0, 0.5, SKU, **kw)  # type: ignore[arg-type]
+
+
+def _view(*snaps: BaySnapshot, **kw: object) -> HudView:
+    base = HudView(
+        bays=snaps or (_snap(1), _snap(2)),
+        queue=(),
+        background_bays=(3, 4),
+        compliance="SOLANA  no events yet",
+        reasoning="NEMOTRON  idle",
+    )
+    return replace(base, **kw)  # type: ignore[arg-type]
+
+
+def _adapter(
+    present: tuple[int, ...] = (1, 2, 3, 4), bg: tuple[int, ...] = (3, 4)
+) -> TelemetryAdapter:
+    return TelemetryAdapter(present, bg, clock=_clock)
+
+
+def _bay(msg: dict[str, object], k: int) -> dict[str, object]:
+    bays = msg["bays"]
+    assert isinstance(bays, list)
+    return next(b for b in bays if b["id"] == k)  # type: ignore[index]
+
+
+def test_message_shape() -> None:
+    msg = _adapter().build(_view(), 1.5, GRID, {3: 0.91, 4: 0.97})
+    assert msg["type"] == "telemetry"
+    assert msg["wall"] == "10:02:31" and msg["sim_t"] == 1.5
+    assert msg["threshold"] == THRESHOLD == 0.3
+    assert msg["mode"] == "grid"
+    assert msg["feeds"] == [
+        {"slot": 0, "camera": "bay1/cctv", "bay": 1, "role": "tile"},
+        {"slot": 1, "camera": "bay2/cctv", "bay": 2, "role": "tile"},
+        {"slot": 2, "camera": "bay3/cctv", "bay": 3, "role": "tile"},
+        {"slot": 3, "camera": "bay4/cctv", "bay": 4, "role": "tile"},
+    ]
+    assert [b["id"] for b in msg["bays"]] == [1, 2, 3, 4]  # type: ignore[index, union-attr]
+    b1 = _bay(msg, 1)
+    assert b1["state"] == "NOMINAL" and b1["label"] == "NOMINAL" and b1["confidence"] == 0.95
+    assert b1["background"] is False and b1["replayed"] is False
+    assert msg["rescue"] is None and msg["gate"] is None
+    assert msg["compliance"] == "SOLANA  no events yet"
+
+
+def test_output_is_json_serialisable() -> None:
+    view = _view(
+        _snap(1, BayState.RESCUE, 0.12),
+        _snap(2, BayState.QUEUED, 0.25, queue_position=0),
+        queue=(2,),
+        selected_bay=1,
+        rescue=RescueStatus(1, True, 3.2),
+        gate=GateStatus(12.0, 3, 3, 0.41, True),
+    )
+    json.dumps(_adapter().build(view, 2.0, feed_layout([1, 2, 3, 4], 1), {3: 0.9, 4: 0.9}))
+
+
+def test_rescue_fields() -> None:
+    view = _view(
+        _snap(1, BayState.RESCUE, 0.12), _snap(2), selected_bay=1, rescue=RescueStatus(1, True, 3.2)
+    )
+    msg = _adapter().build(view, 2.0, feed_layout([1, 2, 3, 4], 1), {})
+    assert msg["mode"] == "rescue"
+    assert msg["rescue"] == {"bay": 1, "clutch": True, "elapsed_s": 3.2}
+    assert msg["selected_bay"] == 1
+
+
+def test_gate_fields() -> None:
+    view = _view(gate=GateStatus(12.0, 3, 3, 0.41, True))
+    msg = _adapter().build(view, 2.0, GRID, {})
+    assert msg["gate"] == {"fit_ms": 12.0, "passed": 3, "total": 3, "elapsed_s": 0.41, "ok": True}
+
+
+def test_stall_transition_logs_alert() -> None:
+    a = _adapter()
+    a.build(_view(), 1.0, GRID, {})
+    msg = a.build(_view(_snap(1, BayState.STALLED, 0.21), _snap(2)), 1.1, GRID, {})
+    events = msg["events"]
+    assert events == [
+        {
+            "sim_t": 1.1,
+            "wall": "10:02:31",
+            "bay": 1,
+            "level": "alert",
+            "text": "Bay 1 stalled · C(t) 0.21",
+        }
+    ]
+
+
+def test_transition_texts() -> None:
+    a = _adapter()
+    a.build(_view(), 1.0, GRID, {})
+    steps = [
+        (_snap(1, BayState.QUEUED, 0.2, queue_position=0), "warn", "Bay 1 queued #1"),
+        (_snap(1, BayState.RESCUE, 0.2), "info", "Operator took control of Bay 1"),
+        (_snap(1, BayState.VALIDATING, 0.9), "info", "Bay 1: validating learned skill"),
+        (_snap(1, BayState.AUTONOMOUS_SKILL, 0.9), "ok", "Bay 1: replaying learned skill"),
+        (
+            _snap(1, BayState.OOD_ESCALATED, 0.2),
+            "alert",
+            "Bay 1: unseen jam, skill transfer refused",
+        ),
+        (_snap(1), "ok", "Bay 1 back to nominal"),
+    ]
+    for i, (snap, level, text) in enumerate(steps):
+        msg = a.build(_view(snap, _snap(2)), 2.0 + i, GRID, {})
+        last = msg["events"][-1]  # type: ignore[index]
+        assert (last["level"], last["text"]) == (level, text)
+    assert len(msg["events"]) == len(steps)  # type: ignore[arg-type]
+
+
+def test_gate_and_hook_lines_log_events() -> None:
+    a = _adapter()
+    a.build(_view(), 1.0, GRID, {})
+    msg = a.build(_view(gate=GateStatus(12.0, 3, 3, 0.41, True)), 1.1, GRID, {})
+    assert msg["events"][-1]["text"] == "Skill gate 3/3 passed in 0.41 s"  # type: ignore[index]
+    assert msg["events"][-1]["level"] == "ok"  # type: ignore[index]
+    msg = a.build(_view(gate=GateStatus(12.0, 1, 3, 0.4, False)), 1.2, GRID, {})
+    assert msg["events"][-1]["text"] == "Skill gate 1/3 FAILED in 0.40 s"  # type: ignore[index]
+    assert msg["events"][-1]["level"] == "alert"  # type: ignore[index]
+    msg = a.build(_view(compliance="SOLANA  STALL_ALERT bay 1 tx 4f2a"), 1.3, GRID, {})
+    assert msg["events"][-1] == {  # type: ignore[index]
+        "sim_t": 1.3,
+        "wall": "10:02:31",
+        "bay": None,
+        "level": "info",
+        "text": "SOLANA  STALL_ALERT bay 1 tx 4f2a",
+    }
+
+
+def test_event_log_is_bounded() -> None:
+    a = _adapter()
+    for i in range(EVENT_LOG_LEN + 20):
+        state = BayState.STALLED if i % 2 else BayState.NOMINAL
+        msg = a.build(_view(_snap(1, state, 0.5), _snap(2)), float(i), GRID, {})
+    assert len(msg["events"]) == EVENT_LOG_LEN  # type: ignore[arg-type]
+
+
+def test_history_is_bounded() -> None:
+    a = _adapter()
+    for i in range(HISTORY_LEN + 50):
+        msg = a.build(_view(), float(i), GRID, {3: 0.9})
+    assert len(_bay(msg, 1)["history"]) == HISTORY_LEN  # type: ignore[arg-type]
+    assert len(_bay(msg, 3)["history"]) == HISTORY_LEN  # type: ignore[arg-type]
+
+
+def test_absent_bays_are_standby() -> None:
+    msg = _adapter(present=(1, 2), bg=()).build(_view(), 1.0, feed_layout([1, 2], None), {})
+    for k in (3, 4):
+        b = _bay(msg, k)
+        assert b["state"] == "STANDBY" and b["label"] == "STANDBY"
+        assert b["confidence"] == 0.0 and b["history"] == []
+
+
+def test_background_bays_marked_replayed() -> None:
+    msg = _adapter().build(_view(), 1.0, GRID, {3: 0.91})
+    b3 = _bay(msg, 3)
+    assert b3["state"] == "NOMINAL" and b3["replayed"] is True and b3["background"] is True
+    assert b3["confidence"] == 0.91
+    assert _bay(msg, 4)["confidence"] == 1.0  # no sample yet
+
+
+def test_layout_id_bumps_on_layout_change() -> None:
+    a = _adapter()
+    first = a.build(_view(), 1.0, GRID, {})["layout_id"]
+    assert a.build(_view(), 1.1, GRID, {})["layout_id"] == first
+    rescue = a.build(_view(), 1.2, feed_layout([1, 2, 3, 4], 1), {})["layout_id"]
+    assert rescue == first + 1  # type: ignore[operator]
+    assert a.build(_view(), 1.3, GRID, {})["layout_id"] == first + 2  # type: ignore[operator]
