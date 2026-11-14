@@ -3,7 +3,10 @@
     teleop atc [--source studio|synthetic|replay] [--unoq-host HOST] [--headless --steps N]
                [--script] [--hotspot] [--config configs/atc.yaml]
 
-Opens the MuJoCo passive viewer with the stage HUD unless ``--headless``. Keys: ``1..4`` select
+Opens the fleet ops console in the browser unless ``--headless``: a CCTV feed per bay plus
+fleet telemetry, served on ``--console-port`` (``--no-browser`` only prints the URL).
+``--display viewer`` opens the MuJoCo passive viewer with the text HUD instead. Keys (in the
+console page or the viewer): ``1..4`` select
 a bay, ``SPACE`` toggles the clutch, ``F``/``G``/``P`` arm the Bay 1 flap, Bay 2 flap and Bay 2
 pinned-bolt faults, ``R`` resets (see ``teleop.atc.stage``). ``--script`` plays the six-beat
 stage script with a scripted glove; headless it exits 0 only if every beat passed.
@@ -74,9 +77,14 @@ class AtcConfig:
     hud_log_period_s: float = 5.0
     headless: bool = False
     steps: int | None = None
+    display: str = "console"  # console (browser CCTV wall) | viewer (MuJoCo passive viewer)
+    console_port: int = 8765
+    console_fps: int = 30
+    open_browser: bool = True
 
 
 _PATH_FIELDS = {"replay_file", "calibration"}
+DISPLAYS = ("console", "viewer")
 
 
 def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
@@ -101,6 +109,8 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
         cfg.studio = studio_raw
     elif isinstance(studio_raw, dict):
         cfg.studio = StudioConfig(**cast("dict[str, Any]", studio_raw))
+    if cfg.display not in DISPLAYS:
+        raise ValueError(f"display must be one of {DISPLAYS}, got {cfg.display!r}")
     return cfg
 
 
@@ -172,6 +182,10 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--script", action="store_true", default=None, help="play the 6-beat script")
     ap.add_argument("--no-audio", dest="audio", action="store_false", default=None)
     ap.add_argument("--no-background", dest="background_bays", action="store_false", default=None)
+    ap.add_argument("--display", choices=DISPLAYS, default=None, help="console (default) or viewer")
+    ap.add_argument("--console-port", type=int, default=None)
+    ap.add_argument("--console-fps", type=int, default=None)
+    ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
     add_hotspot_args(ap)
     return ap
 
@@ -273,8 +287,23 @@ def _run(cfg: AtcConfig, controller: StageController) -> int:
                 if director is not None and director.done:
                     break
             logger.info("atc: %d steps, %.1f s sim time", steps, co.time_s)
-        else:
+        elif cfg.display == "viewer":
             _run_viewer(cfg, controller, operator)
+        else:
+            from teleop.console.run import ConsolePortInUse, run_console
+
+            try:
+                run_console(
+                    controller,
+                    operator,
+                    port=cfg.console_port,
+                    fps=cfg.console_fps,
+                    open_browser=cfg.open_browser,
+                    steps=cfg.steps,
+                )
+            except ConsolePortInUse as exc:
+                print(f"teleop atc: console port {exc.port} in use (try --console-port)")
+                return 1
 
     if director is None:
         return 0
