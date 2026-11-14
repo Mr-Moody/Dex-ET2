@@ -531,6 +531,22 @@ def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: R
     assert rig.sink.kinds().count("SKILL_DEPLOYED") == 1
 
 
+def test_clean_cycles_after_a_rescue_keep_clearing(rig: Rig) -> None:
+    """Clutch release pins every LEAP target; the next cycles must not inherit that posture."""
+    co = rig.co
+    _rescued_rig(rig)
+    outcomes: list[str] = []
+    for _ in range(3):
+        co.start_cycle(1)
+        for _ in range(1500):
+            co.tick()
+            if co.state(1) != BayState.NOMINAL or (co.outcome(1) and not co.in_routine(1)):
+                break
+        outcomes.append(co.outcome(1) or co.state(1).value)
+    assert outcomes == ["cleared", "cleared", "cleared"]
+    assert rig.sink.kinds().count("OOD_REFUSAL") == 0
+
+
 def test_arm_torque_ratio_stays_below_limit_through_jammed_routine_to_stall(rig: Rig) -> None:
     """Per-joint ratio |tau_ext| / actuator forcerange stays under the margin up to the stall."""
     co = rig.co
