@@ -6,6 +6,7 @@ best-effort RCSP ``SubscribeToData`` on ``127.0.0.1:45451`` for USB-attached Sma
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import enum
 import itertools
@@ -19,7 +20,8 @@ import threading
 import time
 from collections.abc import Buffer, Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from pathlib import Path
+from typing import IO, Any, cast
 
 from teleop.config import StudioConfig
 from teleop.input.buffer import ThreadedSource
@@ -261,6 +263,14 @@ class StreamDefinition:
             return "right"
         return None
 
+    def preferred_group_id(self) -> int | None:
+        """Pick one solver group so ``--emit both`` / ``--emit-openxr`` never double-emits."""
+        by_name = {grp.name: idx for idx, grp in enumerate(self.groups)}
+        for candidate in ("joints_openxr", "joints_local", "joints_world", "default", ""):
+            if candidate in by_name:
+                return by_name[candidate]
+        return None
+
 
 def decode_data(
     defn: StreamDefinition | Mapping[int, StreamDefinition],
@@ -334,16 +344,17 @@ _JOINT_ALIASES: Mapping[str, str] = {
     "little_medial": "little_intermediate",
 }
 _OPENXR_SET = frozenset(OPENXR_JOINTS)
+
+
 # Glove sensor frame (+X right, +Y toward wrist, +Z down) -> MuJoCo Z-up: +180 deg about X.
-_SENSOR_TO_ZUP_X: Quat = (1.0, 0.0, 0.0, 0.0)
-
-
-def _sensor_to_zup_vec(v: Vec3) -> Vec3:
+# Basis conjugation by R_x(pi) = (1, 0, 0, 0) maps (x, y, z) -> (x, -y, -z) and
+# q = (qx, qy, qz, qw) -> (qx, -qy, -qz, qw), preserving identity (0, 0, 0, 1).
+def sensor_to_zup_vec(v: Vec3) -> Vec3:
     return (v[0], -v[1], -v[2])
 
 
-def _sensor_to_zup_quat(q: Quat) -> Quat:
-    return quat_multiply(_SENSOR_TO_ZUP_X, q)
+def sensor_to_zup_quat(q: Quat) -> Quat:
+    return (q[0], -q[1], -q[2], q[3])
 
 
 def _extract_pose_or_quat(vals: tuple[int | float, ...]) -> tuple[Vec3 | None, Quat | None]:
@@ -372,43 +383,75 @@ class RgmpSession:
 
     def __init__(self) -> None:
         self.definitions: dict[int, StreamDefinition] = {}
+        self._world_pos_zup: dict[int, tuple[int, Vec3]] = {}
         self._buf = bytearray()
         self._seq = 0
 
     def reset(self) -> None:
         self.definitions.clear()
+        self._world_pos_zup.clear()
         self._buf.clear()
 
     def parse(self, payload: bytes, host_time_ns: int) -> list[HandFrame]:
         return self.feed(payload, host_time_ns)
 
-    def feed(self, chunk: Buffer, host_time_ns: int) -> list[HandFrame]:
+    def drain_wire_frames(self, chunk: Buffer) -> list[tuple[int, bytes]]:
         self._buf.extend(memoryview(chunk))
-        frames: list[HandFrame] = []
-        for prefix, payload in parse_frames(self._buf):
-            if prefix == MSG_PREFIX_DEFINITION:
-                try:
-                    defn = StreamDefinition.from_json(payload)
-                except (UnicodeDecodeError, ValueError, KeyError, TypeError):
-                    logger.warning("ignoring malformed RGMP definition frame")
-                    continue
-                self.definitions[defn.device_id] = defn
-            elif prefix == MSG_PREFIX_DISCONNECT:
-                try:
-                    dev_id = decode_disconnect(payload)
-                except ValueError:
-                    continue
-                self.definitions.pop(dev_id, None)
-            elif prefix == MSG_PREFIX_DATA:
-                frame = self._decode_hand_frame(payload, host_time_ns)
-                if frame is not None:
-                    frames.append(frame)
+        raw_frames = parse_frames(self._buf)
         if len(self._buf) > MAX_STREAM_BUFFER:
             logger.warning(
                 "RGMP stream buffer exceeded %d bytes; resetting session", MAX_STREAM_BUFFER
             )
             self.reset()
+        return raw_frames
+
+    def handle_frame(self, prefix: int, payload: bytes, host_time_ns: int) -> HandFrame | None:
+        if prefix == MSG_PREFIX_DEFINITION:
+            try:
+                defn = StreamDefinition.from_json(payload)
+            except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+                logger.warning("ignoring malformed RGMP definition frame")
+                return None
+            self.definitions[defn.device_id] = defn
+            self._world_pos_zup.pop(defn.device_id, None)
+            return None
+        if prefix == MSG_PREFIX_DISCONNECT:
+            with contextlib.suppress(ValueError):
+                dev_id = decode_disconnect(payload)
+                self.definitions.pop(dev_id, None)
+                self._world_pos_zup.pop(dev_id, None)
+            return None
+        if prefix == MSG_PREFIX_DATA:
+            return self._decode_hand_frame(payload, host_time_ns)
+        return None
+
+    def feed(self, chunk: Buffer, host_time_ns: int) -> list[HandFrame]:
+        frames: list[HandFrame] = []
+        for prefix, payload in self.drain_wire_frames(chunk):
+            frame = self.handle_frame(prefix, payload, host_time_ns)
+            if frame is not None:
+                frames.append(frame)
         return frames
+
+    def _cache_sensor_root_pos(
+        self,
+        dev_id: int,
+        ts_us: int,
+        group: StreamGroup,
+        values: Mapping[str, tuple[int | float, ...]],
+    ) -> None:
+        for stream in group.streams:
+            if stream.target_frame not in ("wrist", "hand", "forearm"):
+                continue
+            vals = values.get(stream.key)
+            if vals is None:
+                continue
+            with contextlib.suppress(ValueError):
+                pos, _ = _extract_pose_or_quat(vals)
+                nz = _nonzero_pos(pos)
+                if nz is not None:
+                    self._world_pos_zup[dev_id] = (ts_us, sensor_to_zup_vec(nz))
+                    return
 
     def _decode_hand_frame(self, payload: bytes, host_time_ns: int) -> HandFrame | None:
         try:
@@ -419,28 +462,56 @@ class RgmpSession:
         side = defn.hand_side()
         if side is None:
             return None
+        pref = defn.preferred_group_id()
+        if pref is None:
+            return None
         group = defn.groups[group_id]
-        if group.name == "joints_openxr":
-            return self._from_openxr_group(side, ts_us, host_time_ns, values)
+        if group_id != pref:
+            if group.name in ("joints_local", "joints_world"):
+                self._cache_sensor_root_pos(dev_id, ts_us, group, values)
+            return None
+        if group.name in ("joints_openxr", "joints_world"):
+            return self._from_world_group(
+                dev_id,
+                side,
+                ts_us,
+                host_time_ns,
+                group,
+                values,
+                openxr=(group.name == "joints_openxr"),
+            )
         return self._from_local_group(side, ts_us, host_time_ns, group, values)
 
-    def _from_openxr_group(
+    def _from_world_group(
         self,
+        dev_id: int,
         side: Side,
         ts_us: int,
         host_time_ns: int,
+        group: StreamGroup,
         values: Mapping[str, tuple[int | float, ...]],
+        *,
+        openxr: bool,
     ) -> HandFrame | None:
         world_quats: dict[str, Quat] = {}
+        forearm_q: Quat | None = None
         wrist_pos_raw: Vec3 | None = None
-        for stream_key, vals in values.items():
-            joint = _JOINT_ALIASES.get(stream_key, stream_key)
-            if joint not in _OPENXR_SET:
+        forearm_pos_raw: Vec3 | None = None
+        for stream in group.streams:
+            vals = values.get(stream.key)
+            if vals is None:
                 continue
             try:
                 pos, quat = _extract_pose_or_quat(vals)
             except ValueError:
                 return None
+            if stream.target_frame == "forearm":
+                forearm_q = quat
+                forearm_pos_raw = pos
+                continue
+            joint = _JOINT_ALIASES.get(stream.target_frame, stream.target_frame)
+            if joint not in _OPENXR_SET:
+                continue
             if quat is not None:
                 world_quats[joint] = quat
             if joint == "wrist" and pos is not None:
@@ -451,18 +522,29 @@ class RgmpSession:
         for joint, q_world in world_quats.items():
             parent = OPENXR_PARENTS.get(joint)
             if parent is None:
-                joints[joint] = q_world
+                joints[joint] = (
+                    quat_normalize(quat_multiply(quat_conjugate(forearm_q), q_world))
+                    if forearm_q is not None
+                    else q_world
+                )
             elif parent in world_quats:
                 joints[joint] = quat_normalize(
                     quat_multiply(quat_conjugate(world_quats[parent]), q_world)
                 )
+        if "palm" not in joints and "wrist" in joints:
+            joints["palm"] = joints["wrist"]
+
         wrist_world = world_quats.get("wrist")
-        nz_pos = _nonzero_pos(wrist_pos_raw)
+        nz_pos = _nonzero_pos(wrist_pos_raw) or _nonzero_pos(forearm_pos_raw)
+        to_quat = yup_to_zup_quat if openxr else sensor_to_zup_quat
+        to_vec = yup_to_zup_vec if openxr else sensor_to_zup_vec
+        pos_zup: Vec3 | None = to_vec(nz_pos) if nz_pos is not None else None
+        if pos_zup is None and openxr:
+            cached = self._world_pos_zup.get(dev_id)
+            if cached is not None and cached[0] == ts_us:
+                pos_zup = cached[1]
         wrist = (
-            Pose(
-                orientation=quat_normalize(yup_to_zup_quat(wrist_world)),
-                position=yup_to_zup_vec(nz_pos) if nz_pos is not None else None,
-            )
+            Pose(orientation=quat_normalize(to_quat(wrist_world)), position=pos_zup)
             if wrist_world is not None
             else None
         )
@@ -489,11 +571,10 @@ class RgmpSession:
             return None
         joints: dict[str, Quat] = {}
         wrist_pos_raw: Vec3 | None = None
-        wrist_q_raw: Quat | None = None
+        forearm_pos_raw: Vec3 | None = None
+        wrist_q_local: Quat | None = None
+        forearm_q_world: Quat | None = None
         for stream in group.streams:
-            joint = _JOINT_ALIASES.get(stream.target_frame, stream.target_frame)
-            if joint not in _OPENXR_SET:
-                continue
             vals = values.get(stream.key)
             if vals is None:
                 continue
@@ -501,21 +582,37 @@ class RgmpSession:
                 pos, quat = _extract_pose_or_quat(vals)
             except ValueError:
                 return None
+            if stream.target_frame == "forearm":
+                forearm_q_world = quat
+                forearm_pos_raw = pos
+                continue
+            joint = _JOINT_ALIASES.get(stream.target_frame, stream.target_frame)
+            if joint not in _OPENXR_SET:
+                continue
             if quat is not None:
                 joints[joint] = quat
                 if joint == "wrist":
-                    wrist_q_raw = quat
+                    wrist_q_local = quat
             if joint == "wrist" and pos is not None:
                 wrist_pos_raw = pos
         if not joints:
             return None
-        nz_pos = _nonzero_pos(wrist_pos_raw)
+        if "palm" not in joints and "wrist" in joints:
+            joints["palm"] = joints["wrist"]
+
+        if forearm_q_world is not None and wrist_q_local is not None:
+            wrist_world_q: Quat | None = quat_normalize(
+                quat_multiply(forearm_q_world, wrist_q_local)
+            )
+        else:
+            wrist_world_q = wrist_q_local if wrist_q_local is not None else forearm_q_world
+        nz_pos = _nonzero_pos(wrist_pos_raw) or _nonzero_pos(forearm_pos_raw)
         wrist = (
             Pose(
-                orientation=quat_normalize(_sensor_to_zup_quat(wrist_q_raw)),
-                position=_sensor_to_zup_vec(nz_pos) if nz_pos is not None else None,
+                orientation=quat_normalize(sensor_to_zup_quat(wrist_world_q)),
+                position=sensor_to_zup_vec(nz_pos) if nz_pos is not None else None,
             )
-            if wrist_q_raw is not None
+            if wrist_world_q is not None
             else None
         )
         self._seq += 1
@@ -614,6 +711,9 @@ def subscribe_usb_devices(
     return subscribed
 
 
+_RCSP_RETRY_S = 2.0
+
+
 class SdkSource(ThreadedSource):
     """Connects to ``rkk-hand-solver`` RGMP TCP output and subscribes USB Smartgloves via RCSP."""
 
@@ -630,15 +730,29 @@ class SdkSource(ThreadedSource):
         if cfg is not None:
             cfg_host = DEFAULT_HOST if cfg.host in ("0.0.0.0", "") else cfg.host
             cfg_port = DEFAULT_SOLVER_PORT if cfg.port == STUDIO_DEFAULT_PORT else cfg.port
+            tee_raw: Path | None = cfg.tee_raw
         else:
             cfg_host = DEFAULT_HOST
             cfg_port = DEFAULT_SOLVER_PORT
+            tee_raw = None
         self.host = cfg_host if host is None else host
         self.port = cfg_port if port is None else port
         self.rcsp_port = rcsp_port
+        self._tee_path = tee_raw
+        self._tee: IO[str] | None = None
         self._reconnect_s = max(0.02, reconnect_s)
         self._sock: socket.socket | None = None
         self._sock_lock = threading.Lock()
+        self._last_rcsp_try = -math.inf
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        if self._tee_path is not None:
+            self._tee_path.parent.mkdir(parents=True, exist_ok=True)
+            self._tee = self._tee_path.open("w", encoding="utf-8", newline="\n")
+        self._last_rcsp_try = -math.inf
+        super().start()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -648,16 +762,43 @@ class SdkSource(ThreadedSource):
                 with contextlib.suppress(OSError):
                     sock.shutdown(socket.SHUT_RDWR)
         super().stop()
+        if self._tee is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self._tee.close()
+            self._tee = None
 
-    def _maybe_subscribe_usb(self) -> None:
+    def _maybe_subscribe_usb(self, *, force: bool = False) -> None:
         if self.rcsp_port is None:
             return
+        now = time.monotonic()
+        if not force and (now - self._last_rcsp_try) < _RCSP_RETRY_S:
+            return
+        self._last_rcsp_try = now
         try:
             devs = subscribe_usb_devices(self.host, self.rcsp_port, timeout_s=0.5)
             if devs:
                 logger.info("RCSP subscribed USB Smartgloves device(s): %s", devs)
         except (OSError, ValueError, RuntimeError) as exc:
             logger.debug("RCSP USB subscribe skipped (%s:%s): %s", self.host, self.rcsp_port, exc)
+
+    def _write_tee(self, prefix: int, payload: bytes, now_ns: int) -> None:
+        tee = self._tee
+        if tee is None:
+            return
+        framed = encode_frame(prefix, payload)
+        rec = {
+            "t_ns": now_ns,
+            "src": "rgmp",
+            "payload_b64": base64.b64encode(framed).decode("ascii"),
+        }
+        try:
+            tee.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            tee.flush()
+        except (OSError, ValueError):
+            logger.exception("RGMP tee write failed; disabling raw tee")
+            self._tee = None
+            with contextlib.suppress(OSError, ValueError):
+                tee.close()
 
     def _run(self, stop: threading.Event) -> None:
         session = RgmpSession()
@@ -678,8 +819,11 @@ class SdkSource(ThreadedSource):
                     if not chunk:
                         break
                     now = time.monotonic_ns()
-                    for frame in session.feed(chunk, now):
-                        self._buffer.put(frame)
+                    for prefix, payload in session.drain_wire_frames(chunk):
+                        self._write_tee(prefix, payload, now)
+                        frame = session.handle_frame(prefix, payload, now)
+                        if frame is not None:
+                            self._buffer.put(frame)
             except OSError:
                 pass
             finally:
