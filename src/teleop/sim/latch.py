@@ -15,6 +15,12 @@ Latch frame: origin at the top-centre of the Base Track, +X is the bolt's unlatc
 The hinge axis is local +Y so that a positive angle lifts the free end that faces the bolt.
 Two joint-equality constraints sit on top: ``flap_catch`` (active in routine operation, holds
 the flap flat) and ``bolt_pin`` (the Negative Control, locks the bolt at x = 0).
+
+What you see is the sim-scale twin of the 3D-printed EV-module latch (``assets/latch``): mesh
+geoms on the same three bodies with ``contype=conaffinity=0`` and zero mass. The boxes still do
+all the physics, only fully transparent. The meshes match the boxes exactly where they are
+touched (bar, hook, paddle) and only add dressing around them, such as the pallet, module and
+bolt housing.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import Any
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
 from teleop.atc.types import BOLT_CLEARED_M, LatchPose
+from teleop.sim.hands import REPO_ROOT
 
 mj: Any = _mujoco
 
@@ -55,6 +62,25 @@ GREY = (0.55, 0.55, 0.58, 1.0)
 STEEL = (0.75, 0.78, 0.82, 1.0)
 ORANGE = (1.0, 0.5, 0.05, 1.0)
 
+# Visual twin of the printed rig. Each mesh is in its body's frame: the latch frame for the base
+# and the bolt (bolt at x = 0), and the hinge frame (FLAP_HINGE_POS) for the flap.
+MESH_DIR = REPO_ROOT / "assets" / "latch"
+GRAPHITE = (0.23, 0.24, 0.27, 1.0)
+MODULE_BLUE = (0.13, 0.29, 0.5, 1.0)
+SAFETY_YELLOW = (0.96, 0.77, 0.0, 1.0)
+SAFETY_ORANGE = (1.0, 0.43, 0.04, 1.0)
+TERMINAL_RED = (0.75, 0.08, 0.08, 1.0)
+TERMINAL_BLACK = (0.06, 0.06, 0.07, 1.0)
+VISUAL_MESHES: tuple[tuple[str, str, tuple[float, float, float, float]], ...] = (
+    ("pallet_base", "latch_base", GRAPHITE),
+    ("battery_module", "latch_base", MODULE_BLUE),
+    ("terminal_pos", "latch_base", TERMINAL_RED),
+    ("terminal_neg", "latch_base", TERMINAL_BLACK),
+    ("slide_bolt", "slide_bolt", SAFETY_YELLOW),
+    ("safety_flap", "stopper_flap", SAFETY_ORANGE),
+)
+HIDDEN_GROUP = 3  # not drawn by the default MjvOption
+
 
 def _norm_prefix(prefix: str) -> str:
     return prefix if not prefix or prefix.endswith("/") else f"{prefix}/"
@@ -66,11 +92,50 @@ def yaw_quat_wxyz(yaw_rad: float) -> list[float]:
     return [math.cos(half), 0.0, 0.0, math.sin(half)]
 
 
-def add_latch_to_spec(spec: Any, prefix: str, pose: LatchPose, *, collide: bool = True) -> None:
+def _add_visual_twin(spec: Any, p: str, bodies: dict[str, Any]) -> None:
+    """Dress the latch with the printed rig's meshes and hide the physics boxes.
+
+    The boxes keep their geometry, contact settings and mass. They only become fully transparent
+    and shadowless. The base track's alpha also carries over to the visual twin that
+    ``teleop.sim.cells`` adds for it. Mesh assets are shared by every latch in the spec. If the
+    mesh files are missing, the boxes stay visible.
+    """
+    if not all((MESH_DIR / f"{stem}.stl").is_file() for stem, _, _ in VISUAL_MESHES):
+        return
+    have = {str(m.name) for m in spec.meshes}
+    for stem, body_key, rgba in VISUAL_MESHES:
+        mesh = f"latch_{stem}"
+        if mesh not in have:
+            spec.add_mesh(name=mesh, file=str(MESH_DIR / f"{stem}.stl"))
+            have.add(mesh)
+        geom = bodies[body_key].add_geom(
+            name=f"{p}{stem}_visual",
+            type=mj.mjtGeom.mjGEOM_MESH,
+            meshname=mesh,
+            rgba=list(rgba),
+        )
+        geom.contype = 0
+        geom.conaffinity = 0
+        geom.mass = 0.0
+        geom.group = 0
+    for body in bodies.values():
+        for geom in body.geoms:
+            if geom.type == mj.mjtGeom.mjGEOM_BOX:
+                geom.rgba = [float(v) for v in geom.rgba[:3]] + [0.0]
+                geom.castshadow = False
+                if not str(geom.name).endswith("/base_track"):
+                    geom.group = HIDDEN_GROUP
+
+
+def add_latch_to_spec(
+    spec: Any, prefix: str, pose: LatchPose, *, collide: bool = True, visual_meshes: bool = True
+) -> None:
     """Add one latch (3 box bodies, 2 joints, 2 equalities) to ``spec.worldbody``.
 
     ``pose`` is the latch frame in the world. ``collide=False`` builds a visual-only copy
-    (``contype=conaffinity=0``) for the kinematic background bays.
+    (``contype=conaffinity=0``) for the kinematic background bays. ``visual_meshes`` dresses the
+    boxes with the printed rig's meshes (``assets/latch``). It is visual only, so physics is the
+    same either way.
     """
     p = _norm_prefix(prefix)
     # Hinge angles go through the compiler's angle unit; this spec may use degrees.
@@ -156,6 +221,9 @@ def add_latch_to_spec(spec: Any, prefix: str, pose: LatchPose, *, collide: bool 
     # Bolt and flap are joint-guided in the track: no contacts with their own base.
     spec.add_exclude(bodyname1=f"{p}latch_base", bodyname2=f"{p}slide_bolt")
     spec.add_exclude(bodyname1=f"{p}latch_base", bodyname2=f"{p}stopper_flap")
+
+    if visual_meshes:
+        _add_visual_twin(spec, p, {"latch_base": base, "slide_bolt": bolt, "stopper_flap": flap})
 
     spec.add_equality(
         type=mj.mjtEq.mjEQ_JOINT,
