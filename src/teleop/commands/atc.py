@@ -289,10 +289,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def _hardware_consoles(cfg: AtcConfig, unoq: SwitchableUnoQ) -> list[ConsoleSource]:
     if cfg.serial_port:
-        from teleop.unoq.mcu_bridge import open_console
+        from teleop.unoq.mcu_bridge import load_joy_map, open_console, save_joy_map
 
         transport, kind = open_console(cfg.serial_port)
-        bridge = McuConsoleBridge(transport)
+        bridge = McuConsoleBridge(transport, joy_map=load_joy_map(), on_joy_map=save_joy_map)
         bridge.start()
         logger.info("console: %s", kind)
         return [bridge]
@@ -696,7 +696,7 @@ def _run_viewer(
                     import mujoco as _mj  # pyright: ignore[reportMissingTypeStubs]
 
                     mj_any: Any = _mj
-                    bg_player.apply(co.data, co.time_s)
+                    bg_player.apply(co.data, co.time_s, frozen=controller.console.powered_off)
                     mj_any.mj_kinematics(co.model, co.data)
                 overlay = None
                 if co.time_s >= next_overlay_s:
