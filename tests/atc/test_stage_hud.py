@@ -186,14 +186,15 @@ def test_hud_formats_bay_states_confidence_and_fifo_queue() -> None:
 
 
 def test_keymap_and_console_merge_mirror_hardware() -> None:
-    # Arrows match the console joystick: Left 1, Right 2, Up 3, Down 4 (GLFW codes).
-    assert KEYMAP[263] is StageAction.SELECT_BAY_1
-    assert KEYMAP[262] is StageAction.SELECT_BAY_2
-    assert KEYMAP[265] is StageAction.SELECT_BAY_3
-    assert KEYMAP[264] is StageAction.SELECT_BAY_4
-    assert BAY_KEYS == {1: 263, 2: 262, 3: 265, 4: 264}
-    assert all(KEYMAP[BAY_KEYS[b]] is KEYMAP[ord(str(b))] for b in BAY_KEYS)  # digits alias
-    assert "arrow" in CONTROL_KEYS_HINT and "1-4" not in CONTROL_KEYS_HINT
+    # Arrows move between the camera panels like the console joystick (GLFW codes); the
+    # digits select a bay directly.
+    assert KEYMAP[263] is StageAction.MOVE_LEFT
+    assert KEYMAP[262] is StageAction.MOVE_RIGHT
+    assert KEYMAP[265] is StageAction.MOVE_UP
+    assert KEYMAP[264] is StageAction.MOVE_DOWN
+    assert all(BAY_KEYS[b] == ord(str(b)) for b in range(1, 5)) and len(BAY_KEYS) == 4
+    assert all(KEYMAP[BAY_KEYS[b]] is StageAction(f"select_bay_{b}") for b in BAY_KEYS)
+    assert "arrow" in CONTROL_KEYS_HINT and "1-4" in CONTROL_KEYS_HINT
     assert KEYMAP[32] is StageAction.CLUTCH
     assert KEYMAP[ord("F")] is StageAction.ARM_BAY1_FLAP
     assert KEYMAP[ord("G")] is StageAction.ARM_BAY2_FLAP

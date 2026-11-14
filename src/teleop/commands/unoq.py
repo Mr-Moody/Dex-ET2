@@ -11,7 +11,8 @@ sent to the MCU at start and after every MCU reboot.
 
 Without ``--serve`` it connects (or falls back to the local loopback node), pings it and
 prints which node answered. ``--calibrate-joystick`` walks you through mapping the console
-joystick: push it towards where you want Bay 1, 2, 3 and 4 when each bay's LED blinks amber.
+joystick: push it left, right, up and down in turn (Bay 1, 2, 3 and 4's LED blinks amber for
+each). The stick then moves the selection between the camera panels (``neighbour_bay``).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 
 from teleop.unoq.mcu_bridge import (
     McuConsoleBridge,
+    StickDirection,
     is_joy_map,
     load_joy_map,
     open_console,
@@ -57,19 +59,27 @@ def _attach_console(server: UnoQServer) -> McuConsoleBridge | None:
     return bridge
 
 
+def _direction_name(step: Any) -> str:
+    """``left`` for a joystick map digit or calibration step (``?`` when it is not one)."""
+    try:
+        return StickDirection(int(step)).name.lower()
+    except (TypeError, ValueError):
+        return "?"
+
+
 def describe_joy_map(code: str) -> str:
-    """``X+ -> Bay 2, X- -> Bay 4, ...`` for a joystick map."""
-    return ", ".join(f"{d} -> Bay {b}" for d, b in zip(_DIRECTIONS, code, strict=True))
+    """``X+ -> right, X- -> left, ...`` for a joystick map."""
+    return ", ".join(f"{a} -> {_direction_name(d)}" for a, d in zip(_DIRECTIONS, code, strict=True))
 
 
 def _calibration_message(cal: dict[str, Any]) -> str:
-    phase, bay = cal.get("phase"), cal.get("bay")
+    phase, step = cal.get("phase"), cal.get("bay")
     if phase == "start":
         return "Let go of the stick: capturing its centre (all four LEDs amber)..."
     if phase == "step":
-        return f"Push the stick towards where you want Bay {bay} (its LED blinks amber)"
+        return f"Push the stick {_direction_name(step).upper()} (Bay {step}'s LED blinks amber)"
     if phase == "dup":
-        return f"That direction is already taken. Push another one for Bay {bay}"
+        return f"That direction is already taken. Push the stick {_direction_name(step).upper()}"
     if phase == "ok":
         return f"Calibrated and saved on the board: {describe_joy_map(str(cal.get('map')))}"
     return f"Calibration failed: {cal.get('reason')}"
@@ -128,9 +138,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--no-console", action="store_true", help="--serve without the MCU console")
     joy = ap.add_mutually_exclusive_group()
     joy.add_argument(
-        "--calibrate-joystick", action="store_true", help="map the stick directions to bays"
+        "--calibrate-joystick",
+        action="store_true",
+        help="teach the console which way is left, right, up and down",
     )
-    joy.add_argument("--joy-map", help="set the map directly: bays for stick X+, X-, Y+, Y-")
+    joy.add_argument(
+        "--joy-map",
+        help="directions for stick X+, X-, Y+, Y- (1 left, 2 right, 3 up, 4 down)",
+    )
     joy.add_argument("--joy-raw", action="store_true", help="print raw stick values for a while")
     ns = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")

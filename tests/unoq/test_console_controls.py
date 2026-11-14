@@ -19,11 +19,13 @@ from teleop.unoq.mcu_bridge import (
     McuConsoleBridge,
     Power,
     SoftwareMcu,
+    StickDirection,
     bays_from_mask,
     console_state_from_dict,
     console_state_to_dict,
     is_joy_map,
     load_joy_map,
+    neighbour_bay,
     parse_mcu_line,
     power_mask,
     save_joy_map,
@@ -83,7 +85,8 @@ def test_joy_map_and_mask_helpers() -> None:
     assert is_joy_map(DEFAULT_JOY_MAP) and is_joy_map("4321")
     assert not is_joy_map("1124") and not is_joy_map("123") and not is_joy_map("12a4")
     assert power_mask({1, 4}) == 9 and bays_from_mask(9) == frozenset({1, 4})
-    assert describe_joy_map("2431") == "X+ -> Bay 2, X- -> Bay 4, Y+ -> Bay 3, Y- -> Bay 1"
+    assert describe_joy_map("2431") == "X+ -> right, X- -> down, Y+ -> up, Y- -> left"
+    assert describe_joy_map(DEFAULT_JOY_MAP) == "X+ -> right, X- -> left, Y+ -> down, Y- -> up"
 
 
 def test_console_dict_round_trip_carries_powered_off() -> None:
@@ -299,3 +302,60 @@ def test_console_state_op_never_waits_for_the_main_lock() -> None:
     with server._lock:  # pyright: ignore[reportPrivateUsage]
         reply = server.handle({"op": P.OP_CONSOLE_STATE})
     assert reply["console"]["clutch"] is True
+
+
+# ---------------------------------------------------------------- panel navigation (T-227)
+
+_SKETCHES = [
+    Path(__file__).resolve().parents[2] / "firmware" / "unoq_console" / "unoq_console.ino",
+    Path(__file__).resolve().parents[2] / "firmware" / "unoq_app" / "sketch" / "sketch.ino",
+]
+L, R, U, D = StickDirection.LEFT, StickDirection.RIGHT, StickDirection.UP, StickDirection.DOWN
+
+
+@pytest.mark.parametrize(
+    ("bay", "direction", "expected"),
+    [
+        # Bay 1 | Bay 2 over Bay 3 | Bay 4; the grid edges stop the move
+        (1, R, 2), (1, D, 3), (1, L, 1), (1, U, 1),
+        (2, L, 1), (2, D, 4), (2, R, 2), (2, U, 2),
+        (3, R, 4), (3, U, 1), (3, L, 3), (3, D, 3),
+        (4, L, 3), (4, U, 2), (4, R, 4), (4, D, 4),
+        # nothing selected yet: the move starts from Bay 1
+        (None, R, 2), (None, D, 3), (None, L, 1), (None, U, 1),
+    ],
+)  # fmt: skip
+def test_stick_moves_one_panel_on_the_camera_grid(
+    bay: int | None, direction: StickDirection, expected: int
+) -> None:
+    assert neighbour_bay(bay, direction) == expected
+
+
+def test_push_stick_navigates_through_the_bridge() -> None:
+    _clock, mcu, bridge = _rig()
+    path = [mcu.push_stick(d) for d in (R, D, L, L, U)]
+    assert path == [2, 4, 3, 3, 1]
+    bridge.pump()
+    assert bridge.state().selected_bay == 1
+    # every flick is announced, an edge bump too (it re-announces the selection)
+    assert [ln for ln in mcu.emitted if ln.startswith("BTN:")] == [
+        "BTN:BAY:2", "BTN:BAY:4", "BTN:BAY:3", "BTN:BAY:3", "BTN:BAY:1",
+    ]  # fmt: skip
+
+
+def test_estop_cuts_the_panel_the_stick_moved_to() -> None:
+    _clock, mcu, bridge = _rig()
+    mcu.push_stick(D)  # Bay 1 -> Bay 3
+    mcu.press_estop()
+    bridge.pump()
+    assert bridge.state().powered_off == frozenset({3})
+
+
+def test_sketch_copies_match_and_mirror_the_python_navigation() -> None:
+    console, app = (p.read_text(encoding="utf-8") for p in _SKETCHES)
+    assert console == app, "firmware/unoq_app/sketch/sketch.ino must stay a copy"
+    assert "JOY_LEFT = 1, JOY_RIGHT = 2, JOY_UP = 3, JOY_DOWN = 4" in console
+    assert [int(d) for d in DEFAULT_JOY_MAP] == [R, L, D, U]
+    assert "joyMap[4] = {JOY_RIGHT, JOY_LEFT, JOY_DOWN, JOY_UP}" in console
+    assert "moveSelection(selectedBay, joyMap[dir])" in console
+    assert "selectedBay = joyMap[dir]" not in console  # no direct direction -> bay jumps left

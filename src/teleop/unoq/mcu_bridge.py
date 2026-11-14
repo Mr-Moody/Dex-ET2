@@ -5,12 +5,13 @@ The MCU sketch (``firmware/unoq_console/unoq_console.ino``) speaks newline-termi
 MCU -> MPU (edge events, plus a 20 Hz heartbeat)::
 
     BOOT                     the MCU (re)started: the bridge restores the joystick map and power
-    BTN:BAY:<1-4>            bay selected with the joystick
+    BTN:BAY:<1-4>            bay selected: the joystick moved one camera panel (see
+                             neighbour_bay) or a stick click re-announced the selection
     CLUTCH:<0|1>             hold-to-control dead-man's clutch
     ESTOP:<0|1>              E-stop button held (each press toggles the selected bay's power)
     POWER:<1-4>:<0|1>        bay powered (1) or cut by the E-stop (0), latched on the MCU
     FAULT_RIG:LATCHED        judge fault rig rising edge (once, until CMD:RESET_RIG)
-    JOYMAP:<4 digits>        bays for the raw stick directions X+, X-, Y+, Y-
+    JOYMAP:<4 digits>        StickDirection for the raw stick axes X+, X-, Y+, Y-
     JOYCAL:START | JOYCAL:<n> | JOYCAL:DUP:<n> | JOYCAL:OK:<map> | JOYCAL:FAIL:<reason>
     JOY:<x>:<y>              raw stick ADC values (only after CMD:JOY_RAW:1)
     HB:<bay 0-4>:<clutch>:<estop>:<rig>[:<power-off mask 0-15>]   heartbeat (0 = no bay)
@@ -47,6 +48,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from enum import IntEnum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -71,14 +73,47 @@ LED_STATE_TOKENS: Mapping[BayState, str] = {
 RESET_RIG_CMD = "CMD:RESET_RIG"
 JOY_CAL_CMD = "CMD:JOY_CAL"
 JOY_CAL_ABORT_CMD = "CMD:JOY_CAL_ABORT"
-# Bays for the raw stick directions X+, X-, Y+, Y- (the firmware default: left 1, right 2,
-# up 3, down 4 like the keyboard arrows, with higher VRx = right and lower VRy = up).
+
+
+class StickDirection(IntEnum):
+    """Where the operator pushes the joystick (the digits of a joystick map)."""
+
+    LEFT = 1
+    RIGHT = 2
+    UP = 3
+    DOWN = 4
+
+
+# The stick moves the selection across the console's camera grid, two panels wide:
+# Bay 1 | Bay 2 over Bay 3 | Bay 4. The sketch's moveSelection() mirrors neighbour_bay().
+GRID_COLUMNS = 2
+# Directions for the raw stick axes X+, X-, Y+, Y- (the firmware default for the plate's
+# mounting: higher VRx = right, lower VRy = up).
 DEFAULT_JOY_MAP = "2143"
 JOY_MAP_FILE_ENV = "UNOQ_JOYMAP_FILE"
 
 
+def neighbour_bay(bay: int | None, direction: StickDirection) -> int:
+    """The bay one panel from ``bay`` towards ``direction``; the grid edges stop it.
+
+    With nothing selected yet the move starts from Bay 1.
+    """
+    row, col = divmod((bay or 1) - 1, GRID_COLUMNS)
+    last_row = (N_BAYS - 1) // GRID_COLUMNS
+    match direction:
+        case StickDirection.LEFT:
+            col = max(col - 1, 0)
+        case StickDirection.RIGHT:
+            col = min(col + 1, GRID_COLUMNS - 1)
+        case StickDirection.UP:
+            row = max(row - 1, 0)
+        case StickDirection.DOWN:
+            row = min(row + 1, last_row)
+    return min(row * GRID_COLUMNS + col + 1, N_BAYS)
+
+
 def is_joy_map(code: str) -> bool:
-    """Four digits that are a permutation of 1..4."""
+    """Four digits that are a permutation of 1..4 (the directions for X+, X-, Y+, Y-)."""
     return len(code) == N_BAYS and sorted(code) == [str(b) for b in range(1, N_BAYS + 1)]
 
 
@@ -607,8 +642,8 @@ class SoftwareMcu:
     """In-process emulation of the console sketch, as a :class:`SerialLike`.
 
     Used by tests and as the keyboard mirror in ``teleop atc``: key handlers call
-    :meth:`press_bay`, :meth:`set_clutch`, :meth:`press_estop` and :meth:`set_fault_rig`, and
-    the same :class:`McuConsoleBridge` logic runs as with the real board.
+    :meth:`press_bay`, :meth:`push_stick`, :meth:`set_clutch`, :meth:`press_estop` and
+    :meth:`set_fault_rig`, and the same :class:`McuConsoleBridge` logic runs as with the real board.
     """
 
     def __init__(self, clock: Clock = time.monotonic_ns) -> None:
@@ -638,6 +673,17 @@ class SoftwareMcu:
         with self._lock:
             self.selected_bay = bay
             self._emit(f"BTN:BAY:{bay}")
+
+    def push_stick(self, direction: StickDirection) -> int:
+        """One joystick flick: move the selection one camera panel, as the sketch does.
+
+        At a grid edge the selection stays and is announced again. Returns the selected bay.
+        """
+        with self._lock:
+            bay = neighbour_bay(self.selected_bay, direction)
+            self.selected_bay = bay
+            self._emit(f"BTN:BAY:{bay}")
+        return bay
 
     def set_clutch(self, pressed: bool) -> None:
         with self._lock:

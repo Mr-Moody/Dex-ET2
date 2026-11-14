@@ -256,7 +256,8 @@ key's outcome in its bottom-right overlay.
 
 | Key | Action |
 |---|---|
-| `←` `→` `↑` `↓` | Select Bay 1, 2, 3, 4 (like the console joystick; `1`–`4` also work) |
+| `←` `→` `↑` `↓` | Move the selection one camera panel (Bay 1 \| Bay 2 over Bay 3 \| Bay 4), like the console joystick |
+| `1`–`4` | Select that bay directly |
 | `SPACE` | Toggle the clutch (rescue) |
 | `F` | Arm the Bay 1 flap jam (causes a contact stall) |
 | `G` | Arm the Bay 2 flap jam |

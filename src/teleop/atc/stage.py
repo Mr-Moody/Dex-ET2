@@ -59,7 +59,7 @@ from teleop.sim.bays import ACTIVE_BAYS, BACKGROUND_BAYS
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
 from teleop.unoq.dmp import quat_to_mat
-from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu
+from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu, StickDirection, neighbour_bay
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ class StageAction(StrEnum):
     SELECT_BAY_2 = "select_bay_2"
     SELECT_BAY_3 = "select_bay_3"
     SELECT_BAY_4 = "select_bay_4"
+    MOVE_LEFT = "move_left"
+    MOVE_RIGHT = "move_right"
+    MOVE_UP = "move_up"
+    MOVE_DOWN = "move_down"
     CLUTCH = "clutch"
     ESTOP = "estop"
     ARM_BAY1_FLAP = "arm_bay1_flap"
@@ -86,10 +90,10 @@ class StageAction(StrEnum):
 
 
 KEY_SPACE = 32
-# GLFW arrow key codes. The arrows select bays like the console joystick: Left 1, Right 2,
-# Up 3, Down 4. The digits 1-4 stay as a silent fallback.
+# GLFW arrow key codes. The arrows move the selection one camera panel, like the console
+# joystick (Bay 1 | Bay 2 over Bay 3 | Bay 4); the digits 1-4 select a bay directly.
 KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP = 262, 263, 264, 265
-BAY_KEYS: dict[int, int] = {1: KEY_LEFT, 2: KEY_RIGHT, 3: KEY_UP, 4: KEY_DOWN}
+BAY_KEYS: dict[int, int] = {b: ord(str(b)) for b in range(1, 5)}
 _KEY_NAMES = {
     KEY_SPACE: "SPACE",
     KEY_LEFT: "LEFT",
@@ -98,10 +102,10 @@ _KEY_NAMES = {
     KEY_DOWN: "DOWN",
 }
 KEYMAP: dict[int, StageAction] = {
-    KEY_LEFT: StageAction.SELECT_BAY_1,
-    KEY_RIGHT: StageAction.SELECT_BAY_2,
-    KEY_UP: StageAction.SELECT_BAY_3,
-    KEY_DOWN: StageAction.SELECT_BAY_4,
+    KEY_LEFT: StageAction.MOVE_LEFT,
+    KEY_RIGHT: StageAction.MOVE_RIGHT,
+    KEY_UP: StageAction.MOVE_UP,
+    KEY_DOWN: StageAction.MOVE_DOWN,
     ord("1"): StageAction.SELECT_BAY_1,
     ord("2"): StageAction.SELECT_BAY_2,
     ord("3"): StageAction.SELECT_BAY_3,
@@ -115,7 +119,7 @@ KEYMAP: dict[int, StageAction] = {
     ord("M"): StageAction.CYCLE_BACKEND,
 }
 ACTION_LOG_LEN = 20
-CONTROL_KEYS_HINT = "Use the arrow keys, SPACE, E, F, G, P, R or M"
+CONTROL_KEYS_HINT = "Use the arrow keys, 1-4, SPACE, E, F, G, P, R or M"
 
 
 def key_name(code: int) -> str:
@@ -132,6 +136,18 @@ _SELECT = {
     StageAction.SELECT_BAY_2: 2,
     StageAction.SELECT_BAY_3: 3,
     StageAction.SELECT_BAY_4: 4,
+}
+_MOVE = {
+    StageAction.MOVE_LEFT: StickDirection.LEFT,
+    StageAction.MOVE_RIGHT: StickDirection.RIGHT,
+    StageAction.MOVE_UP: StickDirection.UP,
+    StageAction.MOVE_DOWN: StickDirection.DOWN,
+}
+_EDGE = {
+    StickDirection.LEFT: "left column",
+    StickDirection.RIGHT: "right column",
+    StickDirection.UP: "top row",
+    StickDirection.DOWN: "bottom row",
 }
 
 
@@ -817,13 +833,28 @@ class StageController:
                 return bay
         return None
 
+    def _shown_bay(self) -> int | None:
+        """The selected bay the displays show (any console's latest selection)."""
+        return self.console.selected_bay
+
+    def _unselectable(self, bay: int) -> str | None:
+        if bay in self.active_bays:
+            return None
+        if bay in self.background_bays:
+            return f"Bay {bay} replays a recorded cycle and cannot be selected"
+        return f"Bay {bay} is not running in this simulation"
+
     def _precheck(self, action: StageAction) -> str | None:
         """Why ``action`` would do nothing right now, or ``None`` if it applies."""
-        if action in _SELECT and _SELECT[action] not in self.active_bays:
-            bay = _SELECT[action]
-            if bay in self.background_bays:
-                return f"Bay {bay} replays a recorded cycle and cannot be selected"
-            return f"Bay {bay} is not running in this simulation"
+        if action in _SELECT:
+            return self._unselectable(_SELECT[action])
+        if action in _MOVE:
+            shown = self._shown_bay()
+            direction = _MOVE[action]
+            target = neighbour_bay(shown, direction)
+            if shown is not None and target == shown:
+                return f"Bay {shown} is already in the {_EDGE[direction]}"
+            return self._unselectable(target)
         if action is StageAction.ARM_BAY1_FLAP:
             if 1 not in self.active_bays:
                 return "Bay 1 is not running in this simulation"
@@ -842,6 +873,8 @@ class StageController:
         """What ``action`` just did, as ``(text, level)`` for the operator displays."""
         if action in _SELECT:
             return self._select_text(_SELECT[action], "the clutch (SPACE)")
+        if action in _MOVE and self.mcu.selected_bay is not None:
+            return self._select_text(self.mcu.selected_bay, "the clutch (SPACE)")
         if action is StageAction.CLUTCH:
             return self._clutch_text(self.mcu.clutch, self.mcu.selected_bay)
         if action is StageAction.ESTOP:
@@ -899,13 +932,15 @@ class StageController:
         return f"E-stop released: Bay {selected} robot powered on", "ok"
 
     def apply(self, action: StageAction) -> None:
-        if action in (StageAction.CLUTCH, StageAction.ESTOP):
-            # Act on the bay the displays show, even if the joystick selected it.
-            shown = self.console.selected_bay
+        if action in (StageAction.CLUTCH, StageAction.ESTOP) or action in _MOVE:
+            # Act on (or move from) the bay the displays show, even if the joystick selected it.
+            shown = self._shown_bay()
             if shown is not None and shown != self.mcu.selected_bay:
                 self.mcu.press_bay(shown)
         if action in _SELECT:
             self.mcu.press_bay(_SELECT[action])
+        elif action in _MOVE:
+            self.mcu.push_stick(_MOVE[action])
         elif action is StageAction.CLUTCH:
             self.mcu.toggle_clutch()
         elif action is StageAction.ESTOP:

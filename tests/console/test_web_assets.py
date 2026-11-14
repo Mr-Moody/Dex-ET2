@@ -47,7 +47,7 @@ def test_js_maps_keys_to_glfw_codes() -> None:
     # digits 48-57, letters upper-case 65-90, space 32; no auto-repeat
     assert "event.repeat" in js
     assert "toUpperCase" in js and "32" in js
-    # arrows select bays and must not scroll the page or steal arrows from sliders/inputs
+    # arrows move between panels and must not scroll the page or steal arrows from sliders/inputs
     assert "ArrowLeft" in js and "k in ARROW_CODES) event.preventDefault()" in js
     assert "ownsArrowKeys(event.target)" in js and '"INPUT"' in js
 
@@ -72,8 +72,10 @@ def test_arrow_keys_match_the_stage_keymap() -> None:
 
     got = _node_json(_BAY_KEYS_HARNESS % _marked(_read("console.js"), "bay-keys"))
     assert isinstance(got, dict)
-    # Left 1, Right 2, Up 3, Down 4, as GLFW codes the stage maps to the same bays
+    # GLFW codes the stage maps to panel moves; bays are selected with their digit keys
     assert got["arrows"] == {"ArrowLeft": 263, "ArrowRight": 262, "ArrowUp": 265, "ArrowDown": 264}
+    for key, code in got["arrows"].items():
+        assert KEYMAP[code] is StageAction(f"move_{key.removeprefix('Arrow').lower()}")
     assert {int(b): c for b, c in got["bays"].items()} == BAY_KEYS
     for bay, code in BAY_KEYS.items():
         assert KEYMAP[code] is StageAction(f"select_bay_{bay}")

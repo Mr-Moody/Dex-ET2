@@ -8,12 +8,14 @@
     D8/9 Bay 3 LED      KY-011 R/G      D10/11 Bay 4 LED KY-011 G/R
     D12  E-stop button  KY-004 (per-robot power cut, see below)
     D13  Judge fault rig switch to GND (optional; unwired = never latches)
-    A0/A1 Bay-select joystick KY-023 VRx/VRy, A2 its SW (optional)
+    A0/A1 Panel joystick KY-023 VRx/VRy, A2 its SW (optional)
     Onboard 8x13 LED matrix: one 3-column x 8-row tile per bay + a status column.
 
   - Polls clutch, E-stop, joystick switch and the fault rig at 1 kHz (5 ms debounce); samples
-    the joystick at 100 Hz. Each stick direction selects the bay it is mapped to (default left 1,
-    right 2, up 3, down 4 like the keyboard arrows; recalibrate on the console, see "Joystick calibration").
+    the joystick at 100 Hz. Each flick moves the selection one panel on the console's 2x2
+    camera grid (Bay 1 | Bay 2 over Bay 3 | Bay 4) like the keyboard arrows; the edges stop it,
+    and with no bay selected yet the move starts from Bay 1. Which raw stick direction is left,
+    right, up or down is recalibratable on the console, see "Joystick calibration".
   - Buttons: the level read at boot is "released", so either KY-004 polarity works. Do not
     hold the clutch or the E-stop while the board boots.
   - E-stop latches per robot: a press cuts power to the selected bay (its LED goes solid red
@@ -23,7 +25,8 @@
       BOOT                                  once per MCU boot (host restores map and power)
       BTN:BAY:<1-4>  CLUTCH:<0|1>  ESTOP:<0|1>  FAULT_RIG:LATCHED
       POWER:<bay 1-4>:<0|1>                 bay powered (1) or cut by the E-stop (0)
-      JOYMAP:<4 digits>                     bays for stick X+, X-, Y+, Y- (raw ADC directions)
+      JOYMAP:<4 digits>                     direction (1 left, 2 right, 3 up, 4 down) for stick
+                                            X+, X-, Y+, Y- (raw ADC directions)
       JOYCAL:START  JOYCAL:<1-4>  JOYCAL:DUP:<1-4>  JOYCAL:OK:<map>  JOYCAL:FAIL:<reason>
       HB:<bay 0-4>:<clutch>:<estop>:<rig>:<power-off mask 0-15>   (20 Hz heartbeat)
       JOY:<x>:<y>                           raw stick at 10 Hz while CMD:JOY_RAW:1
@@ -37,8 +40,8 @@
 
   Joystick calibration: send CMD:JOY_CAL (teleop unoq --calibrate-joystick) or hold the stick
   pressed for 2 s. Let go of the stick while all four LEDs are amber (the centre is captured),
-  then push the stick towards where you want each bay when its LED blinks amber: Bay 1, 2, 3, 4.
-  A direction already taken buzzes low; push another one. Done bays turn green.
+  then push the stick left, right, up and down in turn, while Bay 1, 2, 3 and 4's LED blinks
+  amber. A direction already taken buzzes low; push another one. Done steps turn green.
 
   Fault rig is strictly one-way: the first rising edge emits FAULT_RIG:LATCHED once, then every
   further toggle is ignored until CMD:RESET_RIG. Python side: src/teleop/unoq/mcu_bridge.py.
@@ -212,9 +215,22 @@ static uint8_t joyHits = 0;
 static uint8_t joyPending = DIR_NONE;
 static bool joyRaw = false;
 
-// Bay selected by each direction. Default for the plate's mounting: left 1, right 2, up 3,
-// down 4 (like the keyboard arrows) with higher VRx = right and lower VRy = up.
-static uint8_t joyMap[4] = {2, 1, 4, 3};
+// Direction of each raw stick axis: 1 left, 2 right, 3 up, 4 down. Default for the plate's
+// mounting: higher VRx = right and lower VRy = up.
+static const uint8_t JOY_LEFT = 1, JOY_RIGHT = 2, JOY_UP = 3, JOY_DOWN = 4;
+static uint8_t joyMap[4] = {JOY_RIGHT, JOY_LEFT, JOY_DOWN, JOY_UP};
+
+// The camera panel one step from `bay` towards `move` on the 2x2 grid (Bay 1 | Bay 2 over
+// Bay 3 | Bay 4); the edges stop it. Mirrors neighbour_bay() in mcu_bridge.py.
+static uint8_t moveSelection(uint8_t bay, uint8_t move) {
+  uint8_t i = (bay >= 1 && bay <= 4) ? bay - 1 : 0;  // nothing selected: start from Bay 1
+  uint8_t row = i / 2, col = i % 2;
+  if (move == JOY_LEFT) col = 0;
+  if (move == JOY_RIGHT) col = 1;
+  if (move == JOY_UP) row = 0;
+  if (move == JOY_DOWN) row = 1;
+  return row * 2 + col + 1;
+}
 
 static void sendJoyMap(const char *prefix) {
   char buf[24];
@@ -275,7 +291,8 @@ static uint8_t pollJoystick() {
 }
 
 // ---------------------------------------------------------------- joystick calibration
-// calStep: -1 idle, 0 hands off (centre capture pending), 1..4 waiting for that bay's push.
+// calStep: -1 idle, 0 hands off (centre capture pending), 1..4 waiting for the push of that
+// direction (1 left, 2 right, 3 up, 4 down; Bay calStep's LED blinks).
 static int8_t calStep = -1;
 static uint32_t calSinceMs = 0;
 static uint8_t calDirs[4];
@@ -293,7 +310,7 @@ static void startCalibration() {
 static void abortCalibration(const char *reason) {
   if (calStep < 0) return;
   calStep = -1;
-  joyArmed = false;  // the stick must come home before the next flick selects a bay
+  joyArmed = false;  // the stick must come home before the next flick moves the selection
   char buf[32];
   snprintf(buf, sizeof(buf), "JOYCAL:FAIL:%s", reason);
   sendLine(buf);
@@ -660,9 +677,11 @@ void loop() {
     } else {
       uint8_t dir = pollJoystick();
       if (dir != DIR_NONE) {
-        selectedBay = joyMap[dir];
+        uint8_t next = moveSelection(selectedBay, joyMap[dir]);
+        // At a grid edge the selection stays; it is announced again with a low bump.
+        chirp(next == selectedBay ? 900 : 3000, 30);
+        selectedBay = next;
         sendBaySelect();
-        chirp(3000, 30);
       }
     }
     static uint8_t joyDbg = 0;

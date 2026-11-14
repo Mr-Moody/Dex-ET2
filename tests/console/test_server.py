@@ -108,7 +108,7 @@ def test_key_messages_reach_callback(server: ConsoleServer, keys: list[int]) -> 
         ws.send(json.dumps({"type": "key", "code": "49"}))
         ws.send(json.dumps({"type": "other", "code": 50}))
         ws.send(json.dumps({"type": "key", "code": 49}))
-        ws.send(json.dumps({"type": "key", "code": 263}))  # GLFW Left arrow selects Bay 1
+        ws.send(json.dumps({"type": "key", "code": 263}))  # GLFW Left arrow moves one panel left
         _wait(lambda: keys == [49, 263])
         time.sleep(0.1)
     assert keys == [49, 263]

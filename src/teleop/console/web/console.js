@@ -77,26 +77,26 @@ const ui = {
 };
 
 // <bay-keys>
-// Bay select keys, laid out like the console joystick: Left 1, Right 2, Up 3, Down 4. Codes are
-// GLFW key codes (the same ones the MuJoCo viewer receives). The digits 1-4 still work.
-const BAY_KEYS = {
-  1: { code: 263, cap: "←", name: "Left arrow" },
-  2: { code: 262, cap: "→", name: "Right arrow" },
-  3: { code: 265, cap: "↑", name: "Up arrow" },
-  4: { code: 264, cap: "↓", name: "Down arrow" },
-};
-const ARROW_CODES = { ArrowLeft: 263, ArrowRight: 262, ArrowUp: 265, ArrowDown: 264 };
-const bayKey = (r) => BAY_KEYS[r] || { code: 48 + r, cap: String(r), name: String(r) };
+// The arrows move the selection one camera panel, like the console joystick (Bay 1 | Bay 2 over
+// Bay 3 | Bay 4); the digit keys select a bay directly. Codes are GLFW key codes (the same ones
+// the MuJoCo viewer receives).
+const ARROW_KEYS = [
+  { key: "ArrowLeft", code: 263, cap: "←", name: "Left arrow" },
+  { key: "ArrowRight", code: 262, cap: "→", name: "Right arrow" },
+  { key: "ArrowUp", code: 265, cap: "↑", name: "Up arrow" },
+  { key: "ArrowDown", code: 264, cap: "↓", name: "Down arrow" },
+];
+const ARROW_CODES = Object.fromEntries(ARROW_KEYS.map((a) => [a.key, a.code]));
+const bayKey = (r) => ({ code: 48 + r, cap: String(r), name: `Key ${r}` });
 // </bay-keys>
 
 // Keyboard bar. Codes are GLFW key codes.
 const KEY_BAR = [
   {
-    caps: BAYS.map((b) => bayKey(b).cap),
-    codes: BAYS.map((b) => bayKey(b).code),
-    names: BAYS.map((b) => bayKey(b).name),
-    subs: BAYS.map(String),
-    text: "Select bay",
+    caps: ARROW_KEYS.map((a) => a.cap),
+    codes: ARROW_KEYS.map((a) => a.code),
+    names: ARROW_KEYS.map((a) => a.name),
+    text: "Move panel",
   },
   { caps: ["Space"], codes: [32], text: "Clutch" },
   { caps: ["E"], codes: [69], text: "E-stop bay" },
@@ -1625,7 +1625,7 @@ function pressKey(code, name) {
 
 function keyName(code) {
   if (code === 32) return "Space";
-  for (const k of Object.values(BAY_KEYS)) if (k.code === code) return k.cap;
+  for (const a of ARROW_KEYS) if (a.code === code) return a.cap;
   return String.fromCharCode(code);
 }
 
