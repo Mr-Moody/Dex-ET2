@@ -863,6 +863,73 @@ def test_estop_power_cut_ignores_the_glove_on_a_rescue(rig: Rig) -> None:
     assert co.state(1) == BayState.RESCUE
 
 
+def _sweeping_glove(t_s: float, a: float = 0.2, up: float = 1.0) -> OperatorInput:
+    """A glove waving over the latch at up to ~0.4 m/s; ``up=-1`` dips it down into the latch."""
+    f = 0.4
+    w = 2.0 * math.pi * f
+    pos = (
+        0.3 + a * math.sin(w * t_s),
+        -0.1 + a * math.sin(0.75 * w * t_s),
+        1.0 + up * a * (1.0 - math.cos(1.25 * w * t_s)),
+    )
+    return OperatorInput(Pose(orientation=(0.0, 0.0, 0.0, 1.0), position=pos), ROUTINE.fingers)
+
+
+@pytest.mark.parametrize("amplitude_m", [0.03, 0.1])
+def test_clutch_held_glove_pressing_into_the_latch_yields_instead_of_locking_out(
+    rig: Rig, amplitude_m: float
+) -> None:
+    """Regression: pressing the hand down onto the latch froze it within ~0.5 s.
+
+    A blocked position target saturates the Panda wrist joints (12 Nm) within millimetres, so
+    the arm must yield under load rather than trip the guard and lock the clutch out.
+    """
+    co = rig.co
+    rig.stall_bay(1, flap_jammed=True)
+    bay = co._bays[1]  # noqa: SLF001
+    console = ConsoleInputState(selected_bay=1, clutch=True)
+    for k in range(round(4.0 / CONTROL_DT)):
+        co.tick(console, _sweeping_glove(k * CONTROL_DT, amplitude_m, up=-1.0))
+        assert bay.clutch_held and not bay.breach_lock, f"clutch dropped at t={k * CONTROL_DT:.2f}s"
+    assert co.peak_arm_ratio(1, "rescue") < co.config.arm_torque_margin
+    assert co.state(1) == BayState.RESCUE
+
+
+def test_clutch_held_glove_keeps_driving_the_arm_through_fast_free_space_motion(
+    rig: Rig,
+) -> None:
+    """Regression: a fast glove sweep froze the hand ~0.5 s into a clutch hold.
+
+    The raw clutch target ran tens of cm ahead of the wrist, the per-joint-clipped IK step
+    swung the arm off the straight line into the scene, and the contact tripped the arm torque
+    guard, which locks the clutch out until it is released.
+    """
+    co = rig.co
+    rig.stall_bay(1, flap_jammed=True)
+    assert co.state(1) == BayState.RESCUE
+    bay = co._bays[1]  # noqa: SLF001
+    console = ConsoleInputState(selected_bay=1, clutch=True)
+    n = round(4.0 / CONTROL_DT)
+    path: list[np.ndarray] = []
+    for k in range(n):
+        co.tick(console, _sweeping_glove(k * CONTROL_DT))
+        assert bay.clutch_held and not bay.breach_lock, f"clutch dropped at t={k * CONTROL_DT:.2f}s"
+        path.append(_bay_pos(rig, 1))
+    assert co.peak_arm_ratio(1, "rescue") < co.config.arm_torque_margin
+    # Still following the glove in the last second, not parked.
+    last = np.array(path[-round(1.0 / CONTROL_DT) :])
+    assert float(np.ptp(last, axis=0).max()) > 0.05
+    # The glove stops: the wrist settles onto the clutch target.
+    hold = _sweeping_glove(n * CONTROL_DT)
+    for _ in range(round(2.0 / CONTROL_DT)):
+        co.tick(console, hold)
+    assert bay.clutch_held
+    assert bay.hold_pose is not None
+    target = bay.indexer.update(True, hold.glove_wrist, co.rig(1).wrist_pose())
+    assert target is not None and target.position is not None
+    assert np.linalg.norm(_bay_pos(rig, 1) - np.asarray(target.position)) < 5e-3
+
+
 def test_control_uses_estimate_not_truth(unoq, hand_spec, validator):
     rig = Rig(unoq, hand_spec, validator)
     rig.co.start_cycle(1)
