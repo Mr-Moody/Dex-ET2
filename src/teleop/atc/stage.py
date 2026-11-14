@@ -485,7 +485,12 @@ class StageController:
         self.actions.append(ActionNote(self._action_seq, key, text, level))
         logger.info("key %s: %s", key, text)
 
-    def _rescue_bay_now(self) -> int | None:
+    @property
+    def rescue_elapsed_s(self) -> float:
+        """Seconds since the current bay took the rescue slot (0 when none holds it)."""
+        return 0.0 if self._rescue_bay is None else self.coordinator.time_s - self._rescue_t0
+
+    def rescue_bay(self) -> int | None:
         """The bay waiting for, or under, an operator rescue (not one being validated)."""
         co = self.coordinator
         for bay in co.rescue_slot_holders():
@@ -516,7 +521,7 @@ class StageController:
 
     def _outcome(self, action: StageAction) -> tuple[str, str]:
         """What ``action`` just did, as ``(text, level)`` for the operator displays."""
-        rescue = self._rescue_bay_now()
+        rescue = self.rescue_bay()
         if action in _SELECT:
             bay = _SELECT[action]
             if rescue == bay:
@@ -744,6 +749,51 @@ def scripted_rescue(coordinator: AtcCoordinator, bay_id: int) -> Iterator[Operat
             yield OperatorInput(wrist, fingers)
 
 
+class ScriptedGlove:
+    """Stand-in glove for ``--source synthetic``: performs the demo rescue on the clutch.
+
+    While the operator holds the clutch on the bay waiting for rescue, each ``latest()`` call
+    (one per 60 Hz tick) returns the next sample of :func:`scripted_rescue`, anchored at that
+    bay's hover pose. Like the stage director it waits for the 3 cm retract to settle first and
+    stops advancing once the bolt is clear, then holds that pose. Releasing the clutch resets
+    it, so the next engagement starts a fresh rescue. Otherwise it returns ``None`` and the hand
+    holds still (the raw synthetic source just opens and closes every finger).
+    """
+
+    SETTLE_S = 0.7  # same hover settle the stage director allows before its scripted rescue
+    CLEAR_MARGIN_M = 0.0015
+
+    def __init__(self, controller: StageController) -> None:
+        self.controller = controller
+        self._bay: int | None = None
+        self._samples: Iterator[OperatorInput] | None = None
+        self._last: OperatorInput | None = None
+
+    def latest(self) -> OperatorInput | None:
+        ctl = self.controller
+        bay = ctl.rescue_bay()
+        engaged = bay is not None and ctl.console.clutch and ctl.console.selected_bay == bay
+        if not engaged:
+            self._bay, self._samples, self._last = None, None, None
+            return None
+        assert bay is not None
+        if self._samples is None or self._bay != bay:
+            if ctl.rescue_elapsed_s < self.SETTLE_S:
+                return None  # still retracting into the hover: hold until it settles
+            self._bay = bay
+            self._samples = scripted_rescue(ctl.coordinator, bay)
+        cleared = ctl.coordinator.rig(bay).bolt_x() >= BOLT_CLEARED_M + self.CLEAR_MARGIN_M
+        if not cleared or self._last is None:
+            sample = next(self._samples, None)
+            if sample is not None:
+                self._last = sample
+        return self._last
+
+    @contextlib.contextmanager
+    def running(self) -> Generator[ScriptedGlove]:
+        yield self
+
+
 # --------------------------------------------------------------------------- 6-beat director
 
 BEATS: tuple[str, ...] = (
@@ -889,6 +939,7 @@ class StageDirector:
 __all__ = [
     "BEATS",
     "KEYMAP",
+    "ScriptedGlove",
     "key_name",
     "AudioCues",
     "BeatResult",

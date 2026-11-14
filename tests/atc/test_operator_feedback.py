@@ -137,3 +137,42 @@ def test_rescue_presses_point_at_the_bay_waiting(controller: StageController) ->
     assert level == "ok" and "gloves now drive Bay 1" in text
     _, text, level = _press(ctl, SPACE)
     assert level == "info" and "checking whether the bolt cleared" in text
+
+
+@needs_models
+def test_scripted_glove_rescues_on_the_clutch_and_rests_otherwise(
+    controller: StageController,
+) -> None:
+    """``--source synthetic``: keys alone can run a full rescue, and the hand never flaps."""
+    from teleop.atc.stage import ScriptedGlove
+
+    ctl = controller
+    co = ctl.coordinator
+    glove = ScriptedGlove(ctl)
+
+    def tick() -> None:
+        ctl.tick(glove.latest())
+
+    assert glove.latest() is None  # no rescue: nothing to drive
+    _press(ctl, "F")
+    for _ in range(3_000):
+        tick()
+        if co.state(1) == BayState.RESCUE:
+            break
+    assert co.state(1) == BayState.RESCUE
+    _press(ctl, "1")
+    assert glove.latest() is None  # selected but clutch off: the hand holds still
+
+    _press(ctl, SPACE)
+    for _ in range(round(4.0 * 60)):  # the scripted rescue lasts about 3.1 s
+        tick()
+    assert co.rig(1).bolt_x() >= 0.052, "the scripted glove should slide the bolt clear"
+
+    _, text, _ = _press(ctl, SPACE)
+    assert "checking whether the bolt cleared" in text
+    for _ in range(600):
+        tick()
+        if co.library:
+            break
+    assert len(co.library) == 1, "the rescue should pass the gate and join the fleet library"
+    assert ctl.hud_view().gate.ok

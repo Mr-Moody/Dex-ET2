@@ -355,6 +355,14 @@ function situation(t) {
     const bolt = b && b.x_bolt_cm != null ? `${b.x_bolt_cm.toFixed(1)} cm` : "unknown";
     const tag = refused ? `Refused · Bay ${r}` : `Rescue · Bay ${r}`;
     const tone = refused ? "ood" : "rescue";
+    if (t.rescue.clutch && !refused && b && b.x_bolt_cm != null && b.x_bolt_cm >= t.bolt_clear_cm) {
+      return {
+        tone, tag,
+        head: `Bolt cleared on Bay ${r}`,
+        hint: `Release the clutch with ${kbd("Space")} to hand the rescue over: the UNO Q learns it as a skill.`,
+        keys: [32],
+      };
+    }
     if (t.rescue.clutch) {
       return {
         tone, tag,

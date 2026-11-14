@@ -234,10 +234,15 @@ key's outcome in its bottom-right overlay.
 | `P` | Arm the Bay 2 pinned bolt (out-of-distribution, refused) |
 | `R` | Reset |
 
+Without gloves (`--source synthetic`), engaging the clutch on the bay waiting for rescue plays a
+scripted rescue: the hand presses the stopper flap and slides the bolt clear, then holds. The
+hand stays still the rest of the time. With `--source studio`, your gloves drive the hand
+instead.
+
 A typical manual run:
 
 1. Press `F` and wait for Bay 1 to stall and queue.
-2. Press `1`, then `SPACE`, to rescue it.
+2. Press `1`, then `SPACE`, to rescue it. Press `SPACE` again once the bolt is clear.
 3. Watch the skill fit, the 3/3 gate and Bay 2 clearing itself.
 4. Press `P` to see the refusal.
 
