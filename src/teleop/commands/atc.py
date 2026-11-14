@@ -119,7 +119,7 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
 
 
 class GloveOperator:
-    """Right-hand glove frames -> ``OperatorInput`` (wrist pose + LEAP targets by name)."""
+    """Right-hand glove frames -> ``OperatorInput`` (wrist pose + hand targets by name)."""
 
     def __init__(self, source: InputSource, wrist: WristSource, retargeter: Retargeter) -> None:
         self.source = source
@@ -130,7 +130,7 @@ class GloveOperator:
     def build(cls, cfg: AtcConfig, model: Any) -> GloveOperator:
         hand = load_hand("inspire")
         ranges: dict[str, tuple[float, float]] = {}
-        for name in HAND_ACTUATORS:  # both active bays share one LEAP model: read Bay 1's
+        for name in HAND_ACTUATORS:  # both active bays share one hand model: read Bay 1's
             act = model.actuator(f"bay1/{name}")
             if bool(model.actuator_ctrllimited[act.id]):
                 lo, hi = (float(v) for v in model.actuator_ctrlrange[act.id])

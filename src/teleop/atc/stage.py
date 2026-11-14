@@ -595,10 +595,10 @@ class StageController:
 # --------------------------------------------------------------------------- scripted operator
 
 # Scripted glove rescue (duration s, wrist delta from the safe hover in the latch frame in
-# metres, finger press fraction): the index finger rests behind the bolt hook, the middle
-# finger presses the raised stopper flap flat, then the wrist pushes the bolt clear. Same
-# demonstration the T-140 tests use.
-RESCUE_PRESS = {"thumb_yaw": 0.7}
+# metres, finger press fraction): the wrist drops so the index sits low behind the bolt hook,
+# the thumb swings under the palm and presses the raised stopper flap flat at its free end,
+# then the wrist pushes the bolt clear. Same demonstration the T-140 tests use.
+RESCUE_PRESS = {"thumb_yaw": 0.6}
 RESCUE_WAYPOINTS: tuple[tuple[float, tuple[float, float, float], float], ...] = (
     (0.0, (0.0, 0.0, 0.0), 0.0),
     (0.4981, (0.0055, -0.004, -0.012), 0.0),

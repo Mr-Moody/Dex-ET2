@@ -17,6 +17,7 @@ import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.sim.bays import WRIST_COMPLIANCE_AXES
 from teleop.sim.ik import ARM_JOINTS
 
 mj: Any = _mujoco
@@ -31,14 +32,16 @@ def _norm_prefix(prefix: str) -> str:
 
 
 class ExternalTorqueEstimator:
-    """``tau_ext`` over a bay's 7 arm + 16 hand DoFs (arm first, then hand in model order)."""
+    """``tau_ext`` over a bay's 7 arm + hand finger DoFs (arm first, then hand in model order)."""
 
     def __init__(self, model: Any, bay_prefix: str) -> None:
         p = _norm_prefix(bay_prefix)
         self._model = model
         self._scratch: Any = mj.MjData(model)
         arm = [f"{p}{n}" for n in ARM_JOINTS]
-        latch = {f"{p}{n}" for n in LATCH_JOINTS}
+        # Passive joints that are not hand joints: the latch's and the compliant wrist's (its
+        # spring load depends on which Panda posture reached the latch, the fingers' does not).
+        latch = {f"{p}{n}" for n in (*LATCH_JOINTS, *WRIST_COMPLIANCE_AXES)}
         hand = [
             str(model.joint(j).name)
             for j in range(int(model.njnt))

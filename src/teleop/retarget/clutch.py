@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 FloatArray = NDArray[np.float64]
 
 ARM_ACTUATORS = tuple(f"actuator{i}" for i in range(1, 8))
-BAY_ACTUATORS = (*ARM_ACTUATORS, *HAND_ACTUATORS)  # 7 Panda + 16 LEAP, unprefixed
+BAY_ACTUATORS = (*ARM_ACTUATORS, *HAND_ACTUATORS)  # 7 Panda + 6 Inspire, unprefixed
 
 IDENTITY: Quat = (0.0, 0.0, 0.0, 1.0)
 
@@ -125,7 +125,7 @@ def _actuator_joint_qadr(model: Any, actuator_id: int) -> int:
 
 
 def read_hand_q(model: Any, data: Any, bay_prefix: str) -> FloatArray:
-    """Measured LEAP joint positions in ``HAND_ACTUATORS`` order (16 values)."""
+    """Measured hand joint positions in ``HAND_ACTUATORS`` order."""
     p = _norm_prefix(bay_prefix)
     qpos = np.asarray(data.qpos, dtype=np.float64)
     return np.array(
@@ -140,7 +140,7 @@ def read_hand_q(model: Any, data: Any, bay_prefix: str) -> FloatArray:
 def bleed_off_targets(
     model: Any, data: Any, bay_prefix: str
 ) -> tuple[FloatArray, dict[str, float]]:
-    """Pin all 23 bay actuators (7 Panda + 16 LEAP) to their measured joint positions.
+    """Pin all bay actuators (7 Panda + the hand's) to their measured joint positions.
 
     Writes ``data.ctrl`` so the position servos stop pushing at once (a held target is a zero
     commanded velocity; only the servos' own damping acts), and returns the targets as an array
@@ -172,7 +172,7 @@ class RescueTrajectory:
 
     timestamps_s: FloatArray  # (N,), starts at 0
     wrist_latch_se3: FloatArray  # (N, 7): x, y, z, qx, qy, qz, qw
-    fingers_q: FloatArray  # (N, 16) in actuator_names order
+    fingers_q: FloatArray  # (N, n_hand) in actuator_names order
     tau_ext_inf: FloatArray  # (N,)
     actuator_names: tuple[str, ...] = HAND_ACTUATORS
 
@@ -266,7 +266,7 @@ class RescueTrajectoryBuffer:
         else:
             q = [float(v) for v in np.asarray(hand_q, dtype=np.float64).ravel()]
         if len(q) != len(self.actuator_names):
-            raise ValueError(f"need {len(self.actuator_names)} LEAP joints, got {len(q)}")
+            raise ValueError(f"need {len(self.actuator_names)} hand joints, got {len(q)}")
         local = relative_pose(self.world_from_latch, world_wrist)
         self._t.append(float(t_s))
         self._wrist.append(pose_to_vec7(local))
@@ -304,7 +304,7 @@ TOP_HEIGHT_M = 0.6  # camera distance from the latch origin along its view axis
 TOP_TILT_RAD = math.radians(25.0)
 SIDE_STANDOFF_M = 0.6
 SIDE_LIFT_M = 0.06
-PANDA_VISUAL_GROUP = 2  # Menagerie Panda link meshes; LEAP visuals are group 1, the latch group 0
+PANDA_VISUAL_GROUP = 2  # Menagerie Panda link meshes; hand visuals are group 1, the latch group 0
 
 
 def rescue_camera_names(bay_prefix: str) -> tuple[str, str]:
@@ -354,7 +354,7 @@ def rescue_view_option() -> Any:
     """``MjvOption`` for the inset cameras: hides the Panda's link meshes.
 
     From straight above, the forearm hovering over the latch would otherwise fill the top view;
-    with it hidden the LEAP fingers, bolt and flap stay visible. Pass it as
+    with it hidden the hand's fingers, bolt and flap stay visible. Pass it as
     ``renderer.update_scene(data, camera, scene_option=rescue_view_option())``.
     """
     opt = mj.MjvOption()

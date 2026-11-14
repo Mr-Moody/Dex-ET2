@@ -96,7 +96,7 @@ class SkillPrimitive:
 
     Each of ``y0``, ``y_goal`` and the rows of ``weights`` has ``6 + len(actuator_names)``
     entries: wrist position in the latch frame (3), rotation log relative to
-    ``goal_orientation`` (3), then LEAP actuator targets in ``actuator_names`` order.
+    ``goal_orientation`` (3), then hand actuator targets in ``actuator_names`` order.
     ``tau_demo`` is the bin-averaged nominal ``|tau_ext|_inf`` profile, one value per kernel.
     """
 

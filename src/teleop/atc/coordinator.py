@@ -20,7 +20,7 @@ After a clutch-held rescue clears the bolt the recording is fitted by the UNO Q,
 Compliance events and reasoning contexts are emitted without blocking the control loop.
 
 Torque convention: ``tau_ext_inf`` for the stall signature, torque tube, rescue recordings and
-snapshots is the inf-norm over the 16 LEAP joints (arm torques depend on which Panda reached
+snapshots is the inf-norm over the hand finger joints (arm torques depend on which Panda reached
 the contact, hand torques do not). C(t) keeps the spec's all-DoF (arm + hand) ``tau_ext``, which
 already gives C > 0.85 nominal and C < 0.3 on a stall.
 
@@ -157,16 +157,17 @@ class CoordinatorConfig:
     max_classify_s: float = 0.3
     # The Inspire fingers have no abduction compliance, so a blocked push loads the arm almost
     # directly: a 3 mm lead keeps a flap stall under the arm torque guard.
-    push_lead_limit_m: float = 0.012
+    push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
 
 
 @dataclass(frozen=True, slots=True)
 class RoutineSpec:
     """One-finger unlatching push in the latch frame, shared by every active bay.
 
-    The wrist orientation is ``Rz(yaw) Ry(pitch) Rx(roll)`` in the latch frame (palm down, hand
-    yawed so the index rests behind the bolt hook and the middle finger hangs over the stopper
-    flap). The wrist starts ``start_x`` along the latch +X axis and advances at ``speed``.
+    The wrist orientation is ``Rz(yaw) Ry(pitch) Rx(roll)`` in the latch frame (palm down and
+    rolled, hand yawed so the index rests behind the bolt hook, pushing partly in its flexion
+    plane, and the tucked thumb rides clear above the stopper flap). The wrist starts
+    ``start_x`` along the latch +X axis and advances at ``speed``.
     """
 
     yaw: float
@@ -276,7 +277,7 @@ class StallDetector:
 
 @dataclass(frozen=True, slots=True)
 class OperatorInput:
-    """One glove sample: wrist pose in the glove/sim axes and LEAP actuator targets by name."""
+    """One glove sample: wrist pose in the glove/sim axes and hand actuator targets by name."""
 
     glove_wrist: Pose
     hand_targets: Mapping[str, float] = field(default_factory=dict[str, float])
@@ -482,8 +483,8 @@ class AtcCoordinator:
         start = compose_pose(wfl, self.routine.pose_at(0.0))
         here = rig.wrist_pose()
         lift_z = rig.world_latch().position[2] + LIFT_HEIGHT_M
-        # Every LEAP actuator, not just the routine's: clutch release pins all 16 targets to the
-        # rescue posture, and a stale one (e.g. mf_rot_act) would rest a finger on the bolt.
+        # Every hand actuator, not just the routine's: clutch release pins all targets to the
+        # rescue posture, and a stale one (e.g. thumb_yaw) would rest a finger on the latch.
         fingers = {name: 0.0 for name in HAND_ACTUATORS} | dict(self.routine.fingers)
         rig.ik.reset()
         bay.approach = ApproachPlan(here, [lifted(here, lift_z), lifted(start, lift_z), start])

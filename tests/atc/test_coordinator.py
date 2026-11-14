@@ -156,9 +156,9 @@ def rig(unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator) -> Rig
 # --------------------------------------------------------------------------- scripted operator
 
 # Waypoints (duration s, wrist delta from the safe hover in the latch frame in metres, finger
-# press fraction). The index finger rests behind the bolt hook, the middle finger presses the
-# raised stopper flap flat (press fraction 1), then the wrist pushes the bolt clear.
-DEMO_PRESS = {"thumb_yaw": 0.7}
+# press fraction). The index finger rests behind the bolt hook, the thumb presses the raised
+# stopper flap flat (press fraction 1), then the wrist pushes the bolt clear.
+DEMO_PRESS = {"thumb_yaw": 0.6}
 DEMO_WAYPOINTS: list[tuple[float, tuple[float, float, float], float]] = [
     (0.0, (0.0, 0.0, 0.0), 0.0),
     (0.4981, (0.0055, -0.004, -0.012), 0.0),
@@ -317,7 +317,7 @@ def test_additive_torque_tube_allows_free_space_zero_demo_torque_and_aborts_on_e
     t = np.linspace(0.0, 1.5, n)
     q = mat_to_quat(ROUTINE.rotation())
     wrist = np.zeros((n, 7))
-    wrist[:, 0] = -0.0375 + 0.06 * t / 1.5
+    wrist[:, 0] = ROUTINE.start_x - 0.01 + 0.06 * t / 1.5  # first 0.6 s stay short of the hook
     wrist[:, 1], wrist[:, 2] = ROUTINE.y, ROUTINE.z
     wrist[:, 3:] = q
     base = np.array([ROUTINE.fingers.get(a, 0.0) for a in HAND_ACTUATORS])
@@ -352,7 +352,8 @@ def test_additive_torque_tube_allows_free_space_zero_demo_torque_and_aborts_on_e
     rig.co.library[skill.skill_id] = skill
     unoq.register_skill(skill)
     tight = Rig(unoq, hand_spec, validator)
-    tight.co.config = type(tight.co.config)(tau_margin=0.4)
+    # The Inspire finger servos are force-limited (1 Nm), so a jam shows as ~0.4 Nm on the hand.
+    tight.co.config = type(tight.co.config)(tau_margin=0.1)
     tight.co.library[skill.skill_id] = skill
     tight.co.start_cycle(2, flap_jammed=True)
     states: set[BayState] = set()
@@ -378,10 +379,13 @@ def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> 
         co.tick()
     co.start_cycle(2, flap_jammed=True)
     seen_queued = False
+    stall_wrist_x: float | None = None
     for _ in range(1500):
         snaps = co.tick()
         assert len(co.rescue_slot_holders()) <= 1
         if snaps[1].state == BayState.QUEUED:
+            if stall_wrist_x is None:  # first queued tick: the retract has not moved it yet
+                stall_wrist_x = float(_latch_rel(rig, 2)[0])
             seen_queued = True
             if snaps[0].state == BayState.RESCUE:
                 break
@@ -398,7 +402,8 @@ def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> 
     assert np.linalg.norm(_bay_pos(rig, 2) - p0) < 1e-3
     stall_x = co.last_signature(2)
     assert stall_x is not None and 0.030 <= stall_x.x_bolt_m <= 0.040
-    assert _latch_rel(rig, 2)[0] < -0.02  # backed off along latch -X (stall wrist was ~ -0.007)
+    assert stall_wrist_x is not None
+    assert _latch_rel(rig, 2)[0] < stall_wrist_x - 0.02  # backed off along latch -X
     assert rig.sink.kinds().count("STALL_ALERT") == 2
 
     # Operator clutches the queued bay: ignored. Bay 1 rescue completes, then Bay 2 is served.
@@ -535,7 +540,7 @@ def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: R
 
 
 def test_clean_cycles_after_a_rescue_keep_clearing(rig: Rig) -> None:
-    """Clutch release pins every LEAP target; the next cycles must not inherit that posture."""
+    """Clutch release pins every hand target; the next cycles must not inherit that posture."""
     co = rig.co
     _rescued_rig(rig)
     outcomes: list[str] = []

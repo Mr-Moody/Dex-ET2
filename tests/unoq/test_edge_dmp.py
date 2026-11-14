@@ -66,7 +66,7 @@ def _yaw_pose(x: float, y: float, z: float, yaw_deg: float) -> Pose:
 
 
 def synthetic_rescue(duration_s: float = 4.0, hz: float = 60.0) -> dict[str, Any]:
-    """A smooth thumb-hold + index-slide rescue in the latch frame (wrist, 16 joints, tau)."""
+    """A smooth thumb-hold + index-slide rescue in the latch frame (wrist, hand joints, tau)."""
     t = np.arange(0.0, duration_s + 1e-9, 1.0 / hz)
     u = t / duration_s
     pos = np.stack(
@@ -84,7 +84,8 @@ def synthetic_rescue(duration_s: float = 4.0, hz: float = 60.0) -> dict[str, Any
         for ui in u
     ]
     wrist = np.hstack([pos, np.asarray(quats)])
-    fingers = np.stack([0.8 * np.sin(math.pi * u * (1 + i / 16)) for i in range(16)], axis=1)
+    n = len(HAND_ACTUATORS)
+    fingers = np.stack([0.8 * np.sin(math.pi * u * (1 + i / n)) for i in range(n)], axis=1)
     tau = np.where((u > 0.4) & (u < 0.7), 3.0, 0.2)
     return {"t": t, "wrist": wrist, "fingers": fingers, "tau": tau}
 
@@ -164,7 +165,7 @@ def test_rbf_dmp_fit_completes_under_20ms_and_reconstructs_trajectory() -> None:
     assert min(times) < 0.020
     assert skill.fit_ms < 20.0
     assert skill.n_kernels == 30
-    assert skill.n_dims == 6 + 16
+    assert skill.n_dims == 6 + len(HAND_ACTUATORS)
     assert skill.actuator_names == HAND_ACTUATORS
 
     duration = float(demo["t"][-1])

@@ -1,13 +1,13 @@
 """Bay physics rig, DMP replay and the 3-rollout headless validation gate (spec 4.4).
 
 ``BayRig`` wraps one bay of a compiled scene (Panda DLS IK, ``tau_ext`` estimator, latch
-controller, LEAP actuators by name). ``SkillReplay`` turns a ``SkillPrimitive`` into per-tick
+controller, hand actuators by name). ``SkillReplay`` turns a ``SkillPrimitive`` into per-tick
 wrist and finger commands in any latch frame. ``SkillValidator`` owns one reusable headless
 single-bay ``MjModel``/``MjData``: the three pose perturbations only move the latch body in the
 model (no XML recompile), so a gate run costs a few hundred physics steps per rollout.
 
 Torque convention: every ``tau_ext_inf`` used for stall signatures, the torque tube and the
-hard-max check is the inf-norm over the 16 LEAP hand joints only. Hand torques depend on the
+hard-max check is the inf-norm over the hand finger joints only. Hand torques depend on the
 contact in the latch frame, not on which Panda reached it, so they transfer between bays.
 
 Nothing here reads ``flap_hinge``: clearance is judged from ``x_bolt``, ``tau_ext`` and the
@@ -184,7 +184,7 @@ def lifted(pose: Pose, z_world: float) -> Pose:
 
 
 class BayRig:
-    """One bay's IK, torque estimator, latch fault controller and LEAP actuators by name.
+    """One bay's IK, torque estimator, latch fault controller and hand actuators by name.
 
     The arm is only ever moved by ``command`` (IK + position servos). The single kinematic
     placement is ``home_keyframe`` once, when a scene or model is first built.
@@ -258,7 +258,7 @@ class BayRig:
         return self.torque.estimate(self.data)
 
     def tau_hand_inf(self, tau: FloatArray | None = None) -> float:
-        """``|tau_ext|_inf`` over the 16 LEAP joints only (arm joints come first in ``tau``)."""
+        """``|tau_ext|_inf`` over the hand finger joints only (arm joints come first in ``tau``)."""
         t = self.tau_ext() if tau is None else tau
         return float(np.max(np.abs(t[N_ARM_DOF:])))
 
@@ -297,7 +297,7 @@ class BayRig:
         self.latch.reset(flap_jammed=flap_jammed, bolt_pinned=bolt_pinned)
 
     def command(self, wrist: Pose, fingers: Mapping[str, float] | None = None) -> None:
-        """One 60 Hz control tick: a DLS step towards ``wrist`` plus LEAP targets by name."""
+        """One 60 Hz control tick: a DLS step towards ``wrist`` plus hand targets by name."""
         self.ik.apply(self.data, self.ik.solve(self.data, wrist, CONTROL_DT))
         self.set_fingers(fingers)
 
