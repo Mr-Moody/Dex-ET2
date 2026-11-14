@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from teleop.health.model import Health, HealthCheck, Level, health_to_dict
+
+logger = logging.getLogger(__name__)
 
 
 class HealthMonitor:
@@ -82,7 +85,8 @@ class HealthMonitor:
         try:
             check.reconnect()
         except Exception:
-            pass  # the next poll reports the real state
+            # The next poll reports the real state; keep the cause for the operator's log.
+            logger.warning("health: %s reconnect failed", check.name, exc_info=True)
         finally:
             with self._lock:
                 self._busy.discard(check.name)

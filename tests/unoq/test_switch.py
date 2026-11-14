@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 from collections.abc import Iterator
 from typing import cast
@@ -111,6 +112,26 @@ def test_error_reply_on_board_propagates_without_swap(board: UnoQServer) -> None
         unoq.close()
 
 
+class _TruncatingBoard(UnoQServer):
+    """A board that dies mid-reply: half a JSON line, then the connection closes."""
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        with conn, conn.makefile("rb") as reader:
+            if reader.readline():
+                conn.sendall(b'{"ok": true, "matched_sig')
+
+
+def test_truncated_board_reply_fails_over_to_loopback() -> None:
+    with _TruncatingBoard(host="127.0.0.1", udp_port=0, tcp_port=0).start() as broken:
+        unoq = SwitchableUnoQ(_client(broken))
+        try:
+            match, _ = unoq.classify_stall(SKU, Z)  # retried on the loopback node
+            assert unoq.is_mock is True
+            assert match.is_ood is True  # the fresh loopback node knows no skills
+        finally:
+            unoq.close()
+
+
 def test_replaying_skills_twice_adds_no_duplicate_samples(board: UnoQServer) -> None:
     unoq = SwitchableUnoQ(_client(board))
     with _server() as other:
@@ -172,6 +193,22 @@ def test_poller_records_heartbeat_age() -> None:
                     break
                 time.sleep(0.01)
             assert poller.heartbeat_age_ms is not None
+        finally:
+            poller.close()
+
+
+def test_poller_reports_last_successful_poll() -> None:
+    clock_ns = [5_000]
+    with _server() as server:
+        poller = UnoQConsolePoller(_client(server), period_s=3600.0, clock=lambda: clock_ns[0])
+        try:
+            assert poller.last_ok_ns is None
+            poller.poll_once()
+            assert poller.last_ok_ns == 5_000
+            server.stop()
+            clock_ns[0] = 9_000
+            poller.poll_once()  # fails: the last success stays put
+            assert poller.last_ok_ns == 5_000
         finally:
             poller.close()
 

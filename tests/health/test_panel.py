@@ -170,8 +170,139 @@ def test_stale_board_heartbeat_warns() -> None:
         try:
             panel.step()
             assert panel.status().level == Level.OK
-            clock.advance(0.5)  # no fresh probe since: the heartbeat is now 620 ms old
+            clock.advance(0.9)  # the next probe is due at 1.0 s: still judged by the last one
+            assert panel.status().level == Level.OK
+            clock.advance(1.5)  # 2.4 s > 2 x ping period + timeout: the probe result is stale
             assert panel.status().level == Level.WARN
+        finally:
+            panel.stop()
+            unoq.close()
+
+
+def test_healthy_heartbeat_stays_ok_between_probes() -> None:
+    """A 1 s probe period must not flicker OK/WARN against the 0.5 s heartbeat threshold."""
+    clock = FakeClock()
+    with _HeartbeatServer(120).start() as live:
+        unoq = SwitchableUnoQ(_client(live))
+        panel = _panel(unoq, live, clock=clock)
+        try:
+            levels = []
+            for _ in range(3):
+                panel.step()
+                for _ in range(4):
+                    levels.append(panel.status().level)
+                    clock.advance(0.25)
+            assert set(levels) == {Level.OK}
+        finally:
+            panel.stop()
+            unoq.close()
+
+
+def test_old_board_heartbeat_at_probe_time_warns() -> None:
+    with _HeartbeatServer(600).start() as live:
+        unoq = SwitchableUnoQ(_client(live))
+        panel = _panel(unoq, live, clock=FakeClock())
+        try:
+            panel.step()
+            assert panel.status().level == Level.WARN
+        finally:
+            panel.stop()
+            unoq.close()
+
+
+class FakeLink:
+    """What the laptop's own console poller heard: ``last_ok_ns`` on the panel's clock."""
+
+    def __init__(self, clock: FakeClock, heartbeat_age_ms: int | None = 100) -> None:
+        self.heartbeat_age_ms = heartbeat_age_ms
+        self.last_ok_ns: int | None = clock.ns
+
+
+class LinkSource:
+    def __init__(self, link: FakeLink | None) -> None:
+        self.link = link
+        self.rebuilds = 0
+
+    def __call__(self) -> FakeLink | None:
+        return self.link
+
+    def rebuild(self) -> None:
+        self.rebuilds += 1
+
+
+def test_board_up_without_button_poller_warns_and_rebuilds() -> None:
+    """(a) After a swap the second (button) connection failed: no green light, and it retries."""
+    clock = FakeClock()
+    src = LinkSource(None)
+    with _HeartbeatServer(120).start() as live:
+        unoq = SwitchableUnoQ(_client(live))
+        panel = _panel(unoq, live, clock=clock, buttons=src, rebuild_consoles=src.rebuild)
+        try:
+            panel.step()
+            h = panel.status()
+            assert h.level == Level.WARN  # the board itself hears its MCU, the laptop does not
+            assert "not connected" in h.summary
+            assert h.can_reconnect is True
+            assert src.rebuilds == 0  # one stale step is not enough
+            panel.step()
+            assert src.rebuilds == 1
+            src.link = FakeLink(clock)
+            panel.step()
+            assert panel.status().level == Level.OK
+            panel.step()
+            assert src.rebuilds == 1
+        finally:
+            panel.stop()
+            unoq.close()
+
+
+def test_dead_button_poller_warns_and_rebuilds() -> None:
+    """(b) The board service restarted: the panel probe recovers but the poller's socket is dead."""
+    clock = FakeClock()
+    src = LinkSource(FakeLink(clock))
+    with _HeartbeatServer(120).start() as live:
+        unoq = SwitchableUnoQ(_client(live))
+        panel = _panel(unoq, live, clock=clock, buttons=src, rebuild_consoles=src.rebuild)
+        try:
+            panel.step()
+            assert panel.status().level == Level.OK
+            clock.advance(1.0)  # the poller has not succeeded since: its socket died
+            h = panel.status()
+            assert h.level == Level.WARN
+            assert "not heard" in h.summary
+            panel.step()
+            clock.advance(1.0)
+            panel.step()
+            assert src.rebuilds == 1
+        finally:
+            panel.stop()
+            unoq.close()
+
+
+def test_poller_reporting_old_heartbeat_warns() -> None:
+    clock = FakeClock()
+    src = LinkSource(FakeLink(clock, heartbeat_age_ms=None))
+    with _HeartbeatServer(120).start() as live:
+        unoq = SwitchableUnoQ(_client(live))
+        panel = _panel(unoq, live, clock=clock, buttons=src, rebuild_consoles=src.rebuild)
+        try:
+            panel.step()
+            assert panel.status().level == Level.WARN
+            assert "console sketch" in panel.status().detail
+        finally:
+            panel.stop()
+            unoq.close()
+
+
+def test_reconnect_on_board_rebuilds_consoles() -> None:
+    clock = FakeClock()
+    src = LinkSource(FakeLink(clock))
+    with _HeartbeatServer(120).start() as live:
+        unoq = SwitchableUnoQ(_client(live))
+        panel = _panel(unoq, live, clock=clock, buttons=src, rebuild_consoles=src.rebuild)
+        try:
+            panel.reconnect()
+            assert src.rebuilds == 1
         finally:
             panel.stop()
             unoq.close()

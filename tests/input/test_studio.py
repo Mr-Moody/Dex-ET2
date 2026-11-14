@@ -340,6 +340,26 @@ def test_liveness_counts_datagrams():
         src.stop()
 
 
+def test_arrivals_pruned_without_liveness_calls(monkeypatch: pytest.MonkeyPatch):
+    """sim/calibrate never call liveness(): the receive loop itself bounds the arrival window."""
+    monkeypatch.setattr("teleop.input.studio._HZ_WINDOW_NS", -1)  # prune everything
+    src = StudioSource(StudioConfig(host="127.0.0.1", port=0))
+    src.start()
+    try:
+        payload = _payload({"x": 0.0, "y": 0.0, "z": 0.0})
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx:
+            for _ in range(40):
+                tx.sendto(payload, ("127.0.0.1", src.bound_port()))
+                time.sleep(0.002)
+        deadline = time.monotonic() + 1.0
+        while src._last_datagram_ns is None and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+            time.sleep(0.01)
+        time.sleep(0.05)
+        assert len(src._arrivals) == 0  # pyright: ignore[reportPrivateUsage]
+    finally:
+        src.stop()
+
+
 def test_liveness_bind_error_tolerated():
     blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     blocker.bind(("127.0.0.1", 0))

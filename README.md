@@ -221,8 +221,9 @@ Without the hardware, pass `--source synthetic` (the scripted glove) and, if you
 | Drive it yourself with the keyboard | `uv run teleop atc --source synthetic` |
 | Headless check (exits 0 only if all 6 beats pass) | `uv run teleop atc --source synthetic --headless --script --no-audio` |
 
-The console is served at <http://127.0.0.1:8765/> and opens in your browser. `--headless` never
-touches the hotspot and runs no health checks.
+The console is served at <http://127.0.0.1:8765/> and opens in your browser. `--headless` runs no
+health checks and leaves the hotspot alone unless `--hotspot` is given (then it starts the
+plain hotspot watchdog).
 
 ### Health strip
 

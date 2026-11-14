@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 from teleop.health.model import Health, Level
 from teleop.net.hotspot import Hotspot, HotspotConfigError, HotspotWatchdog, load_password
+
+logger = logging.getLogger(__name__)
 
 
 class HotspotCheck:
@@ -18,16 +21,18 @@ class HotspotCheck:
         watchdog: HotspotWatchdog | None,
         off_reason: str = "",
         off_detail: str = "",
+        off_level: Level = Level.OFF,
     ) -> None:
         self._hotspot = hotspot
         self._watchdog = watchdog
         self._off_reason = off_reason
         self._off_detail = off_detail
+        self._off_level = off_level
 
     def status(self) -> Health:
         wd = self._watchdog
         if self._hotspot is None or wd is None:
-            return Health(self.name, Level.OFF, self._off_reason, self._off_detail)
+            return Health(self.name, self._off_level, self._off_reason, self._off_detail)
         if wd.last_error is not None:
             return Health(self.name, Level.FAIL, "error", wd.last_error, can_reconnect=True)
         st = wd.last_status
@@ -73,5 +78,11 @@ def build_hotspot_check(
     from teleop.app import start_hotspot_watchdog
 
     # Bring-up happens on the watchdog thread (its first poll), not inline.
-    wd = start_hotspot_watchdog(env_file, inline_bring_up=False)
+    try:
+        wd = start_hotspot_watchdog(env_file, inline_bring_up=False)
+    except RuntimeError as exc:  # WinRTBackendError, e.g. no usable connection profile
+        if strict:
+            raise
+        logger.warning("hotspot: unavailable (%s)", exc)
+        return HotspotCheck(None, None, "unavailable", str(exc), Level.FAIL), None
     return HotspotCheck(wd.hotspot, wd), wd

@@ -201,6 +201,12 @@ class UnoQConsolePoller:
         with self._lock:
             return self._heartbeat_age_ms
 
+    @property
+    def last_ok_ns(self) -> int | None:
+        """Clock time of the last successful poll (None: never); the panel check reads it."""
+        with self._lock:
+            return self._last_ok_ns
+
     def state(self) -> ConsoleInputState:
         with self._lock:
             s, last = self._state, self._last_ok_ns
