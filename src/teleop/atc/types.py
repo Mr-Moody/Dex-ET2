@@ -113,6 +113,10 @@ class SkillPrimitive:
     tau_demo: tuple[float, ...]  # n_kernels
     prototype: StallSignature
     fit_ms: float = 0.0
+    # Index-tip contact offset along latch +X, calibrated from this skill's own demonstration:
+    # (tip - origin)·x - (HOOK_BACK_X_M + x_bolt) at the first bolt-encoder movement. None: no
+    # replay touch re-localization for this skill.
+    touch_offset_m: float | None = None
 
     def __post_init__(self) -> None:
         d = self.n_dims
@@ -149,6 +153,7 @@ class SkillPrimitive:
             "tau_demo": list(self.tau_demo),
             "prototype": list(self.prototype.as_vector()),
             "fit_ms": self.fit_ms,
+            "touch_offset_m": self.touch_offset_m,
         }
 
     @classmethod
@@ -170,6 +175,9 @@ class SkillPrimitive:
             tau_demo=_floats(raw["tau_demo"]),
             prototype=StallSignature.from_vector(_floats(raw["prototype"])),
             fit_ms=float(raw.get("fit_ms", 0.0)),
+            touch_offset_m=(
+                None if raw.get("touch_offset_m") is None else float(raw["touch_offset_m"])
+            ),
         )
 
 

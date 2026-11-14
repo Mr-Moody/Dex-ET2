@@ -345,3 +345,16 @@ def test_skill_ids_are_content_addressed() -> None:
         ).skill_id
         == "given"
     )
+
+
+def test_skill_touch_offset_round_trips_and_old_dicts_load() -> None:
+    import dataclasses
+
+    demo = synthetic_rescue()
+    skill = fit_rbf_dmp(demo["t"], demo["wrist"], demo["fingers"], demo["tau"])
+    assert skill.touch_offset_m is None
+    with_offset = dataclasses.replace(skill, touch_offset_m=-0.0123)
+    assert SkillPrimitive.from_dict(with_offset.to_dict()) == with_offset
+    legacy = skill.to_dict()
+    del legacy["touch_offset_m"]
+    assert SkillPrimitive.from_dict(legacy).touch_offset_m is None

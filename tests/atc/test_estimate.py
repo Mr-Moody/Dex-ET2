@@ -11,6 +11,8 @@ from teleop.atc.estimate import (
     TOUCH_SIGMA_M,
     LatchEstimate,
     LatchEstimator,
+    TouchDetector,
+    contact_offset,
     touch_correct,
 )
 from teleop.atc.types import LatchPose
@@ -80,3 +82,38 @@ def test_outlier_gate_is_floored_at_the_touch_sigma():
     far = local_point(est.pose, HOOK_BACK_X_M - INDEX_PAD_RADIUS_M + 0.0045, 0.0, 0.05)
     out = touch_correct(est, far, 0.0)
     assert out.pose == est.pose and out.rejected_correction_m == pytest.approx(0.0045)
+
+
+def test_skill_contact_offset_convention_and_sign():
+    truth = LatchPose((0.5, 0.01, 0.02), 0.3)
+    tip = local_point(truth, HOOK_BACK_X_M + 0.03 - 0.009, 0.004, 0.05)  # a 9 mm "pad"
+    exact = LatchEstimate(truth, 0.003, 0.001, 0.026)
+    off = contact_offset(exact, tip, 0.03)
+    assert off == pytest.approx(-0.009)  # offset = -pad
+    # The default pad offset is today's INDEX_PAD_RADIUS_M behaviour.
+    assert touch_correct(exact, tip, 0.03).last_correction_m == pytest.approx(
+        touch_correct(exact, tip, 0.03, pad_offset_m=-INDEX_PAD_RADIUS_M).last_correction_m
+    )
+    # The demo's own offset makes a truthful estimate a zero correction ...
+    assert touch_correct(exact, tip, 0.03, pad_offset_m=off).last_correction_m == pytest.approx(
+        0.0, abs=1e-12
+    )
+    # ... and an estimate 1 mm too far along +X is corrected by -1 mm.
+    ahead = LatchEstimate(
+        LatchPose(tuple(np.add(truth.position, 0.001 * axis_x(truth))), truth.yaw_rad),
+        0.003,
+        0.001,
+        0.026,
+    )
+    fixed = touch_correct(ahead, tip, 0.03, pad_offset_m=off)
+    assert fixed.last_correction_m == pytest.approx(-0.001)
+    np.testing.assert_allclose(fixed.pose.position, truth.position, atol=1e-12)
+
+
+def test_touch_detector_encoder_only_ignores_the_wrist():
+    det = TouchDetector()
+    det.reset()
+    assert not any(det.update(0.03, None) for _ in range(10))  # wrist path disabled
+    assert det.update(0.0306, None)  # encoder still fires
+    det.reset()
+    assert not det.update(0.03, 5.0) and det.update(0.03, 5.0)  # with a reading, 2 ticks

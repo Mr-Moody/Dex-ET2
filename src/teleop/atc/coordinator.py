@@ -44,7 +44,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -55,6 +55,8 @@ from teleop.atc.estimate import (
     POSE_SIGMA_YAW_RAD,
     LatchEstimate,
     LatchEstimator,
+    TouchDetector,
+    contact_offset,
     touch_correct,
 )
 from teleop.atc.types import (
@@ -284,52 +286,7 @@ class StallDetector:
 
 # --------------------------------------------------------------------------- touch detector
 
-ENCODER_TOUCH_M = 0.0005  # bolt encoder travel that counts as a touch
-WRIST_TOUCH_NM = 0.15  # compliant-wrist push torque that counts as a touch (tuned)
 TOUCH_LOG_LEN = 64
-
-
-class TouchDetector:
-    """Fingertip touch on the bolt hook from the bolt encoder or the compliant-wrist springs.
-
-    Fires once per arming (``reset``): on the first tick the bolt has moved more than
-    ``encoder_m`` from where it was when armed, or after ``ticks`` consecutive ticks of wrist
-    push torque above ``wrist_nm``. A freely sliding bolt barely loads the wrist, so the encoder
-    catches the clean-cycle touch and the wrist catches a blocked (pinned) bolt. Only sensors:
-    the encoder ``x_bolt`` and the rig's own wrist spring deflection.
-    """
-
-    def __init__(
-        self, encoder_m: float = ENCODER_TOUCH_M, wrist_nm: float = WRIST_TOUCH_NM, ticks: int = 2
-    ) -> None:
-        self.encoder_m = encoder_m
-        self.wrist_nm = wrist_nm
-        self.ticks = ticks
-        self.armed = True
-        self._x0: float | None = None
-        self._high = 0
-
-    def reset(self) -> None:
-        """Arm: the next update sets the encoder baseline."""
-        self.armed = True
-        self._x0 = None
-        self._high = 0
-
-    def disarm(self) -> None:
-        self.armed = False
-        self._x0 = None
-        self._high = 0
-
-    def update(self, x_bolt: float, wrist_push_nm: float) -> bool:
-        if not self.armed:
-            return False
-        if self._x0 is None:
-            self._x0 = x_bolt
-        self._high = self._high + 1 if wrist_push_nm > self.wrist_nm else 0
-        if x_bolt - self._x0 > self.encoder_m or self._high >= self.ticks:
-            self.disarm()
-            return True
-        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +358,9 @@ class _Bay:
     detector: StallDetector = field(default_factory=StallDetector)
     touch: TouchDetector = field(default_factory=TouchDetector)
     last_touch: LatchEstimate | None = None
+    # Rescue-demo contact calibration: encoder-only touch relative to the hold's start.
+    demo_touch: TouchDetector = field(default_factory=TouchDetector)
+    demo_offset_m: float | None = None
     indexer: RelativeClutchIndexer = field(default_factory=RelativeClutchIndexer)
     buffer: RescueTrajectoryBuffer | None = None
     clutch_held: bool = False
@@ -741,12 +701,27 @@ class AtcCoordinator:
                     bay.buffer.record(
                         True, self.time_s, cmd, _fingers_array(bay.fingers), bay.tau_inf
                     )
+                    self._calibrate_demo_touch(bay)
             bay.clutch_held = True
             return
         if bay.clutch_held:
             self._release_clutch(bay)
             return
         self._hold(bay)
+
+    def _calibrate_demo_touch(self, bay: _Bay) -> None:
+        """Record the demo's own index contact offset at its first bolt-encoder movement.
+
+        Reads only the encoder, the index tip forward kinematics and the bay's (stall-touch
+        corrected) estimate: the same frame the rescue trajectory is recorded in.
+        """
+        rig = bay.rig
+        if bay.buffer is not None and len(bay.buffer) == 1:  # a new clutch hold starts
+            bay.demo_touch.reset()
+            bay.demo_offset_m = None
+        x_bolt = rig.bolt_x()
+        if bay.demo_offset_m is None and bay.demo_touch.update(x_bolt, None):
+            bay.demo_offset_m = contact_offset(rig.estimate, rig.index_tip_world(), x_bolt)
 
     def _release_clutch(self, bay: _Bay) -> None:
         bay.clutch_held = False
@@ -853,7 +828,14 @@ class AtcCoordinator:
             return
         if auto.replay is None or auto.last is None:
             return
-        if bay.touch.update(x_bolt, bay.rig.wrist_push_torque()) and self._apply_touch(bay, x_bolt):
+        # Replay touches are encoder-only and use the skill's own demo contact offset; a skill
+        # without one gets no replay touch.
+        offset = auto.skill.touch_offset_m
+        if (
+            offset is not None
+            and bay.touch.update(x_bolt, None)
+            and self._apply_touch(bay, x_bolt, offset)
+        ):
             auto.replay.rebase(bay.rig.world_from_latch(), auto.t)
         in_dmp = auto.t > auto.replay.blend_s + CONTROL_DT
         timed_out = auto.t > auto.replay.total_s + self.config.skill_timeout_s
@@ -934,7 +916,7 @@ class AtcCoordinator:
 
     # ------------------------------------------------------------------ touch re-localization
 
-    def _apply_touch(self, bay: _Bay, x_bolt: float) -> bool:
+    def _apply_touch(self, bay: _Bay, x_bolt: float, pad_offset_m: float | None = None) -> bool:
         """Correct the estimate's push axis from the index tip at a touch. True if accepted.
 
         Reads only proprioception (index tip forward kinematics) and the bolt encoder. An
@@ -942,7 +924,7 @@ class AtcCoordinator:
         """
         rig = bay.rig
         bay.touch.disarm()
-        est = touch_correct(rig.estimate, rig.index_tip_world(), x_bolt)
+        est = touch_correct(rig.estimate, rig.index_tip_world(), x_bolt, pad_offset_m)
         bay.last_touch = est
         rig.set_estimate(est)  # a rejected touch keeps the pose and records the outlier
         if est.rejected_correction_m is not None:
@@ -1086,6 +1068,9 @@ class AtcCoordinator:
         skill = self.unoq.fit_dmp(
             sku, sig, traj.timestamps_s, traj.wrist_latch_se3, traj.fingers_q, traj.tau_ext_inf
         )
+        # The demo's own contact offset rides with the skill (replay touch re-localization).
+        skill = replace(skill, touch_offset_m=bay.demo_offset_m)
+        bay.demo_offset_m = None
         self._emit(
             "RESCUE_LOGGED",
             bay,
