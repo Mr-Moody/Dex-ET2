@@ -1,12 +1,12 @@
 ---
 id: T-150
 title: teleop atc command, 4-bay HUD, audio prompts & 2.5-min stage rehearsal controls
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: lead-laptop
+branch: feat/atc-stage-hud
 depends_on: [T-140, T-131]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-150-teleop-atc-command-4-bay-hud-audio-prompts--25-min-stage-rehearsal-controls
-claimed_at: null
+claimed_at: '2026-11-14T03:28:07+00:00'
 ---
 
 **P1 Stage Demo App & HUD. Edit only `configs/atc.yaml`, `src/teleop/atc/{hud,stage}.py`, `src/teleop/commands/atc.py`, and `tests/atc/test_stage_hud.py`.**
