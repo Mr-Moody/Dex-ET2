@@ -249,3 +249,50 @@ COPILOT_REVIEW_MODEL=gemini-4-argon
 COPILOT_TTS_MODEL=gemini-3.8-flash-lite-tts
 COPILOT_VOICE=Kore
 ```
+
+## Console feed and events (T-211)
+
+The copilot watches the console as one more read-only viewer. It never sends anything.
+
+- **`FeedClient`** (`teleop.copilot.feed`) connects to `COPILOT_CONSOLE_URL`.
+  - It reads telemetry and camera frames.
+  - It reconnects after 1 s, doubling each time up to 5 s. A successful connection resets the
+    delay.
+  - Each frame's slot is mapped to a camera through the latest telemetry's `feeds`. A frame is
+    dropped when it arrives before any telemetry or carries an old layout's byte.
+- **`FrameStore`** (`teleop.copilot.frames`) keeps the newest frame per bay and camera.
+  - While a bay is in `RESCUE` with the clutch held, it also samples that bay's frames: at most
+    one per camera every 0.5 s, and at most 12 in all. These are for the review.
+  - The samples are kept after the clutch is released and cleared at that bay's next stall.
+  - `downscale_jpeg` shrinks a frame to at most 512 px.
+  - Logs use `StoredFrame.sha256`, never the image.
+- **`EventDetector`** (`teleop.copilot.events`) turns telemetry changes into events: `stall`,
+  `refused`, `rescue_started`, `rescue_released`, `validating`, `gate_result`,
+  `autonomous_started` and `autonomous_finished`.
+  - The first message only sets a baseline, so a reconnect never repeats an event.
+  - A backwards jump in `sim_t` means the console restarted, so the detector starts a new
+    baseline.
+  - Replayed background bays never fire.
+
+Facts from the recorded stage (`tests/copilot/fixtures/`, about 35 s of `--script`):
+- A jam goes straight from `NOMINAL` to `RESCUE` within one 10 Hz message.
+- The skill gate runs 20 randomized rollouts (`passed`/`total`), not 3.
+- The refusal is Bay 2 in `OOD_ESCALATED`.
+
+### Try it
+
+```bash
+uv run teleop atc --source synthetic            # terminal 1; press F to jam Bay 1
+uv run python -m teleop.copilot watch           # terminal 2
+```
+
+Example output from the scripted stage:
+
+```text
+[16:38:33] BAY 1 STALL                NOMINAL -> RESCUE, C=0.24, bolt 3.4 cm, frame bay1/cctv ed788796739f8ad2
+[16:38:38] BAY 1 RESCUE_STARTED       RESCUE -> RESCUE, C=0.74, bolt 3.4 cm, frame bay1/side_ortho 75659194be5399f8
+[16:38:41] BAY 1 RESCUE_RELEASED      RESCUE -> VALIDATING, C=0.55, bolt 5.6 cm, frame bay1/side_ortho 8ae094806c786223, 10 rescue frames
+[16:38:41] BAY 1 VALIDATING           RESCUE -> VALIDATING, C=0.55, bolt 5.6 cm, frame bay1/side_ortho 8ae094806c786223, 10 rescue frames
+[16:39:14] BAY 1 GATE_RESULT          VALIDATING -> NOMINAL, C=0.64, bolt 5.6 cm, gate PASS 20/20, frame bay1/side_ortho 7441cd24b6794bb7, 10 rescue frames
+[16:39:20] BAY 2 AUTONOMOUS_STARTED   NOMINAL -> AUTONOMOUS_SKILL, C=0.36, bolt 3.4 cm, frame bay2/cctv 2e55add3d416dc4f
+```
