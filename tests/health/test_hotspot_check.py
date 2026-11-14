@@ -86,7 +86,7 @@ def test_fail_off() -> None:
 def test_fail_on_last_watchdog_error() -> None:
     check, wd = make(CountingBackend())
     wd.poll_once()
-    wd.events.append((0, "error: reconfigure did not apply"))
+    wd.last_error = "error: reconfigure did not apply"
     h = check.status()
     assert h.level is Level.FAIL
     assert h.detail == "error: reconfigure did not apply"
@@ -138,3 +138,34 @@ def test_build_without_password_strict_raises(
     env.write_text("")
     with pytest.raises(HotspotConfigError):
         build_hotspot_check(True, env, strict=True)
+
+
+def test_error_poll_then_clean_poll_is_not_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = CountingBackend(clients=1)
+    check, wd = make(backend)
+    real = wd.hotspot.ensure_up
+
+    def boom() -> list[str]:
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr(wd.hotspot, "ensure_up", boom)
+    wd.poll_once()
+    assert check.status().level is Level.FAIL
+    monkeypatch.setattr(wd.hotspot, "ensure_up", real)
+    wd.poll_once()
+    assert check.status().level is Level.OK
+
+
+def test_failed_status_read_is_fail_not_stale_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    check, wd = make(CountingBackend(clients=1))
+    wd.poll_once()
+    assert check.status().level is Level.OK
+
+    def boom() -> dict[str, object]:
+        raise RuntimeError("winrt gone")
+
+    monkeypatch.setattr(wd.hotspot, "status", boom)
+    wd.poll_once()
+    h = check.status()
+    assert h.level is Level.FAIL
+    assert "winrt gone" in h.detail

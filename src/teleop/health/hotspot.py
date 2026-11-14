@@ -28,9 +28,11 @@ class HotspotCheck:
         wd = self._watchdog
         if self._hotspot is None or wd is None:
             return Health(self.name, Level.OFF, self._off_reason, self._off_detail)
-        if wd.events and wd.events[-1][1].startswith("error:"):
-            return Health(self.name, Level.FAIL, "error", wd.events[-1][1], can_reconnect=True)
+        if wd.last_error is not None:
+            return Health(self.name, Level.FAIL, "error", wd.last_error, can_reconnect=True)
         st = wd.last_status
+        if st is None and wd.status_error is not None:
+            return Health(self.name, Level.FAIL, "error", wd.status_error, can_reconnect=True)
         if st is None:
             return Health(self.name, Level.WARN, "starting", "waiting for the first poll")
         state = st["state"]
