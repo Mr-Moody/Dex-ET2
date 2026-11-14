@@ -248,7 +248,12 @@ static void captureJoyCentre() {
 static uint8_t pollJoystick() {
   int dx = analogRead(PIN_JOY_X) - joyCx;
   int dy = analogRead(PIN_JOY_Y) - joyCy;
-  int ax = abs(dx), ay = abs(dy);
+  // An off-centre stick has less travel on one side; deflection is scaled to the travel left
+  // in the pushed direction, so JOY_FIRE / JOY_REARM are counts out of a 512-count half travel.
+  int travelX = dx > 0 ? 1023 - joyCx : joyCx;
+  int travelY = dy > 0 ? 1023 - joyCy : joyCy;
+  int ax = (int)((long)abs(dx) * 512 / max(travelX, 1));
+  int ay = (int)((long)abs(dy) * 512 / max(travelY, 1));
 
   if (!joyArmed) {
     if (ax < JOY_REARM && ay < JOY_REARM) joyArmed = true;
