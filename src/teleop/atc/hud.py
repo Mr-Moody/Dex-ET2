@@ -149,17 +149,17 @@ def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
     import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
     mj: Any = _mujoco
-    font, grid = mj.mjtFont, mj.mjtGridPos
+    font, grid = mj.mjtFontScale, mj.mjtGridPos
     labels, values = format_bay_table(view)
     status = "\n".join([format_rescue(view.rescue), format_gate(view.gate)])
     hooks = "\n".join([view.compliance, view.reasoning])
     stage = "\n".join(x for x in (f"BEAT {view.beat}" if view.beat else "", view.unoq) if x)
     keys = "1-4 bay | SPACE clutch | F/G/P faults | R reset"
     return [
-        (int(font.mjFONT_BIG), int(grid.mjGRID_TOPLEFT), labels, values),
-        (int(font.mjFONT_NORMAL), int(grid.mjGRID_TOPRIGHT), status, ""),
-        (int(font.mjFONT_NORMAL), int(grid.mjGRID_BOTTOMLEFT), hooks, ""),
-        (int(font.mjFONT_NORMAL), int(grid.mjGRID_BOTTOMRIGHT), stage or "ATC", keys),
+        (int(font.mjFONTSCALE_200), int(grid.mjGRID_TOPLEFT), labels, values),
+        (int(font.mjFONTSCALE_150), int(grid.mjGRID_TOPRIGHT), status, ""),
+        (int(font.mjFONTSCALE_150), int(grid.mjGRID_BOTTOMLEFT), hooks, ""),
+        (int(font.mjFONTSCALE_150), int(grid.mjGRID_BOTTOMRIGHT), stage or "ATC", keys),
     ]
 
 

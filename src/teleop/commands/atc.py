@@ -19,6 +19,8 @@ import argparse
 import contextlib
 import dataclasses
 import logging
+import threading
+import time
 from collections.abc import Generator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -290,16 +292,38 @@ def _run_viewer(cfg: AtcConfig, controller: StageController, operator: Any) -> N
     co = controller.coordinator
     launch: Any = mujoco.viewer.launch_passive  # pyright: ignore
     with launch(co.model, co.data, key_callback=controller.on_key) as viewer:
+        # ``set_texts`` blocks for a render frame (~100 ms on the full scene), so it runs on its
+        # own thread at HUD rate instead of throttling the 60 Hz control loop.
+        pending: list[Any] = []
+        stop = threading.Event()
+
+        def push_hud() -> None:
+            while not stop.wait(0.1):
+                if pending and viewer.is_running():
+                    viewer.set_texts(pending.pop())
+                    pending.clear()
+
+        hud_thread = threading.Thread(target=push_hud, name="atc-hud", daemon=True)
+        hud_thread.start()
+        next_hud = 0.0
 
         def step(_: int) -> bool:
+            nonlocal next_hud
             if not viewer.is_running():
                 return False
             sample = operator()
             with viewer.lock():
                 controller.tick(sample)
-                viewer.set_texts(hud_overlays(controller.hud_view()))
+            now = time.monotonic()
+            if now >= next_hud:
+                next_hud = now + 0.1
+                pending.append(hud_overlays(controller.hud_view()))
             viewer.sync()
             return True
 
-        stats = FixedRateLoop(CONTROL_HZ).run(step, cfg.steps)
+        try:
+            stats = FixedRateLoop(CONTROL_HZ).run(step, cfg.steps)
+        finally:
+            stop.set()
+            hud_thread.join(timeout=1.0)
         logger.info("atc: %d steps, %d loop overruns", stats.steps, stats.overruns)
