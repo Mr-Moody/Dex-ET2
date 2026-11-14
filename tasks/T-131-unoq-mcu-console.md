@@ -1,12 +1,12 @@
 ---
 id: T-131
 title: UNO Q STM32U585 1 kHz console, fault rig & 8x13 LED matrix bridge
-status: todo
-owner: null
-branch: null
+status: in_review
+owner: lead-laptop
+branch: feat/unoq-mcu-console
 depends_on: [T-100]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-131-uno-q-stm32u585-1-khz-console-fault-rig--813-led-matrix-bridge
-claimed_at: null
+claimed_at: '2026-11-14T01:00:06+00:00'
 ---
 
 **P1 Physical Console & Judge Fault Rig track. Edit only `firmware/unoq_console/unoq_console.ino`, `src/teleop/unoq/mcu_bridge.py`, and `tests/unoq/test_mcu_bridge.py`.**
