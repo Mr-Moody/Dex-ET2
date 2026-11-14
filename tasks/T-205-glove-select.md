@@ -1,12 +1,12 @@
 ---
 id: T-205
 title: Choose glove or scripted rescue at clutch engage
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: claude-code
+branch: feat/glove-select
 depends_on: [T-201]
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: null
+claimed_at: '2026-11-14T11:04:34+00:00'
 ---
 
 Implements Task 6 of the plan.

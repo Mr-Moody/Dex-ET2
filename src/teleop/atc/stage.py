@@ -488,6 +488,10 @@ class StageController:
         self.actions.append(ActionNote(self._action_seq, key, text, level))
         logger.info("key %s: %s", key, text)
 
+    def note(self, text: str, level: str = "warn") -> None:
+        """Add a system line to the action log (no key behind it)."""
+        self._note("sys", text, level)
+
     @property
     def rescue_elapsed_s(self) -> float:
         """Seconds since the current bay took the rescue slot (0 when none holds it)."""
