@@ -350,7 +350,9 @@ def _setup_recovery(cfg: AtcConfig, controller: StageController, load_act: Any) 
     if load_act is not None and cfg.act_checkpoint is not None:
         try:
             co.set_act(load_act(cfg.act_checkpoint, cfg.act_device, co.model, co.data))
-        except (ManifestError, OSError) as exc:
+        except (ManifestError, OSError, ImportError, RuntimeError, ValueError) as exc:
+            # ImportError: the `act` dependency group (torch) is not installed; RuntimeError: no
+            # CUDA device. Either way the demo keeps running on the DMP.
             logger.warning("atc: ACT checkpoint not loaded (%s); recovery backend dmp", exc)
             co.backend_note = f"ACT unavailable ({exc}): back to dmp"
             backend = RecoveryBackend.DMP

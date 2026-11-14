@@ -306,6 +306,7 @@ class _Recovery:
     kind: RecoveryKind
     skill: SkillPrimitive | None = None
     t: float = 0.0
+    error: str | None = None  # the controller raised: abort in the sense phase
 
 
 @dataclass
@@ -710,7 +711,12 @@ class AtcCoordinator:
     def _control_auto(self, bay: _Bay) -> None:
         rec = bay.auto
         assert rec is not None
-        cmd = rec.controller.command(bay.rig, self._signals(bay))
+        try:
+            cmd = None if rec.error else rec.controller.command(bay.rig, self._signals(bay))
+        except Exception as exc:
+            logger.exception("bay %d: %s recovery controller failed", bay.bay_id, rec.kind)
+            rec.error = f"recovery error: {exc}"
+            cmd = None
         if cmd is None:
             self._hold(bay)
             assert bay.hold_pose is not None
@@ -784,7 +790,13 @@ class AtcCoordinator:
         if x_bolt >= BOLT_CLEARED_M:
             self._complete_autonomous(bay)
             return
-        reason = rec.controller.check(bay.rig, self._signals(bay))
+        reason = rec.error
+        if reason is None:
+            try:
+                reason = rec.controller.check(bay.rig, self._signals(bay))
+            except Exception as exc:
+                logger.exception("bay %d: %s recovery check failed", bay.bay_id, rec.kind)
+                reason = f"recovery error: {exc}"
         if reason is not None:
             self._abort_autonomous(bay, reason)
 
@@ -883,21 +895,27 @@ class AtcCoordinator:
 
     def _pick_recovery(self, z: StallSignature, *, dmp_available: bool) -> RecoveryKind | None:
         act = self._act
-        if self._backend is not RecoveryBackend.DMP and (act is None or not act.healthy()):
-            why = "no ACT checkpoint loaded" if act is None else act.unhealthy_reason or "unhealthy"
-            self._backend = RecoveryBackend.DMP
-            self.backend_note = f"ACT unavailable ({why}): back to dmp"
-            logger.warning("atc: %s", self.backend_note)
-        if self._backend is RecoveryBackend.DMP or act is None:
-            return choose_recovery(
-                self._backend, act_covers=False, act_healthy=False, dmp_available=dmp_available
-            )
+        covers = healthy = False
+        if self._backend is not RecoveryBackend.DMP:
+            why = "no ACT checkpoint loaded"
+            if act is not None:
+                try:
+                    healthy = act.healthy()
+                    covers = healthy and act.covers(z)
+                    why = act.unhealthy_reason or "unhealthy"
+                except Exception as exc:
+                    logger.exception("atc: ACT factory failed")
+                    healthy, why = False, f"error: {exc}"
+            if not healthy:
+                self._downgrade(why)
         return choose_recovery(
-            self._backend,
-            act_covers=act.covers(z),
-            act_healthy=act.healthy(),
-            dmp_available=dmp_available,
+            self._backend, act_covers=covers, act_healthy=healthy, dmp_available=dmp_available
         )
+
+    def _downgrade(self, why: str) -> None:
+        self._backend = RecoveryBackend.DMP
+        self.backend_note = f"ACT unavailable ({why}): back to dmp"
+        logger.warning("atc: %s", self.backend_note)
 
     def _start_autonomous(self, bay: _Bay, skill: SkillPrimitive) -> None:
         cfg = self.config
@@ -920,7 +938,17 @@ class AtcCoordinator:
 
     def _start_act(self, bay: _Bay, z: StallSignature) -> None:
         assert self._act is not None
-        bay.auto = _Recovery(self._act.create(bay.rig, z), "act")
+        try:
+            controller = self._act.create(bay.rig, z)
+        except Exception as exc:
+            logger.exception("bay %d: ACT recovery could not start", bay.bay_id)
+            self._downgrade(f"error: {exc}")
+            if bay.fallback_skill is not None:
+                self._start_autonomous(bay, bay.fallback_skill)
+            else:
+                self._escalate(bay, refused=False, reason="ACT could not start")
+            return
+        bay.auto = _Recovery(controller, "act")
         bay.skill_id = "act"
         bay.state = BayState.AUTONOMOUS_SKILL
         bay.hold_pose = bay.rig.wrist_pose()

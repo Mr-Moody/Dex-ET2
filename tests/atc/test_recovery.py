@@ -307,6 +307,66 @@ def test_downgrade_when_no_act_loaded(unoq: Any) -> None:
     assert co.recovery_backend == _backend(DMP) and "back to dmp" in co.backend_note
 
 
+class RaisingController(HoldController):
+    def __init__(self, where: str) -> None:
+        super().__init__()
+        self.where = where
+
+    def command(self, rig: Any, s: Any) -> None:
+        if self.where == "command":
+            raise RuntimeError("policy bug")
+        return None
+
+    def check(self, rig: Any, s: Any) -> str | None:
+        if self.where == "check":
+            raise RuntimeError("policy bug")
+        return None
+
+
+class RaisingFactory(FakeActFactory):
+    def __init__(self, where: str) -> None:
+        super().__init__()
+        self.where = where
+
+    def covers(self, z: Any) -> bool:
+        if self.where == "covers":
+            raise RuntimeError("manifest bug")
+        return True
+
+    def create(self, rig: Any, z: Any) -> HoldController:
+        c = RaisingController(self.where)
+        self.created.append(c)
+        return c
+
+
+@needs_models
+@pytest.mark.parametrize("where", ["command", "check"])
+def test_act_controller_exception_aborts_instead_of_crashing(unoq: Any, where: str) -> None:
+    from teleop.atc.types import BayState
+
+    factory = RaisingFactory(where)
+    controller, _ = _controller(unoq, recovery_backend=_backend(HYBRID), act=factory)
+    co = controller.coordinator
+    co.start_cycle(1, flap_jammed=True)
+    _tick_until(controller, lambda: co.state(1) in (BayState.QUEUED, BayState.RESCUE))
+    assert "policy bug" in co.outcome(1)
+    assert factory.created[0].closed
+
+
+@needs_models
+def test_act_factory_exception_downgrades(unoq: Any) -> None:
+    from teleop.atc.types import BayState
+
+    controller, _ = _controller(
+        unoq, recovery_backend=_backend(HYBRID), act=RaisingFactory("covers")
+    )
+    co = controller.coordinator
+    co.start_cycle(1, flap_jammed=True)
+    _tick_until(controller, lambda: co.state(1) != BayState.NOMINAL)
+    assert co.recovery_backend == _backend(DMP)
+    assert "manifest bug" in co.backend_note
+
+
 @needs_models
 def test_hybrid_act_abort_without_dmp_queues(unoq: Any) -> None:
     from teleop.atc.types import BayState
@@ -450,3 +510,32 @@ def test_missing_hook_exits_3(
     assert rc == 3
     out = capsys.readouterr().out
     assert "--record-episodes is not implemented yet (teleop.atc.episodes)" in out
+
+
+@needs_models
+@pytest.mark.parametrize("error", [ImportError("No module named 'torch'"), RuntimeError("no CUDA")])
+def test_act_load_failure_falls_back_to_dmp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    from teleop.commands import atc
+
+    def failing_loader(*args: Any) -> Any:
+        raise error
+
+    real = atc.load_hook
+    monkeypatch.setattr(
+        atc,
+        "load_hook",
+        lambda flag: failing_loader if flag == "--act-checkpoint" else real(flag),
+    )
+    monkeypatch.chdir(tmp_path)
+    argv = [*_ATC_ARGS, "--steps", "1", "--env-file", str(tmp_path / "missing.env")]
+    with caplog.at_level("WARNING", logger="teleop.atc"):
+        rc = atc.main(
+            [*argv, "--recovery-backend", "hybrid", "--act-checkpoint", str(tmp_path / "ckpt")]
+        )
+    assert rc == 0
+    assert "ACT checkpoint not loaded" in caplog.text
