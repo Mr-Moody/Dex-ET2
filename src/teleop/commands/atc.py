@@ -97,6 +97,7 @@ class AtcConfig:
     record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
     generate: int | None = None  # headless: generate N scripted rescue episodes
     seed: int = 0
+    dummy_glove: bool = False  # TODO(rokoko-gloves-swap): temporary dummy UDP/UI operator
 
 
 _PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes"}
@@ -237,6 +238,12 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--record-episodes", type=Path, default=None, help="LeRobot dataset dir")
     ap.add_argument("--generate", type=int, default=None, help="headless: N scripted episodes")
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument(
+        "--dummy-glove",
+        action="store_true",
+        default=None,
+        help="TEMP: spawn standalone dummy Studio UDP streamer + UI teleop override",
+    )
     add_hotspot_args(ap)
     return ap
 
@@ -361,15 +368,48 @@ def _setup_recovery(cfg: AtcConfig, controller: StageController, load_act: Any) 
 
 
 def _run(cfg: AtcConfig, controller: StageController) -> int:
+    import subprocess
+    import sys
+
     director = StageDirector(controller) if cfg.script else None
     glove: GloveOperator | ScriptedGlove | None = None
+    dummy_proc: subprocess.Popen[bytes] | None = None
+    dummy: Any = None
+    # TODO(rokoko-gloves-swap): Temporary dummy UDP streamer + UI override while physical
+    # Rokoko Smartgloves are disconnected. Remove/disable once real Studio UDP is connected.
+    use_console_dummy = (
+        director is None
+        and not cfg.headless
+        and cfg.display == "console"
+        and (cfg.dummy_glove or cfg.source == "synthetic")
+    )
     if director is None:
-        # Without real gloves, a scripted rescue plays while the clutch is held (see ScriptedGlove).
-        glove = (
-            ScriptedGlove(controller)
-            if cfg.source == "synthetic"
-            else GloveOperator.build(cfg, controller.coordinator.model)
-        )
+        if cfg.dummy_glove and cfg.source == "studio":
+            script_path = REPO_ROOT / "scripts" / "dummy_glove_process.py"
+            dummy_proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--studio-host",
+                    "127.0.0.1",
+                    "--studio-port",
+                    str(cfg.studio.port),
+                ],
+                stdin=subprocess.DEVNULL,
+            )
+        if cfg.source == "synthetic":
+            glove = None if use_console_dummy else ScriptedGlove(controller)
+        else:
+            glove = GloveOperator.build(cfg, controller.coordinator.model)
+        if use_console_dummy:
+            from teleop.input.dummy_glove import DummyControlClient, DummyOperatorSupervisor
+
+            udp_cli = DummyControlClient() if dummy_proc is not None else None
+            dummy = DummyOperatorSupervisor(
+                controller,
+                udp_client=udp_cli,
+                process_pid=dummy_proc.pid if dummy_proc is not None else None,
+            )
     co = controller.coordinator
     next_log = 0.0
 
@@ -385,33 +425,42 @@ def _run(cfg: AtcConfig, controller: StageController) -> int:
         next_log = co.time_s + cfg.hud_log_period_s
         logger.info("HUD t=%.1fs\n  %s", co.time_s, "\n  ".join(hud_lines(controller.hud_view())))
 
-    with glove.running() if glove is not None else contextlib.nullcontext():
-        if cfg.headless:
-            steps = 0
-            while cfg.steps is None or steps < cfg.steps:
-                controller.tick(operator())
-                steps += 1
-                log_hud()
-                if director is not None and director.done:
-                    break
-            logger.info("atc: %d steps, %.1f s sim time", steps, co.time_s)
-        elif cfg.display == "viewer":
-            _run_viewer(cfg, controller, operator)
-        else:
-            from teleop.console.run import ConsolePortInUse, run_console
+    try:
+        with glove.running() if glove is not None else contextlib.nullcontext():
+            if cfg.headless:
+                steps = 0
+                while cfg.steps is None or steps < cfg.steps:
+                    controller.tick(operator())
+                    steps += 1
+                    log_hud()
+                    if director is not None and director.done:
+                        break
+                logger.info("atc: %d steps, %.1f s sim time", steps, co.time_s)
+            elif cfg.display == "viewer":
+                _run_viewer(cfg, controller, operator)
+            else:
+                from teleop.console.run import ConsolePortInUse, run_console
 
-            try:
-                run_console(
-                    controller,
-                    operator,
-                    port=cfg.console_port,
-                    fps=cfg.console_fps,
-                    open_browser=cfg.open_browser,
-                    steps=cfg.steps,
-                )
-            except ConsolePortInUse as exc:
-                print(f"teleop atc: console port {exc.port} in use (try --console-port)")
-                return 1
+                try:
+                    run_console(
+                        controller,
+                        operator,
+                        port=cfg.console_port,
+                        fps=cfg.console_fps,
+                        open_browser=cfg.open_browser,
+                        steps=cfg.steps,
+                        dummy=dummy,
+                    )
+                except ConsolePortInUse as exc:
+                    print(f"teleop atc: console port {exc.port} in use (try --console-port)")
+                    return 1
+    finally:
+        if dummy is not None:
+            dummy.close()
+        if dummy_proc is not None:
+            dummy_proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                dummy_proc.wait(timeout=3)
 
     if director is None:
         return 0

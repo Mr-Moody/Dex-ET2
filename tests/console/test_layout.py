@@ -33,3 +33,46 @@ def test_rescue_layout() -> None:
 
 def test_rescue_of_absent_bay_falls_back_to_grid() -> None:
     assert feed_layout([1, 2], 3) == feed_layout([1, 2], None)
+
+
+def test_pin_focus_and_camera_selection() -> None:
+    from teleop.console.layout import ViewState
+
+    pinned = feed_layout([1, 2, 3, 4], None, ViewState(mode="pin", pinned_bay=3))
+    assert (pinned[0].slot, pinned[0].camera, pinned[0].bay, pinned[0].role) == (
+        0,
+        "bay3/cctv",
+        3,
+        "main",
+    )
+    assert [s.camera for s in pinned[1:]] == [f"bay{k}/cctv" for k in (1, 2, 3, 4)]
+
+    split = feed_layout(
+        [1, 2, 3, 4], None, ViewState(mode="pin", pinned_bay=4, cameras={4: "split"})
+    )
+    assert [(s.slot, s.camera, s.role) for s in split[:2]] == [
+        (0, "bay4/top_ortho", "main"),
+        (1, "bay4/side_ortho", "main"),
+    ]
+
+    wrist_split = feed_layout(
+        [1, 2, 3, 4], None, ViewState(mode="pin", pinned_bay=1, cameras={1: "wrist_split"})
+    )
+    assert [(s.slot, s.camera, s.role) for s in wrist_split[:2]] == [
+        (0, "bay1/wrist_cam", "main"),
+        (1, "bay1/top_ortho", "main"),
+    ]
+
+
+def test_force_equal_grid_and_custom_bay_order() -> None:
+    from teleop.console.layout import ViewState
+
+    vs = ViewState(mode="grid", cameras={1: "top_ortho"}, bay_order=(3, 1, 4, 2))
+    # Even during an active rescue on Bay 1, mode="grid" keeps 4 equal tiles in bay_order.
+    f = feed_layout([1, 2, 3, 4], 1, vs)
+    assert [(s.slot, s.camera, s.bay, s.role) for s in f] == [
+        (0, "bay3/cctv", 3, "tile"),
+        (1, "bay1/top_ortho", 1, "tile"),
+        (2, "bay4/cctv", 4, "tile"),
+        (3, "bay2/cctv", 2, "tile"),
+    ]

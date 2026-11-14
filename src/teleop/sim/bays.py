@@ -70,6 +70,30 @@ HAND_VISUAL_GROUP = 1  # Inspire ships visuals in group 2, which the rescue came
 
 TIMESTEP = 1.0 / 600
 OVERVIEW_CAMERA = "overview"
+WRIST_CAMERA_SUFFIX = "wrist_cam"
+WRIST_CAM_POS = (0.095, 0.025, 0.020)  # palm-side wrist bracket outside the palm shell
+WRIST_CAM_TARGET = (0.045, 0.028, 0.175)  # pinch zone: index hook, thumb & latch paddle
+WRIST_CAM_FOVY_DEG = 64.0
+
+
+def wrist_camera_name(bay_id: int) -> str:
+    return f"{bay_prefix(bay_id)}{WRIST_CAMERA_SUFFIX}"
+
+
+def _wrist_cam_xyaxes() -> list[float]:
+    dx = WRIST_CAM_TARGET[0] - WRIST_CAM_POS[0]
+    dy = WRIST_CAM_TARGET[1] - WRIST_CAM_POS[1]
+    dz = WRIST_CAM_TARGET[2] - WRIST_CAM_POS[2]
+    fn = math.sqrt(dx * dx + dy * dy + dz * dz)
+    fx, fy, fz = dx / fn, dy / fn, dz / fn
+    # up_hint = (-1, 0, 0): right = normalize(fwd x up_hint) = normalize((0, -fz, fy))
+    rn = math.hypot(fz, fy)
+    ry, rz = -fz / rn, fy / rn
+    # up = right x fwd
+    ux = ry * fz - rz * fy
+    uy = rz * fx
+    uz = -ry * fx
+    return [0.0, ry, rz, ux, uy, uz]
 
 
 def bay_prefix(bay_id: int) -> str:
@@ -222,6 +246,12 @@ def _add_robot(spec: Any, bay_id: int, *, collide: bool) -> None:
         size=[0.006, 0.006, 0.006],
         rgba=[0.1, 0.9, 0.2, 0.6],
     )
+    base.add_camera(
+        name=WRIST_CAMERA_SUFFIX,
+        pos=list(WRIST_CAM_POS),
+        xyaxes=_wrist_cam_xyaxes(),
+        fovy=WRIST_CAM_FOVY_DEG,
+    )
 
     frame = spec.worldbody.add_frame(pos=list(BAY_BASES[bay_id]))
     spec.attach(panda, frame=frame, prefix=prefix)
@@ -268,7 +298,6 @@ def build_four_bay_spec(
     for bay_id, pose in poses.items():
         _add_bay(spec, bay_id, pose, collide=bay_id in ACTIVE_BAYS)
         add_cell(spec, bay_id, latch_world_pose(bay_id, pose))
-    for bay_id in ACTIVE_BAYS:
         add_rescue_cameras(spec, bay_prefix(bay_id), latch_world_pose(bay_id, poses[bay_id]))
     apply_visual_style(spec)
     _add_overview_camera(spec, include_background_bays)

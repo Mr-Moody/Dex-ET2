@@ -28,7 +28,12 @@ const STATE_COLOR = {
   OOD_ESCALATED: "--ood",
   STANDBY: "--standby",
 };
-const VIEW_TEXT = { cctv: "Cell camera", top_ortho: "Top view", side_ortho: "Side view" };
+const VIEW_TEXT = {
+  cctv: "Cell camera",
+  wrist_cam: "Wrist cam",
+  top_ortho: "Top view",
+  side_ortho: "Side view",
+};
 
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -42,16 +47,25 @@ const ui = {
   telemetry: null,
   lastActionSeq: null, // null until the first telemetry, so a reload does not replay old toasts
   briefKey: null,
+  view: { mode: "auto", pinnedBay: null, cameras: {}, bayOrder: [1, 2, 3, 4], zooms: {} },
+  dragBay: null,
+  dragRole: null,
+  padActive: false,
+  slTimer: null,
 };
 
 // Keyboard bar. Codes are GLFW key codes (the same ones the MuJoCo viewer receives).
 const KEY_BAR = [
   { caps: ["1", "2", "3", "4"], codes: [49, 50, 51, 52], text: "Select bay" },
-  { caps: ["Space"], codes: [32], text: "Clutch on / off" },
-  { caps: ["F"], codes: [70], text: "Jam Bay 1 flap" },
-  { caps: ["G"], codes: [71], text: "Jam Bay 2 flap" },
-  { caps: ["P"], codes: [80], text: "Pin Bay 2 bolt" },
-  { caps: ["R"], codes: [82], text: "Reset" },
+  { caps: ["Space"], codes: [32], text: "Clutch" },
+  { caps: ["M"], codes: [77], text: "Backend" },
+  { caps: ["R"], codes: [82], text: "Reset cells" },
+];
+const CAM_BTNS = [
+  ["cctv", "CCTV"],
+  ["wrist_cam", "Wrist"],
+  ["top_ortho", "Top"],
+  ["side_ortho", "Side"],
 ];
 const FAULT_TEXT = {
   armed: { flap: "Flap jam armed", pin: "Bolt pin armed" },
@@ -61,22 +75,208 @@ const faultName = (kind) => (kind === "pin" ? "pinned bolt" : "flap jam");
 const TOAST_MS = 4500;
 const MAX_TOASTS = 4;
 
+// ------------------------------------------------------------------ view & drag helpers
+
+function currentOrder() {
+  return ui.view.bayOrder && ui.view.bayOrder.length === 4 ? ui.view.bayOrder : BAYS;
+}
+
+function effectiveFocusBay(t) {
+  if (!t || t.mode === "grid") return null;
+  const m = t.feeds.find((f) => f.role === "main");
+  return m ? m.bay : null;
+}
+
+function setLayoutMode(mode, pinnedBay = null) {
+  ui.view.mode = mode;
+  ui.view.pinnedBay = mode === "pin" ? pinnedBay : null;
+  sendClient({ type: "view", mode, pinned_bay: ui.view.pinnedBay, bay_order: currentOrder() });
+  syncViewBar();
+}
+
+function togglePinBay(bayId) {
+  const focused = effectiveFocusBay(ui.telemetry);
+  if (ui.view.mode === "pin" && ui.view.pinnedBay === bayId) {
+    setLayoutMode("grid", null);
+  } else if (focused === bayId && ui.view.mode === "auto") {
+    setLayoutMode("grid", null);
+  } else {
+    setLayoutMode("pin", bayId);
+  }
+}
+
+function setBayCamera(bayId, camera) {
+  ui.view.cameras[bayId] = camera;
+  sendClient({ type: "view", bay: bayId, camera });
+}
+
+function swapBayOrder(bayA, bayB) {
+  if (!bayA || !bayB || bayA === bayB) return;
+  const next = [...currentOrder()];
+  const ia = next.indexOf(bayA);
+  const ib = next.indexOf(bayB);
+  if (ia < 0 || ib < 0) return;
+  [next[ia], next[ib]] = [next[ib], next[ia]];
+  ui.view.bayOrder = next;
+  sendClient({ type: "view", bay_order: next });
+}
+
+function sendFault(bayId, kind) {
+  sendClient({ type: "fault", bay: bayId, kind });
+}
+
+function camZoom(camera) {
+  const v = (camera && ui.view.zooms[camera]) || [1, 0, 0];
+  return { z: v[0], px: v[1], py: v[2] };
+}
+
+function setCamZoom(camera, z, px, py) {
+  if (!camera) return;
+  const cz = Math.max(0.5, Math.min(4.0, z));
+  const cpx = Math.max(-1.0, Math.min(1.0, px));
+  const cpy = Math.max(-1.0, Math.min(1.0, py));
+  ui.view.zooms[camera] = [cz, cpx, cpy];
+  sendClient({ type: "view", zoom_cam: camera, zoom: cz, pan_x: cpx, pan_y: cpy });
+  refreshZoomBadge(camera);
+}
+
+function resetCamZoom(camera) {
+  if (!camera) return;
+  delete ui.view.zooms[camera];
+  sendClient({ type: "view", zoom_cam: camera, reset_zoom: true });
+  refreshZoomBadge(camera);
+}
+
+function refreshZoomBadge(camera) {
+  for (const el of $("wall").querySelectorAll(`.feed[data-camera="${camera}"]`)) {
+    const badge = el.querySelector(".feed__zoom");
+    if (!badge) continue;
+    const { z, px, py } = camZoom(camera);
+    const modified = Math.abs(z - 1) > 0.02 || Math.abs(px) > 0.02 || Math.abs(py) > 0.02;
+    badge.hidden = !modified;
+    if (modified) badge.textContent = `${z.toFixed(1)}× ↺`;
+  }
+}
+
+function attachZoomPan(el, camera, role) {
+  if (!camera || role === "strip") return;
+  el.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const cur = camZoom(camera);
+      const nextZ = cur.z * Math.exp(-e.deltaY * 0.0018);
+      setCamZoom(camera, nextZ, cur.px, cur.py);
+    },
+    { passive: false }
+  );
+
+  let panStart = null;
+  let moved = false;
+  el.addEventListener("pointerdown", (e) => {
+    if (!(e.shiftKey || e.button === 1 || e.button === 2)) return;
+    if (e.target && e.target.closest("button")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const cur = camZoom(camera);
+    panStart = { x: e.clientX, y: e.clientY, px: cur.px, py: cur.py, z: cur.z, id: e.pointerId };
+    moved = false;
+    el.draggable = false;
+    el.classList.add("is-panning");
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!panStart) return;
+    const rect = el.getBoundingClientRect();
+    const dx = e.clientX - panStart.x;
+    const dy = e.clientY - panStart.y;
+    if (Math.hypot(dx, dy) > 3) moved = true;
+    const scale = Math.max(0.6, panStart.z * 0.75);
+    const nx = panStart.px + dx / (Math.max(rect.width, 1) * scale);
+    const ny = panStart.py + dy / (Math.max(rect.height, 1) * scale);
+    setCamZoom(camera, panStart.z, nx, ny);
+  });
+  const endPan = () => {
+    if (!panStart) return;
+    panStart = null;
+    el.draggable = true;
+    el.classList.remove("is-panning");
+  };
+  el.addEventListener("pointerup", endPan);
+  el.addEventListener("pointercancel", endPan);
+  el.addEventListener("contextmenu", (e) => {
+    if (moved) {
+      e.preventDefault();
+      moved = false;
+    }
+  });
+}
+
 // ------------------------------------------------------------------ feed tiles
 
-function feedTile(bayId, camera, role) {
+function attachDragEvents(el, bayId, role) {
+  el.draggable = true;
+  el.addEventListener("dragstart", (e) => {
+    ui.dragBay = bayId;
+    ui.dragRole = role;
+    el.classList.add("is-dragging");
+    $("wall-wrap").classList.add("is-dragging-pane");
+    $("focus-dropzone").querySelector("strong").textContent =
+      role === "main"
+        ? `Drag Bay ${bayId} onto the strip (or click 4-Up Equal) to unpin`
+        : `Drop Bay ${bayId} here to pin into focus`;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(bayId));
+    }
+  });
+  el.addEventListener("dragend", () => {
+    ui.dragBay = null;
+    ui.dragRole = null;
+    el.classList.remove("is-dragging");
+    $("wall-wrap").classList.remove("is-dragging-pane");
+    $("focus-dropzone").classList.remove("is-over");
+    for (const n of $("wall").querySelectorAll(".is-drop-target")) n.classList.remove("is-drop-target");
+  });
+  el.addEventListener("dragover", (e) => {
+    if (!ui.dragBay) return;
+    e.preventDefault();
+    el.classList.add("is-drop-target");
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("is-drop-target"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.remove("is-drop-target");
+    const srcBay = ui.dragBay;
+    const srcRole = ui.dragRole;
+    if (!srcBay) return;
+    if (role === "main" && srcRole !== "main") setLayoutMode("pin", srcBay);
+    else if (role === "strip" && srcRole === "main") setLayoutMode("grid", null);
+    else if (srcBay !== bayId) swapBayOrder(srcBay, bayId);
+  });
+}
+
+function feedTile(bayId, camera, role, bayInfo) {
   const el = document.createElement("div");
   el.className = `feed feed--${role}`;
   el.dataset.bay = String(bayId);
+  el.dataset.camera = camera || "";
   el.tabIndex = 0;
   const view = camera ? camera.split("/")[1] : "cctv";
+  const isPinned = role === "main";
+  if (isPinned) el.classList.add("is-pinned");
   el.innerHTML = `
-    <img alt="">
+    <img alt="" data-cam="${camera || ""}">
     <div class="feed__top">
       <span class="feed__name">Bay ${bayId}</span>
       <span class="feed__view">${VIEW_TEXT[view] || ""}</span>
+      <button type="button" class="feed__zoom" hidden title="Scroll to zoom, Shift/right-drag to pan. Click to reset.">1.0×</button>
       <span class="feed__state"></span>
       <span class="feed__conf"></span>
     </div>
+    <div class="feed__tools"></div>
     <div class="feed__bottom">
       <span class="feed__rec">REC</span>
       <time class="feed__time"></time>
@@ -89,10 +289,55 @@ function feedTile(bayId, camera, role) {
       </span>
     </div>
     <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>`;
+
+  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
+  el.querySelector(".feed__zoom").addEventListener("click", stop(() => resetCamZoom(camera)));
+
+  const tools = el.querySelector(".feed__tools");
+  if (role === "tile") {
+    for (const [camKey, label] of CAM_BTNS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `ftool${view === camKey ? " is-active" : ""}`;
+      btn.textContent = label;
+      btn.addEventListener("click", stop(() => setBayCamera(bayId, camKey)));
+      tools.append(btn);
+    }
+  }
+  if (role !== "strip" && camera) {
+    for (const [label, mult, tip] of [["−", 1 / 1.25, "Zoom out"], ["+", 1.25, "Zoom in"]]) {
+      const zb = document.createElement("button");
+      zb.type = "button";
+      zb.className = "ftool";
+      zb.textContent = label;
+      zb.title = `${tip} (or scroll wheel)`;
+      zb.addEventListener("click", stop(() => {
+        const cur = camZoom(camera);
+        setCamZoom(camera, cur.z * mult, cur.px, cur.py);
+      }));
+      tools.append(zb);
+    }
+  }
+  if (role !== "strip" && bayInfo && !bayInfo.background && bayInfo.state !== "STANDBY") {
+    const jamBtn = document.createElement("button");
+    jamBtn.type = "button";
+    jamBtn.className = "ftool ftool--warn";
+    jamBtn.textContent = "Jam";
+    jamBtn.addEventListener("click", stop(() => sendFault(bayId, "flap")));
+    tools.append(jamBtn);
+  }
+  const pinBtn = document.createElement("button");
+  pinBtn.type = "button";
+  pinBtn.className = `ftool${isPinned ? " is-active" : ""}`;
+  pinBtn.textContent = isPinned ? "Unpin" : "Pin";
+  pinBtn.addEventListener("click", stop(() => (isPinned ? setLayoutMode("grid", null) : setLayoutMode("pin", bayId))));
+  tools.append(pinBtn);
+
   el.addEventListener("click", () => selectBay(bayId));
-  el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") selectBay(bayId);
-  });
+  el.addEventListener("dblclick", (e) => { e.stopPropagation(); togglePinBay(bayId); });
+  el.addEventListener("keydown", (e) => { if (e.key === "Enter") selectBay(bayId); });
+  attachDragEvents(el, bayId, role);
+  attachZoomPan(el, camera, role);
   return el;
 }
 
@@ -128,28 +373,79 @@ function buildWall(t) {
   ui.slots.clear();
   wall.replaceChildren();
   const bySlot = new Map(t.feeds.map((f) => [f.slot, f]));
+  const bayMap = new Map(t.bays.map((b) => [b.id, b]));
+  const order = (t.view && t.view.bay_order) || currentOrder();
+  const mains = t.feeds.filter((x) => x.role === "main");
 
-  if (t.mode === "rescue" && t.rescue) {
-    wall.classList.add("is-rescue");
+  wall.classList.remove("is-rescue", "is-pin", "is-single-main");
+
+  if (mains.length > 0) {
+    const focusBay = mains[0].bay;
+    const isRescueFocus = !!(t.rescue && t.rescue.bay === focusBay);
+    wall.classList.add(isRescueFocus ? "is-rescue" : "is-pin");
+    if (mains.length === 1) wall.classList.add("is-single-main");
+
     const head = document.createElement("div");
     head.className = "takeover";
-    const refusedBay = t.bays.some((b) => b.id === t.rescue.bay && b.state === "OOD_ESCALATED");
-    // The brief above says who is driving; this header only names the takeover.
-    head.innerHTML = `<h2>Bay ${t.rescue.bay} · ${refusedBay ? "refused stall" : "operator rescue"}</h2>
-      <span class="takeover__timer" id="rescue-timer"></span>
-      <span class="clutch" id="clutch"></span>`;
+    const focusInfo = bayMap.get(focusBay);
+    const refusedBay = focusInfo && focusInfo.state === "OOD_ESCALATED";
+    const subtitle = isRescueFocus
+      ? refusedBay ? "refused stall" : "operator rescue"
+      : "pinned focus";
+    head.innerHTML = `<h2>Bay ${focusBay} · ${subtitle}</h2>`;
+
+    const camGroup = document.createElement("div");
+    camGroup.className = "takeover__views";
+    const activeCam =
+      mains.length > 1
+        ? (mains[0].camera.endsWith("/wrist_cam") ? "wrist_split" : "split")
+        : (mains[0].camera.split("/")[1] || "cctv");
+    for (const [camKey, label] of [
+      ...CAM_BTNS,
+      ["wrist_split", "Wrist + Top"],
+      ["split", "Top + Side"],
+    ]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `vbtn${activeCam === camKey ? " is-active" : ""}`;
+      btn.textContent = label;
+      btn.addEventListener("click", () => setBayCamera(focusBay, camKey));
+      camGroup.append(btn);
+    }
+    head.append(camGroup);
+
+    const spacer = document.createElement("span");
+    spacer.className = "takeover__spacer";
+    head.append(spacer);
+
+    if (isRescueFocus) {
+      const timer = document.createElement("span");
+      timer.className = "takeover__timer";
+      timer.id = "rescue-timer";
+      const clutch = document.createElement("span");
+      clutch.className = "clutch";
+      clutch.id = "clutch";
+      head.append(timer, clutch);
+    }
+    const unpin = document.createElement("button");
+    unpin.type = "button";
+    unpin.className = "vbtn";
+    unpin.textContent = "4-Up Equal";
+    unpin.addEventListener("click", () => setLayoutMode("grid", null));
+    head.append(unpin);
     wall.append(head);
-    for (const f of t.feeds.filter((x) => x.role === "main")) {
-      const el = feedTile(f.bay, f.camera, "main");
+
+    for (const f of mains) {
+      const el = feedTile(f.bay, f.camera, "main", bayMap.get(f.bay));
       wall.append(el);
       registerSlot(f.slot, el);
     }
     const strip = document.createElement("div");
     strip.className = "strip";
-    for (const bay of BAYS) {
+    for (const bay of order) {
       const f = t.feeds.find((x) => x.role === "strip" && x.bay === bay);
       if (f) {
-        const el = feedTile(bay, f.camera, "strip");
+        const el = feedTile(bay, f.camera, "strip", bayMap.get(bay));
         strip.append(el);
         registerSlot(f.slot, el);
       } else {
@@ -160,11 +456,10 @@ function buildWall(t) {
     }
     wall.append(strip);
   } else {
-    wall.classList.remove("is-rescue");
-    for (const bay of BAYS) {
+    for (const bay of order) {
       const f = [...bySlot.values()].find((x) => x.bay === bay && x.role === "tile");
       if (f) {
-        const el = feedTile(bay, f.camera, "tile");
+        const el = feedTile(bay, f.camera, "tile", bayMap.get(bay));
         wall.append(el);
         registerSlot(f.slot, el);
       } else {
@@ -316,7 +611,11 @@ function updateLog(t) {
   const key = last ? `${t.events.length}|${last.sim_t}|${last.text}` : "empty";
   if (key === ui.lastEventKey) return;
   ui.lastEventKey = key;
+  const countNote = $("activity-count");
+  if (countNote) countNote.textContent = t.events.length ? `(${t.events.length})` : "";
   const log = $("log");
+  const wasScrolled = log.scrollTop > 12;
+  const prevBottom = log.scrollHeight - log.scrollTop;
   log.replaceChildren();
   if (!t.events.length) {
     const li = document.createElement("li");
@@ -335,14 +634,15 @@ function updateLog(t) {
     li.append(time, text);
     log.append(li);
   }
+  if (wasScrolled) {
+    log.scrollTop = Math.max(0, log.scrollHeight - prevBottom);
+  }
 }
 
 // ------------------------------------------------------------------ what is happening now
 
 const kbd = (k) => `<kbd>${k}</kbd>`;
 
-// One headline for the whole cell, picked by priority, plus the key(s) worth pressing next.
-// Everything comes from telemetry, so the brief is always consistent with the tiles.
 function situation(t) {
   const bays = t.bays.filter((b) => b.state !== "STANDBY");
   const first = (state) => bays.find((b) => b.state === state);
@@ -355,122 +655,159 @@ function situation(t) {
     const bolt = b && b.x_bolt_cm != null ? `${b.x_bolt_cm.toFixed(1)} cm` : "unknown";
     const tag = refused ? `Refused · Bay ${r}` : `Rescue · Bay ${r}`;
     const tone = refused ? "ood" : "rescue";
+    const acts = [];
+    if (t.mode === "grid") acts.push({ label: `Focus Bay ${r}`, accent: true, run: () => setLayoutMode("pin", r) });
     if (t.rescue.clutch && !refused && b && b.x_bolt_cm != null && b.x_bolt_cm >= t.bolt_clear_cm) {
+      acts.push({ label: "Release Clutch", accent: true, run: () => pressKey(32, "Space") });
       return {
         tone, tag,
         head: `Bolt cleared on Bay ${r}`,
-        hint: `Release the clutch with ${kbd("Space")} to hand the rescue over: the UNO Q learns it as a skill.`,
+        hint: `Release clutch (${kbd("Space")}) to fit the DMP and run the 3-rollout simulation gate.`,
         keys: [32],
+        actions: acts,
       };
     }
     if (t.rescue.clutch) {
+      if (!refused && t.dummy) {
+        acts.push({ label: "Guided Solve", accent: true, run: () => sendClient({ type: "dummy", action: "solve" }) });
+      }
+      acts.push({ label: "Release Clutch", accent: false, run: () => pressKey(32, "Space") });
       return {
         tone, tag,
-        head: `You are driving Bay ${r}`,
+        head: `Teleoperating Bay ${r}`,
         hint: refused
-          ? `This bolt is pinned and will not clear by hand. Release the clutch with ${kbd("Space")}, then press ${kbd("R")} to reset.`
-          : `Slide the bolt past ${clear} cm (now ${bolt}), then release the clutch with ${kbd("Space")}.`,
+          ? `Pinned bolt fault cannot clear safely. Release (${kbd("Space")}) or reset (${kbd("R")}).`
+          : `Slide bolt past ${clear} cm (now ${bolt}) via the teleop pad or gloves, then release ${kbd("Space")}.`,
         keys: [32],
+        actions: acts,
       };
     }
     const head = refused
-      ? `Bay ${r} refused to guess and needs a human`
-      : `Bay ${r} stalled on a jam it has not learned`;
+      ? `Bay ${r} refused out-of-distribution fault`
+      : `Bay ${r} waiting for operator rescue`;
     if (t.selected_bay !== r) {
-      return { tone, tag, head, hint: `Press ${kbd(r)} to select it, then ${kbd("Space")} to take control.`, keys: [48 + r] };
+      acts.push({ label: `Select Bay ${r}`, accent: true, run: () => selectBay(r) });
+      return {
+        tone, tag, head,
+        hint: `Select Bay ${r} (${kbd(r)}) and engage clutch (${kbd("Space")}) to intervene.`,
+        keys: [48 + r],
+        actions: acts,
+      };
     }
+    acts.push({ label: "Engage Clutch", accent: true, run: () => pressKey(32, "Space") });
+    if (refused) acts.push({ label: "Reset Cell", accent: false, run: () => pressKey(82, "R") });
     return {
       tone, tag, head,
       hint: refused
-        ? `No validated skill is close enough to this stall. Press ${kbd("Space")} to inspect it by hand, or ${kbd("R")} to reset.`
-        : `Press ${kbd("Space")} to engage the clutch and drive Bay ${r} with the gloves.`,
+        ? `Stall signature outside Mahalanobis gate. Inspect with ${kbd("Space")} or reset with ${kbd("R")}.`
+        : `Bay ${r} selected. Engage clutch (${kbd("Space")}) to drive the arm.`,
       keys: [32],
+      actions: acts,
     };
   }
   const val = first("VALIDATING");
   if (val) {
     return {
       tone: "validating", tag: "Learning",
-      head: `Turning Bay ${val.id}'s rescue into a skill`,
-      hint: "The UNO Q fits the motion, then three headless simulations must all clear the bolt before the fleet can use it.",
+      head: `Validating Bay ${val.id} rescue skill`,
+      hint: "Fitting 30-kernel RBF-DMP and testing 3 perturbed MuJoCo rollouts before fleet deployment.",
       keys: [],
+      actions: [],
     };
   }
   const stalled = first("STALLED");
   if (stalled) {
     return {
       tone: "stalled", tag: `Stall · Bay ${stalled.id}`,
-      head: `Bay ${stalled.id} stalled`,
-      hint: "Matching the stall against the skills the fleet has learned…",
+      head: `Bay ${stalled.id} contact stall detected`,
+      hint: "Classifying 300 ms contact torque signature against the Fleet Skill Library…",
       keys: [],
+      actions: [],
     };
   }
   const auto = first("AUTONOMOUS_SKILL");
   if (auto) {
     return {
       tone: "auto", tag: `Autonomous · Bay ${auto.id}`,
-      head: `Bay ${auto.id} is clearing the jam on its own`,
-      hint: `Replaying learned skill${auto.skill ? ` ${auto.skill}` : ""} inside the torque safety tube. No operator needed.`,
+      head: `Bay ${auto.id} executing learned recovery skill`,
+      hint: `Warping ${auto.skill || "fleet DMP"} into Bay ${auto.id}'s latch frame inside the torque safety tube.`,
       keys: [],
+      actions: [{ label: `Pin Bay ${auto.id}`, accent: false, run: () => setLayoutMode("pin", auto.id) }],
     };
   }
   if (t.queue.length) {
     return {
       tone: "queued", tag: "Queue",
-      head: `Bay ${t.queue[0]} is next in the rescue queue`,
-      hint: "It is retracted to a safe hover and will be handed to you as soon as the rescue slot frees up.",
+      head: `Bay ${t.queue[0]} queued for operator takeover`,
+      hint: "Holding zero-velocity hover until the active rescue slot is free.",
       keys: [],
+      actions: [],
     };
   }
-  // A faulted cycle that has not stalled yet: the bay is still pushing, about to hit it.
   const active = bays.filter((b) => b.fault && b.fault.phase === "active" && b.state === "NOMINAL" && b.x_bolt_cm < t.bolt_clear_cm);
   if (active.length) {
     const b = active[0];
     return {
       tone: "armed", tag: `Fault · Bay ${b.id}`,
-      head: `Bay ${b.id} is pushing into a ${faultName(b.fault.kind)}`,
-      hint: `Watch its confidence: a stall is declared when it stays below ${t.threshold.toFixed(1)} for 300 ms.`,
+      head: `Bay ${b.id} approaching ${faultName(b.fault.kind)}`,
+      hint: `Confidence triggers a stall if C(t) stays below ${t.threshold.toFixed(1)} for 300 ms.`,
       keys: [],
+      actions: [{ label: `Pin Bay ${b.id}`, accent: false, run: () => setLayoutMode("pin", b.id) }],
     };
   }
   const armed = bays.filter((b) => b.fault && b.fault.phase === "armed");
   if (armed.length) {
-    const what = armed.map((b) => `Bay ${b.id} (${faultName(b.fault.kind)})`).join(" and ");
+    const what = armed.map((b) => `Bay ${b.id} (${faultName(b.fault.kind)})`).join(", ");
     return {
       tone: "armed", tag: "Fault armed",
-      head: `Fault armed on ${what}`,
-      hint: "It takes effect when the bay starts its next cycle.",
+      head: `Next-cycle fault queued: ${what}`,
+      hint: "Applies automatically as soon as the current pallet cycle completes.",
       keys: [],
+      actions: armed.map((b) => ({ label: `Cancel Bay ${b.id}`, accent: false, run: () => sendFault(b.id, "clear") })),
     };
   }
-  if (t.gate && t.gate.ok) {
-    return {
-      tone: "idle", tag: "Routine",
-      head: "All bays running their routine",
-      hint: `A skill is deployed. Press ${kbd("G")} to jam Bay 2 and watch it clear on its own, or ${kbd("P")} for the refused case.`,
-      keys: [71, 80],
-    };
+  const physicsBays = bays.filter((b) => !b.background);
+  const faultBtns = physicsBays.map((b) => ({
+    label: `Jam Bay ${b.id}`,
+    accent: false,
+    run: () => sendFault(b.id, "flap"),
+  }));
+  if (physicsBays.some((b) => b.id === 2)) {
+    faultBtns.push({ label: "Pin Bay 2 (OOD)", accent: false, run: () => sendFault(2, "pin") });
   }
   return {
-    tone: "idle", tag: "Routine",
-    head: "All bays running their routine",
-    hint: `Press ${kbd("F")} to jam Bay 1's flap and start a rescue.`,
-    keys: [70],
+    tone: "idle",
+    tag: t.gate && t.gate.ok ? "Fleet skill active" : "Nominal",
+    head: "Autonomous disassembly running across active bays",
+    hint: "Drag any bay pane to focus or swap positions, switch camera angles, or inject a fault anytime.",
+    keys: [],
+    actions: faultBtns,
   };
 }
 
 function updateBrief(t) {
   const s = situation(t);
-  const key = `${s.tone}|${s.tag}|${s.head}|${s.hint}`;
+  const actKey = (s.actions || []).map((a) => a.label).join(",");
+  const key = `${s.tone}|${s.tag}|${s.head}|${s.hint}|${actKey}`;
   if (key !== ui.briefKey) {
     ui.briefKey = key;
     const brief = $("brief");
     brief.dataset.tone = s.tone;
     $("brief-tag").textContent = s.tag;
     $("brief-head").textContent = s.head;
-    $("brief-hint").innerHTML = s.hint; // built only from our own strings and numbers
+    $("brief-hint").innerHTML = s.hint;
+    const actBox = $("brief-actions");
+    actBox.replaceChildren();
+    for (const act of s.actions || []) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `actbtn${act.accent ? " actbtn--accent" : ""}`;
+      btn.textContent = act.label;
+      btn.addEventListener("click", act.run);
+      actBox.append(btn);
+    }
     brief.classList.remove("is-new");
-    void brief.offsetWidth; // restart the arrival animation
+    void brief.offsetWidth;
     brief.classList.add("is-new");
   }
   for (const cap of $("keys").querySelectorAll(".key__cap")) {
@@ -548,23 +885,74 @@ function updateActions(t) {
   ui.lastActionSeq = Math.max(ui.lastActionSeq, newest);
 }
 
+function syncViewBar() {
+  const t = ui.telemetry;
+  const vmode = (t && t.view && t.view.mode) || ui.view.mode;
+  const pinned = t && t.view ? t.view.pinned_bay : ui.view.pinnedBay;
+  $("view-grid").classList.toggle("is-active", vmode === "grid");
+  $("view-auto").classList.toggle("is-active", vmode === "auto");
+  for (const btn of $("pin-bar").querySelectorAll(".vbtn--pin")) {
+    btn.classList.toggle("is-active", vmode === "pin" && pinned === Number(btn.dataset.bay));
+  }
+}
+
+function updateDummy(t) {
+  const d = t.dummy;
+  $("dummy-badge").hidden = !d;
+  $("dummy-panel").hidden = !d;
+  if (!d) return;
+  $("dummy-meta").textContent =
+    d.transport === "studio_udp" ? `Studio UDP${d.pid ? ` · PID ${d.pid}` : ""}` : "Stand-in";
+  for (const btn of $("dummy-panel").querySelectorAll("[data-dummy-mode]")) {
+    btn.classList.toggle("is-active", btn.dataset.dummyMode === d.mode);
+  }
+  $("dummy-autofaults").checked = !!d.auto_faults;
+  $("dummy-manual").hidden = d.mode === "off";
+  $("btn-solve").textContent = d.solving ? "Solving…" : "Guided Solve";
+  if (!ui.padActive) {
+    const xPct = ((d.dx_cm + 3.0) / 10.0) * 100;
+    const zPct = ((4.0 - d.dz_cm) / 7.0) * 100;
+    $("wrist-dot").style.left = `${Math.max(4, Math.min(96, xPct))}%`;
+    $("wrist-dot").style.top = `${Math.max(6, Math.min(94, zPct))}%`;
+    $("sl-thumb").value = String(Math.round((d.thumb || 0) * 100));
+    $("sl-index").value = String(Math.round((d.index || 0) * 100));
+    $("sl-dy").value = String(Math.round((d.dy_cm || 0) * 10));
+  }
+}
+
 function render(t) {
   ui.telemetry = t;
-  const layoutKey = `${t.layout_id}|${t.mode}|${t.feeds.map((f) => `${f.slot}:${f.camera}`).join(",")}`;
+  if (t.view) {
+    ui.view.mode = t.view.mode || ui.view.mode;
+    ui.view.pinnedBay = t.view.pinned_bay ?? null;
+    if (Array.isArray(t.view.bay_order) && t.view.bay_order.length === 4) {
+      ui.view.bayOrder = t.view.bay_order;
+    }
+    if (t.view.zooms && typeof t.view.zooms === "object") {
+      ui.view.zooms = t.view.zooms;
+    }
+  }
+  const orderStr = ((t.view && t.view.bay_order) || currentOrder()).join("");
+  const layoutKey = `${t.layout_id}|${t.mode}|${orderStr}|${t.feeds.map((f) => `${f.slot}:${f.camera}:${f.role}`).join(",")}`;
   if (layoutKey !== ui.layoutKey) {
     ui.layoutKey = layoutKey;
     buildWall(t);
+  }
+  for (const f of t.feeds) {
+    if (f.role !== "strip") refreshZoomBadge(f.camera);
   }
   ui.layoutId = t.layout_id % 256;
   $("clock").textContent = t.wall;
   const active = t.bays.filter((b) => b.state !== "STANDBY").length;
   $("shift").textContent = `${active} bays, 1 operator on shift`;
+  syncViewBar();
   updateWall(t);
   updateQueue(t);
   updateSparks(t);
   updateGate(t);
   updateLog(t);
   updateBrief(t);
+  updateDummy(t);
   updateActions(t);
   $("compliance").textContent = t.compliance;
   $("reasoning").textContent = t.reasoning;
@@ -629,6 +1017,14 @@ function setLink(up) {
   $("linkdown").hidden = up;
 }
 
+function sendClient(payload) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    return true;
+  }
+  return false;
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}${WS_PATH}`);
@@ -636,6 +1032,12 @@ function connect() {
   ws.onopen = () => {
     backoff = 1000;
     setLink(true);
+    sendClient({
+      type: "view",
+      mode: ui.view.mode,
+      pinned_bay: ui.view.pinnedBay,
+      bay_order: currentOrder(),
+    });
   };
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
@@ -658,17 +1060,12 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-// ------------------------------------------------------------------ keys (GLFW codes)
+// ------------------------------------------------------------------ keys (GLFW codes) & controls
 
 function sendKey(code) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "key", code }));
-    return true;
-  }
-  return false;
+  return sendClient({ type: "key", code });
 }
 
-// Every press flashes its key cap at once; the server's answer arrives as a toast.
 function pressKey(code, name) {
   flashCap(code);
   if (!sendKey(code)) toast(name, "Not connected to the cell controller, key not sent", "warn");
@@ -680,11 +1077,107 @@ function keyName(code) {
 
 function selectBay(bayId) {
   const b = ui.telemetry && ui.telemetry.bays.find((x) => x.id === bayId);
-  if (b && b.state !== "STANDBY") pressKey(48 + bayId, String(bayId)); // same as pressing 1-4
+  if (!b || b.state === "STANDBY") return;
+  if (b.background) {
+    togglePinBay(bayId);
+    return;
+  }
+  pressKey(48 + bayId, String(bayId));
+}
+
+function initViewBar() {
+  $("view-grid").addEventListener("click", () => setLayoutMode("grid", null));
+  $("view-auto").addEventListener("click", () => setLayoutMode("auto", null));
+  const pinBar = $("pin-bar");
+  for (const bay of BAYS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "vbtn vbtn--pin";
+    b.dataset.bay = String(bay);
+    b.textContent = String(bay);
+    b.title = `Pin Bay ${bay} (click again to unpin)`;
+    b.addEventListener("click", () => togglePinBay(bay));
+    pinBar.append(b);
+  }
+  const dz = $("focus-dropzone");
+  dz.addEventListener("dragover", (e) => {
+    if (!ui.dragBay) return;
+    e.preventDefault();
+    dz.classList.add("is-over");
+  });
+  dz.addEventListener("dragleave", () => dz.classList.remove("is-over"));
+  dz.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dz.classList.remove("is-over");
+    if (!ui.dragBay) return;
+    if (ui.dragRole === "main") setLayoutMode("grid", null);
+    else setLayoutMode("pin", ui.dragBay);
+  });
+}
+
+// TODO(rokoko-gloves-swap): Temporary UI controls for DummyOperatorSupervisor
+function initDummyControls() {
+  for (const btn of $("dummy-panel").querySelectorAll("[data-dummy-mode]")) {
+    btn.addEventListener("click", () => sendClient({ type: "dummy", mode: btn.dataset.dummyMode }));
+  }
+  $("dummy-autofaults").addEventListener("change", (e) => {
+    sendClient({ type: "dummy", auto_faults: e.target.checked });
+  });
+  $("btn-solve").addEventListener("click", () => sendClient({ type: "dummy", action: "solve" }));
+  $("btn-zero").addEventListener("click", () => sendClient({ type: "dummy", action: "reset_pose" }));
+
+  const pad = $("wrist-pad");
+  const sendPad = (ev) => {
+    const rect = pad.getBoundingClientRect();
+    const fx = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+    const fz = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+    $("wrist-dot").style.left = `${fx * 100}%`;
+    $("wrist-dot").style.top = `${fz * 100}%`;
+    sendClient({ type: "dummy", dx_cm: -3.0 + fx * 10.0, dz_cm: 4.0 - fz * 7.0 });
+  };
+  pad.addEventListener("pointerdown", (e) => {
+    ui.padActive = true;
+    pad.setPointerCapture(e.pointerId);
+    sendPad(e);
+  });
+  pad.addEventListener("pointermove", (e) => { if (ui.padActive) sendPad(e); });
+  const endPad = () => { ui.padActive = false; };
+  pad.addEventListener("pointerup", endPad);
+  pad.addEventListener("pointercancel", endPad);
+  pad.addEventListener("keydown", (e) => {
+    const map = {
+      ArrowRight: { dx_cm: 0.4 },
+      ArrowLeft: { dx_cm: -0.4 },
+      ArrowUp: { dz_cm: 0.3 },
+      ArrowDown: { dz_cm: -0.3 },
+    };
+    if (map[e.key]) {
+      e.preventDefault();
+      e.stopPropagation();
+      sendClient({ type: "dummy", nudge: map[e.key] });
+    }
+  });
+  const bindSlider = (id, fn) => {
+    $(id).addEventListener("input", (e) => {
+      ui.padActive = true;
+      fn(Number(e.target.value));
+      clearTimeout(ui.slTimer);
+      ui.slTimer = setTimeout(() => { ui.padActive = false; }, 250);
+    });
+  };
+  bindSlider("sl-thumb", (v) => sendClient({ type: "dummy", thumb: v / 100 }));
+  bindSlider("sl-index", (v) => sendClient({ type: "dummy", index: v / 100 }));
+  bindSlider("sl-dy", (v) => sendClient({ type: "dummy", dy_cm: v / 10 }));
 }
 
 window.addEventListener("keydown", (event) => {
   if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+  const tag = event.target && event.target.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+  if (event.key === "Escape" && ui.view.mode === "pin") {
+    setLayoutMode("grid", null);
+    return;
+  }
   const k = event.key;
   let code = null;
   if (k === " ") code = 32;
@@ -697,6 +1190,8 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("resize", () => ui.telemetry && updateSparks(ui.telemetry));
 
+initViewBar();
+initDummyControls();
 buildKeyBar();
 setLink(false);
 $("live-text").textContent = "Connecting";

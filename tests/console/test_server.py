@@ -184,3 +184,19 @@ def test_publish_from_many_threads(server: ConsoleServer) -> None:
             assert isinstance(msg, bytes)
             seen.add(msg[0])
     assert seen == {0, 1, 2, 3}
+
+
+def test_client_view_and_dummy_messages_reach_callback(web_dir: Path) -> None:
+    got: list[dict[str, object]] = []
+    srv = ConsoleServer(web_dir=web_dir, port=0, on_client_message=got.append)
+    srv.start()
+    try:
+        with _ws(srv) as ws:
+            ws.send(json.dumps({"type": "view", "mode": "pin", "pinned_bay": 2}))
+            ws.send(json.dumps({"type": "dummy", "mode": "auto"}))
+            ws.send(json.dumps({"type": "unknown", "x": 1}))
+            _wait(lambda: len(got) == 2)
+        assert got[0]["type"] == "view" and got[0]["pinned_bay"] == 2
+        assert got[1]["type"] == "dummy" and got[1]["mode"] == "auto"
+    finally:
+        srv.stop()
