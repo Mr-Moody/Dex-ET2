@@ -94,6 +94,7 @@ class HudView:
     # (bay, kind, phase): kind "flap" | "pin"; phase "armed" (next cycle) | "active" (this cycle)
     faults: tuple[tuple[int, str, str], ...] = ()
     conveyors: tuple[ConveyorStatus, ...] = ()
+    powered_off: frozenset[int] = frozenset()  # bays (live or replayed) cut by the E-stop
 
 
 # --------------------------------------------------------------------------- pieces

@@ -98,9 +98,9 @@ code { font-family: var(--font-mono); font-size: 13px; }
           <tbody>
             <tr><td class="pin">A0</td><td>Bay-select joystick · KY-023</td><td>VRx</td><td rowspan="2">push up / right / down / left → <code>BTN:BAY:1</code>…<code>4</code></td></tr>
             <tr><td class="pin">A1</td><td>Bay-select joystick · KY-023</td><td>VRy</td></tr>
-            <tr><td class="pin">A2</td><td>Bay-select joystick · KY-023</td><td>SW (optional)</td><td>spare, stick press</td></tr>
-            <tr><td class="pin">D2</td><td>Clutch button · KY-004</td><td>S</td><td><code>CLUTCH:0|1</code></td></tr>
-            <tr><td class="pin">D12</td><td>E-stop button · KY-004</td><td>S</td><td><code>ESTOP:0|1</code></td></tr>
+            <tr><td class="pin">A2</td><td>Bay-select joystick · KY-023</td><td>SW (optional)</td><td>click re-sends bay, hold 2 s to calibrate</td></tr>
+            <tr><td class="pin">D2</td><td>Clutch button · KY-004</td><td>S</td><td><code>CLUTCH:0|1</code>, hold to drive the selected robot</td></tr>
+            <tr><td class="pin">D12</td><td>E-stop button · KY-004</td><td>S</td><td>press toggles power of the selected robot (<code>POWER:n:0|1</code>)</td></tr>
             <tr><td class="pin">D3</td><td>Alert buzzer · KY-006 (passive)</td><td>S</td><td><code>tone()</code></td></tr>
             <tr><td class="pin">D5 / D4</td><td>Bay 1 LED · KY-011</td><td>G / R</td><td rowspan="4"><code>CMD:BAY_STATE</code> → green pulse, red blink</td></tr>
             <tr><td class="pin">D6 / D7</td><td>Bay 2 LED · KY-011</td><td>G / R</td></tr>
@@ -119,7 +119,7 @@ code { font-family: var(--font-mono); font-size: 13px; }
       <ul class="rules">
         <li class="warn"><b>LED resistors</b><p>KY-011 boards often have no series resistor. Look for tiny parts labelled 151, 221 or 331 on the LED board. If there are none, put a 150–220&nbsp;Ω resistor in series with each R and G line on the breadboard. Never drive a bare LED straight from a GPIO.</p></li>
         <li class="warn"><b>Power the joystick from 3V3, never 5V</b><p>Its pin is labelled +5V, but connect it to the 3V3 rail. A0 and A1 are not 5&nbsp;V tolerant, and 3.3&nbsp;V also matches the ADC's full range.</p></li>
-        <li><b>Joystick directions</b><p>The firmware reads the centre position at boot and emits a bay event when the stick passes about 70% of its travel: up&nbsp;1, right&nbsp;2, down&nbsp;3, left&nbsp;4. Push each way once after assembly; if a direction lands on the wrong bay, swap or invert the axes in firmware.</p></li>
+        <li><b>Joystick directions</b><p>The firmware reads the centre position at boot and emits a bay event when the stick passes about 60% of its travel: up&nbsp;1, right&nbsp;2, down&nbsp;3, left&nbsp;4 by default. If a direction lands on the wrong bay, run <code>teleop unoq --calibrate-joystick</code> and push towards each bay as its LED blinks; no reflash needed.</p></li>
         <li><b>Wire all three button pins</b><p>Connect S, + and − on both KY-004 buttons. Boards differ on whether pressing pulls S high or low, so the firmware reads the idle level at boot and treats the opposite level as pressed.</p></li>
         <li><b>Check the silkscreen</b><p>Pin order differs between module batches. Match the letters printed on each board (S, +, −, R, G), not the position.</p></li>
         <li><b>One ground</b><p>Every module's − pin goes to the breadboard GND rail, and the rail goes to a UNO Q GND pin. The buzzer's middle pin is unused.</p></li>

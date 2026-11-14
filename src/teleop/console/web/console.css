@@ -529,6 +529,22 @@ body {
 .feed__lost { display: none; background: rgb(13 16 19 / 0.82); }
 .feed.is-lost .feed__lost { display: grid; }
 
+/* robot power cut by the console E-stop (latched until pressed again on that bay) */
+.feed__power {
+  position: absolute; inset: 0;
+  z-index: 2;
+  display: none; place-content: center; text-align: center;
+  gap: 4px;
+  background: rgb(118 20 26 / 0.38);
+  color: #ffd3d6;
+  pointer-events: none;
+}
+.feed__power strong { font-size: 22px; font-weight: 700; letter-spacing: 0.06em; color: #fff; }
+.feed.is-powered-off { border-color: var(--stalled); animation: alarm 1.1s ease-in-out infinite; }
+.feed.is-powered-off .feed__power { display: grid; }
+.feed--strip .feed__power strong { font-size: 14px; }
+.feed--strip .feed__power span { display: none; }
+
 /* strip tiles are small: trim the overlay */
 .feed--strip .feed__top { padding: 6px 8px; gap: 6px; }
 .feed--strip .feed__name { font-size: 15px; }

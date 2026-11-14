@@ -409,6 +409,8 @@ class _Bay:
     belt_transfer: bool = False
     belt_dist_m: float = 0.0
     pack_dy_m: float = 0.0
+    powered: bool = True  # False while the console E-stop has this robot's power cut
+    brake_pose: Pose | None = None  # where the arm was when its power was cut
 
 
 class AtcCoordinator:
@@ -576,6 +578,7 @@ class AtcCoordinator:
             pose_sigma_mm=bay.rig.estimate.sigma_x_m * 1e3,
             pose_sigma_yaw_deg=math.degrees(bay.rig.estimate.sigma_yaw_rad),
             touch_correction_mm=self._touch_mm(bay),
+            powered=bay.powered,
         )
 
     @staticmethod
@@ -703,19 +706,49 @@ class AtcCoordinator:
         console = console or ConsoleInputState()
         self._apply_gates()
         for bay in self._bays.values():
-            self._control(bay, console, operator)
+            self._set_power(bay, bay.bay_id not in console.powered_off)
+            if bay.powered:
+                self._control(bay, console, operator)
+            else:
+                self._brake(bay)
         step_physics(self.model, self.data)
         self.time_s += CONTROL_DT
         for bay in self._bays.values():
-            self._sense(bay)
+            if bay.powered:
+                self._sense(bay)
         self._promote()
-        self._update_conveyors(console)
+        self._update_conveyors()
         return self.snapshots()
 
-    def _update_conveyors(self, console: ConsoleInputState) -> None:
+    def _set_power(self, bay: _Bay, powered: bool) -> None:
+        """Console E-stop: a cut robot brakes where it is; restoring it resumes where it was.
+
+        Timers (routine, approach, replay) only advance in ``_control``, so they pause with it.
+        The clutch indexer re-anchors on the next engage, so the glove never jumps the arm.
+        """
+        if powered == bay.powered:
+            return
+        bay.powered = powered
+        bay.indexer.reset()
+        bay.rig.ik.reset()
+        bay.prev_cmd_pos = None
+        bay.prev_wrist_pos = None
+        if powered:
+            bay.brake_pose = None
+            bay.detector.reset()
+            logger.warning("bay %d: robot power restored", bay.bay_id)
+        else:
+            bay.brake_pose = bay.rig.wrist_pose()
+            logger.warning("bay %d: robot power cut by the console E-stop", bay.bay_id)
+
+    def _brake(self, bay: _Bay) -> None:
+        assert bay.brake_pose is not None
+        self._command(bay, bay.brake_pose, v_cmd=0.0)
+
+    def _update_conveyors(self) -> None:
         step = CONVEYOR_SPEED_M_S * CONTROL_DT
         for bay in self._bays.values():
-            if console.estop or bay.state in (
+            if not bay.powered or bay.state in (
                 BayState.STALLED,
                 BayState.QUEUED,
                 BayState.RESCUE,
