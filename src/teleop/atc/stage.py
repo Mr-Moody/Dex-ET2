@@ -42,6 +42,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from teleop.atc.act_recovery import ActRecoveryFactory
 from teleop.atc.coordinator import (
     DEFAULT_REALISM,
     ROUTINE,
@@ -49,7 +50,7 @@ from teleop.atc.coordinator import (
     CoordinatorConfig,
     OperatorInput,
 )
-from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
+from teleop.atc.hud import ActionNote, GateStatus, HudView, RecoveryStatus, RescueStatus
 from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
 from teleop.atc.validator import GATE_PASS_MIN, ValidationReport
@@ -1171,6 +1172,33 @@ class StageController:
             compliance_detail=self.events.status_detail(),
             compliance_history=tuple(self.events.status_history()),
             powered_off=self.console.powered_off,
+            recovery=self._recovery_status(),
+            recovery_bays=tuple(
+                (bay, kind) for bay in sorted(self.active_bays) if (kind := co.recovery_name(bay))
+            ),
+        )
+
+    def _recovery_status(self) -> RecoveryStatus:
+        co = self.coordinator
+        act = co.act
+        healthy = False
+        p95: float | None = None
+        faults: tuple[str, ...] = ()
+        if act is not None:
+            try:
+                healthy = bool(act.healthy())
+                if isinstance(act, ActRecoveryFactory):
+                    p95 = act.worker.p95_ms()
+                    faults = act.manifest.passed_faults()
+            except Exception:
+                logger.exception("atc: ACT status unavailable")
+        return RecoveryStatus(
+            backend=co.recovery_backend.value,
+            note=co.backend_note,
+            act_loaded=act is not None,
+            act_healthy=healthy,
+            p95_ms=p95,
+            faults=faults,
         )
 
     def _faults_view(self) -> tuple[tuple[int, str, str], ...]:

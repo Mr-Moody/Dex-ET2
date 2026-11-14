@@ -66,6 +66,7 @@ const ui = {
   lastAuditKey: null,
   telemetry: null,
   lastActionSeq: null, // null until the first telemetry, so a reload does not replay old toasts
+  lastBackendNote: null, // likewise for recovery notes
   briefKey: null,
   // "grid" by default: a stall or rescue never rearranges the cameras on its own. "auto"
   // (the rescue bay takes the stage) is opt-in from the header switch.
@@ -100,9 +101,45 @@ const KEY_BAR = [
   },
   { caps: ["Space"], codes: [32], text: "Clutch" },
   { caps: ["E"], codes: [69], text: "E-stop bay" },
-  { caps: ["M"], codes: [77], text: "Backend" },
+  { caps: ["M"], codes: [77], text: "Switch recovery" },
   { caps: ["R"], codes: [82], text: "Reset cells" },
 ];
+// <recovery>
+// Recovery backend of the next stall (the M key cycles dmp -> hybrid -> act -> dmp) and the
+// health of the ACT release behind it. Pure helpers: render() only applies their results.
+const BACKEND_ORDER = ["dmp", "hybrid", "act"];
+const nextBackend = (b) => BACKEND_ORDER[(BACKEND_ORDER.indexOf(b) + 1) % BACKEND_ORDER.length];
+
+function recoveryChip(rec) {
+  const act = rec.act || {};
+  const name = rec.backend.toUpperCase();
+  let actText;
+  let tone = "dmp";
+  if (!act.loaded) {
+    actText = rec.backend === "dmp" ? "" : "ACT not loaded";
+    if (rec.backend !== "dmp") tone = "warn";
+  } else if (!act.healthy) {
+    actText = "ACT down";
+    tone = "warn";
+  } else {
+    actText = `ACT ok${act.p95_ms != null ? ` ${Math.round(act.p95_ms)} ms` : ""}`;
+    tone = "ok";
+  }
+  if (rec.backend === "act") actText = actText.replace(/^ACT /, ""); // the name already says ACT
+  const faults = act.loaded && act.faults && act.faults.length ? ` Gated faults: ${act.faults.join(", ")}.` : "";
+  const title = `Recovery: ${rec.backend}${actText ? `, ${actText}` : ""}.${faults} Press M for ${nextBackend(rec.backend)}.`;
+  return { name, actText, tone, title, hint: `Switch recovery: ${nextBackend(rec.backend)}` };
+}
+
+// A plain switch is already toasted as the M key's own outcome; downgrades are the news.
+function recoveryToast(prevNote, rec) {
+  const note = rec.note || "";
+  if (prevNote === null || note === prevNote || !note) return null;
+  if (/^recovery backend \w+ \(from the next stall\)$/.test(note)) return null;
+  return { text: note, level: /unavailable|error|failed/i.test(note) ? "warn" : "info" };
+}
+// </recovery>
+
 const CAM_BTNS = [
   ["cctv", "CCTV"],
   ["wrist_cam", "Wrist"],
@@ -737,12 +774,13 @@ function ensureSparks() {
   for (const bay of BAYS) {
     const row = document.createElement("div");
     row.className = "spark";
-    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas role="img"></canvas><span class="spark__val"></span>`;
+    row.innerHTML = `<span class="spark__name">Bay ${bay}<span class="spark__tag" hidden></span></span><canvas role="img"></canvas><span class="spark__val"></span>`;
     box.append(row);
     const s = {
       row,
       canvas: row.querySelector("canvas"),
       val: row.querySelector(".spark__val"),
+      tag: row.querySelector(".spark__tag"),
       hover: null, // 0..1 across the canvas while the pointer is over it
     };
     s.canvas.addEventListener("pointermove", (e) => {
@@ -848,6 +886,9 @@ function updateSparks(t) {
     s.row.classList.toggle("is-standby", standby);
     s.row.classList.toggle("is-low", alarm && hovered === null);
     s.val.textContent = standby ? "–" : shown.toFixed(2);
+    const rtag = b.recovery ? b.recovery.toUpperCase() : "";
+    s.tag.hidden = !rtag;
+    if (s.tag.textContent !== rtag) s.tag.textContent = rtag;
     s.canvas.setAttribute(
       "aria-label",
       standby ? `Bay ${b.id} on standby` : `Bay ${b.id} confidence ${b.confidence.toFixed(2)}, ${STATE_TEXT[b.state] || b.label}`
@@ -1221,6 +1262,28 @@ function updateActions(t) {
   ui.lastActionSeq = Math.max(ui.lastActionSeq, newest);
 }
 
+function updateRecovery(t) {
+  const rec = t.recovery;
+  const chip = $("recovery-chip");
+  chip.hidden = !rec;
+  if (!rec) return;
+  const v = recoveryChip(rec);
+  chip.dataset.tone = v.tone;
+  chip.title = v.title;
+  $("recovery-name").textContent = v.name;
+  $("recovery-act").textContent = v.actText;
+  const cap = $("keys").querySelector('.key__cap[data-code="77"]');
+  const label = cap && cap.closest(".key").querySelector(".key__text");
+  if (label && label.textContent !== v.hint) {
+    label.textContent = v.hint;
+    cap.title = v.hint;
+    cap.setAttribute("aria-label", `M: ${v.hint}`);
+  }
+  const news = recoveryToast(ui.lastBackendNote, rec);
+  ui.lastBackendNote = rec.note || "";
+  if (news) toast("Recovery", news.text, news.level);
+}
+
 function syncViewBar() {
   const t = ui.telemetry;
   const vmode = (t && t.view && t.view.mode) || ui.view.mode;
@@ -1376,6 +1439,7 @@ function render(t) {
   updateDummy(t);
   updateCalib(t);
   updateActions(t);
+  updateRecovery(t);
   updateCompliance(t);
   // One advisory line, shown only while the advisor has something to say.
   // The line comes from the offline rule-based triage reasoner ("TRIAGE bay 1: Bay 1: ..."); the
