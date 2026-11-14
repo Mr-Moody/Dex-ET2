@@ -143,7 +143,9 @@ class UnoQConsolePoller:
 
     Uses its own client connection so polling never interleaves with the coordinator's
     classify/fit requests. The clutch is dropped when no poll has succeeded for
-    ``timeout_s`` (same dead-man rule as the serial bridge).
+    ``timeout_s`` (same dead-man rule as the serial bridge). Bay states for the board LEDs are
+    queued by :meth:`set_bay_state` (only on change) and sent from the polling thread, so the
+    control loop never waits on the network.
     """
 
     def __init__(
@@ -160,23 +162,44 @@ class UnoQConsolePoller:
         self._lock = threading.Lock()
         self._state = ConsoleInputState()
         self._last_ok_ns: int | None = None
+        self._heartbeat_age_ms: int | None = None
         self._edge = False
+        self._bay_states: dict[int, BayState] = {}  # last state requested per bay
+        self._pending: dict[int, BayState] = {}  # changed, not yet sent
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="unoq-console", daemon=True)
         self._thread.start()
 
     def _loop(self) -> None:
         while not self._stop.wait(self._period_s):
+            self.poll_once()
+
+    def poll_once(self) -> None:
+        """Send queued bay states, then poll the console once (the thread's body)."""
+        with self._lock:
+            pending, self._pending = self._pending, {}
+        for bay_id, bay_state in pending.items():
             try:
-                s = self._client.console_state()
+                self._client.set_bay_state(bay_id, bay_state)
             except Exception as exc:
-                logger.debug("unoq console poll failed: %s", exc)
-                continue
-            with self._lock:
-                if s.fault_rig_latched and not self._state.fault_rig_latched:
-                    self._edge = True
-                self._state = s
-                self._last_ok_ns = self._clock()
+                logger.debug("unoq bay state %d dropped: %s", bay_id, exc)
+        try:
+            s, age = self._client.console_status()
+        except Exception as exc:
+            logger.debug("unoq console poll failed: %s", exc)
+            return
+        with self._lock:
+            if s.fault_rig_latched and not self._state.fault_rig_latched:
+                self._edge = True
+            self._state = s
+            self._heartbeat_age_ms = age
+            self._last_ok_ns = self._clock()
+
+    @property
+    def heartbeat_age_ms(self) -> int | None:
+        """MCU heartbeat age the board reported on the last successful poll (None: never)."""
+        with self._lock:
+            return self._heartbeat_age_ms
 
     def state(self) -> ConsoleInputState:
         with self._lock:
@@ -190,7 +213,11 @@ class UnoQConsolePoller:
         return edge
 
     def set_bay_state(self, bay_id: int, state: BayState) -> None:
-        pass  # the UNO Q drives its LED matrix from its own MCU bridge
+        with self._lock:
+            if self._bay_states.get(bay_id) == state:
+                return
+            self._bay_states[bay_id] = state
+            self._pending[bay_id] = state
 
     def reset_rig(self) -> None:
         pass
@@ -462,6 +489,22 @@ class StageController:
     def consoles(self) -> list[ConsoleSource]:
         return [self.keyboard, *self.hardware]
 
+    def replace_hardware(self, consoles: Sequence[ConsoleSource]) -> None:
+        """Install new hardware consoles and close the old ones (e.g. after a UNO Q swap).
+
+        Called from the swap thread: the list assignment is atomic and the tick snapshots
+        ``consoles`` once for its edge, merge and LED passes. A closed console tolerates a
+        late call (the poller drops it).
+        """
+        old, self.hardware = self.hardware, list(consoles)
+        for console in old:
+            if any(console is c for c in self.hardware):
+                continue
+            try:
+                console.close()
+            except Exception:
+                logger.exception("console close failed")
+
     # ------------------------------------------------------------------ keys
 
     def on_key(self, keycode: int) -> None:
@@ -608,13 +651,14 @@ class StageController:
     def tick(self, operator: OperatorInput | None = None) -> tuple[BaySnapshot, ...]:
         self._handle_keys()
         self.keyboard.pump()
-        for console in self.consoles:
+        consoles = self.consoles  # one snapshot per tick: replace_hardware may run concurrently
+        for console in consoles:
             if console.take_fault_rig_edge():
                 self.arm(1, flap_jammed=True)
-        self.console = merge_console(c.state() for c in self.consoles)
+        self.console = merge_console(c.state() for c in consoles)
         self._cycle_pallets()
         snaps = self.coordinator.tick(self.console, operator)
-        self._after_tick(snaps)
+        self._after_tick(snaps, consoles)
         return snaps
 
     def _cycle_pallets(self) -> None:
@@ -651,7 +695,9 @@ class StageController:
                 self.active_faults.pop(bay, None)
             co.start_cycle(bay, flap_jammed=jam, bolt_pinned=pin)
 
-    def _after_tick(self, snaps: tuple[BaySnapshot, ...]) -> None:
+    def _after_tick(
+        self, snaps: tuple[BaySnapshot, ...], consoles: Sequence[ConsoleSource]
+    ) -> None:
         co = self.coordinator
         holders = co.rescue_slot_holders()
         holder = holders[0] if holders else None
@@ -659,7 +705,7 @@ class StageController:
             self._rescue_bay = holder
             self._rescue_t0 = co.time_s
         for snap in snaps:
-            for console in self.consoles:
+            for console in consoles:
                 console.set_bay_state(snap.bay_id, snap.state)
         for event in self.events.drain():
             self._on_event(event)
