@@ -1,12 +1,12 @@
 ---
 id: T-206
 title: Console hardware health strip with reconnect buttons
-status: in_review
-owner: claude-code
-branch: feat/console-health-strip
+status: done
+owner: null
+branch: null
 depends_on: [T-200]
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: '2026-11-14T11:19:16+00:00'
+claimed_at: null
 ---
 
 Implements Task 7 of the plan.

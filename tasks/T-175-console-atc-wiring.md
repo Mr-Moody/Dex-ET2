@@ -1,12 +1,12 @@
 ---
 id: T-175
 title: Run teleop atc through the fleet ops console by default
-status: in_review
-owner: lead-laptop
-branch: feat/console-atc-wiring
+status: done
+owner: null
+branch: null
 depends_on: [T-173, T-174]
 plan: docs/superpowers/plans/2026-11-14-fleet-ops-console.md#task-t-175-wire-the-console-into-teleop-atc
-claimed_at: '2026-11-14T05:58:30+00:00'
+claimed_at: null
 ---
 
 **Fleet ops console, wiring. Edit only `src/teleop/console/run.py`, `src/teleop/commands/atc.py`, `configs/atc.yaml`, `tests/console/test_run.py`.**

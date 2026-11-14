@@ -1,12 +1,12 @@
 ---
-id: T-200
+id: T-217
 title: Interactive console camera pinning, zoom, wrist cam and temporary dummy glove streamer
-status: in_review
-owner: tara-kas
-branch: feat/console-pinning-zoom-dummy-glove
+status: done
+owner: null
+branch: null
 depends_on: [T-174, T-175]
 plan: docs/superpowers/plans/2026-11-14-fleet-ops-console.md
-claimed_at: '2026-11-14T13:00:00+00:00'
+claimed_at: null
 ---
 
 Makes the fleet ops console interactive and non-hardcoded while physical Rokoko gloves are

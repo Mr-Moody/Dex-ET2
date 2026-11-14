@@ -1,12 +1,12 @@
 ---
 id: T-199
 title: Show the Panda arm in the console rescue close-ups
-status: in_review
-owner: ethan
-branch: fix/rescue-views-show-arm
+status: done
+owner: null
+branch: null
 depends_on: [T-173]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md
-claimed_at: '2026-11-14T09:52:11+00:00'
+claimed_at: null
 ---
 
 The console's rescue close-ups (top and side ortho views) render with the Panda link meshes
