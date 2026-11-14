@@ -1,7 +1,7 @@
 ---
 id: T-132
 title: Operator console hardware doc (sensor suite, pin map, wiring diagram)
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: docs/console-hardware
 depends_on: [T-100]
