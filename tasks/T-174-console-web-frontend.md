@@ -1,7 +1,7 @@
 ---
 id: T-174
 title: Fleet ops console web front end and preview server
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/console-frontend
 depends_on: [T-172]
