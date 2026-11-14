@@ -17,7 +17,7 @@ or leaving the dashboard.
 
 ## Goals
 
-- A **Glove calibration** panel in the console right rail (layout C): two pose tiles (Flat /
+- A **Glove calibration** panel on the console Setup & health page, in its `#calib-slot` (layout C; see `2026-11-14-console-pages-and-data-collection-design.md`): two pose tiles (Flat /
   Fist) with **stroke SVG** hand icons (no emoji), plus a primary **Calibrate gloves** action
   when idle.
 - Server-driven wizard: prep delay → collect flat → prep delay → collect fist → build
