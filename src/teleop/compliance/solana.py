@@ -46,7 +46,7 @@ from urllib import request as urlrequest
 from urllib.parse import quote
 
 import numpy as np
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
@@ -1100,7 +1100,7 @@ def _cmd_demo(audit_path: Path, anchors_path: Path, bay: int, kind: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
-    load_dotenv()
+    load_dotenv(find_dotenv(usecwd=True))  # the .env where the command is run, not the module
     kinds = [str(k) for k in get_args(ComplianceKind)]
     p = argparse.ArgumentParser(
         prog="python -m teleop.compliance.solana",
