@@ -1,12 +1,12 @@
 ---
 id: T-100
 title: ATC shared contracts, CLI registration, Panda fetch, 16-DoF LEAP & placeholders
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: lead-laptop
+branch: feat/atc-shared-contracts
 depends_on: [T-050]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-100-atc-shared-contracts-cli-registration-panda-fetch-16-dof-leap--placeholders
-claimed_at: null
+claimed_at: '2026-11-14T00:45:41+00:00'
 ---
 
 **Sequential foundation task for the ATC pivot (`PROJECT_BRIEF.md`). Only `T-100` may edit shared entrypoints (`cli.py`, `scripts/fetch_models.py`, `configs/hands/leap.yaml`, `.env.example`, `.pre-commit-config.yaml`).**

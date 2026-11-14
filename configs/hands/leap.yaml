@@ -1,5 +1,6 @@
-# LEAP hand (Menagerie): 3 fingers + thumb, 16 position actuators. Only flexion joints are
-# mapped; the *_rot (abduction) and th_axl actuators stay at their default targets.
+# LEAP hand (Menagerie): 3 fingers + thumb, all 16 position actuators mapped by name.
+# The *_rot (abduction) actuators have symmetric ctrlranges (+-1.047 rad), so they use a fixed
+# glove range centred on 0 instead of open/fist calibration: a relaxed glove maps to ctrl 0.
 name: leap
 mirror_left: false
 base_body: palm
@@ -19,3 +20,8 @@ flex:
   - {actuator: th_cmc_act, joints: [thumb_metacarpal], axis: x}
   - {actuator: th_mcp_act, joints: [thumb_proximal], axis: x}
   - {actuator: th_ipl_act, joints: [thumb_distal], axis: x}
+  # Opposition / abduction (sign and gain to be checked live with the gloves).
+  - {actuator: th_axl_act, joints: [thumb_metacarpal], axis: y}
+  - {actuator: if_rot_act, joints: [index_proximal], axis: z, range: [-0.5, 0.5]}
+  - {actuator: mf_rot_act, joints: [middle_proximal], axis: z, range: [-0.5, 0.5]}
+  - {actuator: rf_rot_act, joints: [ring_proximal], axis: z, range: [-0.5, 0.5]}

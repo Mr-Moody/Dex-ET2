@@ -1,7 +1,7 @@
 ---
 id: T-070
 title: Train, eval, attract mode
-status: todo
+status: blocked
 owner: null
 branch: null
 depends_on: [T-061]
