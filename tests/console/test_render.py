@@ -358,3 +358,43 @@ def test_rescue_feeds_render_the_full_arm(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(frames) == 2
     assert [c["camera"] for c in calls] == ["bay1/top_ortho", "bay1/side_ortho"]
     assert all(c.get("scene_option") is None for c in calls)
+
+
+def test_zoom_pan_and_orbit_adjust_private_model_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teleop.console import render as render_mod
+    from teleop.console.layout import FeedSpec
+
+    class StubRenderer:
+        def __init__(self, model: Any, height: int, width: int) -> None:
+            self.shape = (height, width, 3)
+
+        def update_scene(self, data: Any, camera: str, **kwargs: Any) -> None:
+            pass
+
+        def render(self) -> np.ndarray:
+            return np.zeros(self.shape, dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(render_mod.mj, "Renderer", StubRenderer)
+    xml = """<mujoco><worldbody>
+      <camera name="bay1/cctv" pos="-0.95 -3.0 1.4" fovy="50"/>
+      <body><freejoint/><geom size="0.1"/></body></worldbody></mujoco>"""
+    model = mj.MjModel.from_xml_string(xml)
+    orig_pos = model.cam_pos[0].copy()
+    orig_fovy = float(model.cam_fovy[0])
+    snap = SimSnapshot.capture(mj.MjData(model), _view(), 0.0)
+    r = FeedRenderer(model, None)
+    try:
+        r.render(snap, [FeedSpec(0, "bay1/cctv", 1, "main", 64, 48, 2.0, 0.3, -0.2, 0.5, 0.2)], 0.0)
+        assert float(r.model.cam_fovy[0]) == pytest.approx(25.0)
+        assert not np.allclose(r.model.cam_pos[0], orig_pos)
+        assert np.allclose(model.cam_pos[0], orig_pos) and float(model.cam_fovy[0]) == orig_fovy
+
+        # Resetting back to default 1.0x restores baseline camera pose/fovy.
+        r.render(snap, [FeedSpec(0, "bay1/cctv", 1, "main", 64, 48)], 0.0)
+        assert float(r.model.cam_fovy[0]) == pytest.approx(orig_fovy)
+        assert np.allclose(r.model.cam_pos[0], orig_pos)
+    finally:
+        r.close()

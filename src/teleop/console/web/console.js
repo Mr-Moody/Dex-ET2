@@ -126,18 +126,29 @@ function sendFault(bayId, kind) {
 }
 
 function camZoom(camera) {
-  const v = (camera && ui.view.zooms[camera]) || [1, 0, 0];
-  return { z: v[0], px: v[1], py: v[2] };
+  const v = (camera && ui.view.zooms[camera]) || [1, 0, 0, 0, 0];
+  return { z: v[0], px: v[1], py: v[2], rx: v[3] || 0, ry: v[4] || 0 };
 }
 
-function setCamZoom(camera, z, px, py, immediate = true) {
+function setCamPose(camera, z, px, py, rx, ry, immediate = true) {
   if (!camera) return;
   const cz = Math.max(0.5, Math.min(4.0, z));
   const cpx = Math.max(-2.5, Math.min(2.5, px));
   const cpy = Math.max(-2.5, Math.min(2.5, py));
-  ui.view.zooms[camera] = [cz, cpx, cpy];
+  const crx = Math.max(-4.0, Math.min(4.0, rx));
+  const cry = Math.max(-4.0, Math.min(4.0, ry));
+  ui.view.zooms[camera] = [cz, cpx, cpy, crx, cry];
   refreshZoomBadge(camera);
-  const send = () => sendClient({ type: "view", zoom_cam: camera, zoom: cz, pan_x: cpx, pan_y: cpy });
+  const send = () =>
+    sendClient({
+      type: "view",
+      zoom_cam: camera,
+      zoom: cz,
+      pan_x: cpx,
+      pan_y: cpy,
+      rot_x: crx,
+      rot_y: cry,
+    });
   if (immediate) {
     send();
     return;
@@ -155,6 +166,11 @@ function setCamZoom(camera, z, px, py, immediate = true) {
   }
 }
 
+function setCamZoom(camera, z, px, py, immediate = true) {
+  const cur = camZoom(camera);
+  setCamPose(camera, z, px, py, cur.rx, cur.ry, immediate);
+}
+
 function resetCamZoom(camera) {
   if (!camera) return;
   delete ui.view.zooms[camera];
@@ -166,20 +182,28 @@ function refreshZoomBadge(camera) {
   for (const el of $("wall").querySelectorAll(`.feed[data-camera="${camera}"]`)) {
     const badge = el.querySelector(".feed__zoom");
     if (!badge) continue;
-    const { z, px, py } = camZoom(camera);
-    const modified = Math.abs(z - 1) > 0.02 || Math.abs(px) > 0.02 || Math.abs(py) > 0.02;
+    const { z, px, py, rx, ry } = camZoom(camera);
+    const modified =
+      Math.abs(z - 1) > 0.02 ||
+      Math.abs(px) > 0.02 ||
+      Math.abs(py) > 0.02 ||
+      Math.abs(rx) > 0.02 ||
+      Math.abs(ry) > 0.02;
     badge.hidden = !modified;
     if (modified) badge.textContent = `${z.toFixed(1)}× ↺`;
   }
 }
 
-function isPanGesture(e) {
-  return e.button === 2 || e.button === 1 || (e.button === 0 && (e.ctrlKey || e.shiftKey));
+function gestureKind(e) {
+  // Shift + Left-click (or Middle-click) -> Pan
+  if ((e.button === 0 && e.shiftKey) || e.button === 1) return "pan";
+  // Right-click (or Ctrl + Left-click on macOS trackpad) -> Rotate / Orbit
+  if (e.button === 2 || (e.button === 0 && e.ctrlKey)) return "rotate";
+  return null;
 }
 
 function attachZoomPan(el, camera, role) {
-  // Always suppress native right-click menu on sim camera panes (on macOS, contextmenu fires on
-  // right-mousedown before any movement, which would otherwise steal the right-drag pan gesture).
+  // Suppress native right-click menu on sim camera panes (on macOS, contextmenu fires on press).
   el.addEventListener("contextmenu", (e) => e.preventDefault());
   if (!camera || role === "strip") return;
 
@@ -190,58 +214,78 @@ function attachZoomPan(el, camera, role) {
       e.stopPropagation();
       const cur = camZoom(camera);
       const nextZ = cur.z * Math.exp(-e.deltaY * 0.0018);
-      setCamZoom(camera, nextZ, cur.px, cur.py, false);
+      setCamPose(camera, nextZ, cur.px, cur.py, cur.rx, cur.ry, false);
     },
     { passive: false }
   );
 
-  // Prevent HTML5 dragstart if right-button or ctrl/middle is used.
+  // Prevent HTML5 dragstart whenever Shift+Left, Right-click, Ctrl+Left, or Middle-click is used;
+  // plain Left-click keeps HTML5 draggable active to move/pin/swap panes.
   el.addEventListener("mousedown", (e) => {
-    if (isPanGesture(e) && !(e.target && e.target.closest("button"))) {
+    if (gestureKind(e) && !(e.target && e.target.closest("button"))) {
       e.preventDefault();
     }
   });
 
-  let panStart = null;
+  let drag = null;
   const onMove = (e) => {
-    if (!panStart || e.pointerId !== panStart.id) return;
+    if (!drag || e.pointerId !== drag.id) return;
     const rect = el.getBoundingClientRect();
-    const dx = e.clientX - panStart.x;
-    const dy = e.clientY - panStart.y;
-    const zScale = Math.max(0.5, panStart.z);
-    const nx = panStart.px + dx / (Math.max(rect.width, 1) * zScale);
-    const ny = panStart.py + dy / (Math.max(rect.height, 1) * zScale);
-    setCamZoom(camera, panStart.z, nx, ny, false);
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    const w = Math.max(rect.width, 1);
+    const h = Math.max(rect.height, 1);
+    if (drag.kind === "pan") {
+      const zScale = Math.max(0.5, drag.z);
+      const nx = drag.px + dx / (w * zScale);
+      const ny = drag.py + dy / (h * zScale);
+      setCamPose(camera, drag.z, nx, ny, drag.rx, drag.ry, false);
+    } else {
+      const nrx = drag.rx + (dx / w) * 1.8;
+      const nry = drag.ry + (dy / h) * 1.4;
+      setCamPose(camera, drag.z, drag.px, drag.py, nrx, nry, false);
+    }
   };
-  const endPan = (e) => {
-    if (!panStart || (e && e.pointerId !== undefined && e.pointerId !== panStart.id)) return;
-    panStart = null;
+  const endDrag = (e) => {
+    if (!drag || (e && e.pointerId !== undefined && e.pointerId !== drag.id)) return;
+    drag = null;
     ui.panningCam = null;
     el.draggable = true;
-    el.classList.remove("is-panning");
+    el.classList.remove("is-panning", "is-rotating");
     window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", endPan);
-    window.removeEventListener("pointercancel", endPan);
+    window.removeEventListener("pointerup", endDrag);
+    window.removeEventListener("pointercancel", endDrag);
   };
 
   el.addEventListener("pointerdown", (e) => {
-    if (!isPanGesture(e)) return;
+    const kind = gestureKind(e);
+    if (!kind) return;
     if (e.target && e.target.closest("button")) return;
     e.preventDefault();
     e.stopPropagation();
     const cur = camZoom(camera);
-    panStart = { x: e.clientX, y: e.clientY, px: cur.px, py: cur.py, z: cur.z, id: e.pointerId };
+    drag = {
+      kind,
+      x: e.clientX,
+      y: e.clientY,
+      px: cur.px,
+      py: cur.py,
+      rx: cur.rx,
+      ry: cur.ry,
+      z: cur.z,
+      id: e.pointerId,
+    };
     ui.panningCam = camera;
     el.draggable = false;
-    el.classList.add("is-panning");
+    el.classList.add(kind === "pan" ? "is-panning" : "is-rotating");
     try {
       el.setPointerCapture(e.pointerId);
     } catch {
       // fallback to window listeners below
     }
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", endPan);
-    window.addEventListener("pointercancel", endPan);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
   });
 }
 
@@ -304,7 +348,7 @@ function feedTile(bayId, camera, role, bayInfo) {
     <div class="feed__top">
       <span class="feed__name">Bay ${bayId}</span>
       <span class="feed__view">${VIEW_TEXT[view] || ""}</span>
-      <button type="button" class="feed__zoom" hidden title="Scroll to zoom, Shift/right-drag to pan. Click to reset.">1.0×</button>
+      <button type="button" class="feed__zoom" hidden title="Scroll: zoom · Shift+drag: pan · Right-drag: rotate · Click to reset">1.0×</button>
       <span class="feed__state"></span>
       <span class="feed__conf"></span>
     </div>
@@ -314,11 +358,6 @@ function feedTile(bayId, camera, role, bayInfo) {
       <time class="feed__time"></time>
       <span class="feed__armed" hidden></span>
       <span class="feed__replay"></span>
-      <span class="feed__bolt" hidden>
-        <span class="feed__bolt-label">Bolt</span>
-        <span class="feed__bolt-track"><span class="feed__bolt-fill"></span></span>
-        <span class="feed__bolt-val"></span>
-      </span>
     </div>
     <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>`;
 
@@ -539,18 +578,6 @@ function updateWall(t) {
       const f = b.fault;
       armed.hidden = !f;
       armed.textContent = f ? (FAULT_TEXT[f.phase] || {})[f.kind] || "Fault" : "";
-    }
-    const bolt = el.querySelector(".feed__bolt");
-    if (bolt) {
-      const show = b.x_bolt_cm != null && t.bolt_clear_cm;
-      bolt.hidden = !show;
-      if (show) {
-        const frac = Math.max(0, Math.min(1, b.x_bolt_cm / t.bolt_clear_cm));
-        bolt.querySelector(".feed__bolt-fill").style.width = `${(frac * 100).toFixed(1)}%`;
-        bolt.classList.toggle("is-clear", b.x_bolt_cm >= t.bolt_clear_cm);
-        bolt.querySelector(".feed__bolt-val").textContent =
-          `${b.x_bolt_cm.toFixed(1)} / ${t.bolt_clear_cm.toFixed(1)} cm`;
-      }
     }
   }
   if (t.mode === "rescue" && t.rescue) {

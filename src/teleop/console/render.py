@@ -26,6 +26,7 @@ from typing import Any, Protocol
 
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 from teleop.console.background import BackgroundCycle, BackgroundPlayer
@@ -33,6 +34,7 @@ from teleop.console.layout import FeedSpec, ViewState, feed_layout
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
 from teleop.sim.cells import WALL_HEIGHT_M, cell_bounds
+from teleop.unoq.dmp import mat_to_quat
 
 mj: Any = _mujoco
 logger = logging.getLogger("teleop.console.render")
@@ -68,6 +70,25 @@ def _bay_lights(model: Any) -> dict[int, list[int]]:
             if head.isdigit():
                 out.setdefault(int(head), []).append(i)
     return out
+
+
+def _look_at_wxyz(
+    pos: NDArray[np.float64], target: NDArray[np.float64]
+) -> tuple[float, float, float, float]:
+    """Camera wxyz quaternion looking from ``pos`` at ``target`` with world +Z up."""
+    fwd = target - pos
+    fn = float(np.linalg.norm(fwd))
+    if fn < 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    fwd = fwd / fn
+    up_world = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    right = np.cross(fwd, up_world)
+    rn = float(np.linalg.norm(right))
+    right = np.array([1.0, 0.0, 0.0], dtype=np.float64) if rn < 1e-6 else right / rn
+    up = np.cross(right, fwd)
+    rmat = np.asarray(np.column_stack((right, up, -fwd)), dtype=np.float64)
+    qx, qy, qz, qw = mat_to_quat(rmat)
+    return (qw, qx, qy, qz)
 
 
 def _qmul_wxyz(
@@ -124,13 +145,20 @@ class FeedRenderer:
         for feed in feeds:
             if feed.role == "strip":
                 continue
-            if abs(feed.zoom - 1.0) <= 1e-3 and abs(feed.pan_x) <= 1e-3 and abs(feed.pan_y) <= 1e-3:
+            if (
+                abs(feed.zoom - 1.0) <= 1e-3
+                and abs(feed.pan_x) <= 1e-3
+                and abs(feed.pan_y) <= 1e-3
+                and abs(feed.rot_x) <= 1e-3
+                and abs(feed.rot_y) <= 1e-3
+            ):
                 continue
             try:
                 cid = int(self.model.camera(feed.camera).id)
             except KeyError:
                 continue
             fovy0 = float(self._base_cam_fovy[cid])
+            pos0 = np.array(self._base_cam_pos[cid], dtype=np.float64)
             q0 = (
                 float(self._base_cam_quat[cid, 0]),
                 float(self._base_cam_quat[cid, 1]),
@@ -139,44 +167,80 @@ class FeedRenderer:
             )
             ortho_arr = getattr(self.model, "cam_orthographic", None)
             is_ortho = bool(ortho_arr[cid]) if ortho_arr is not None else fovy0 < 2.0
+            body_arr = getattr(self.model, "cam_bodyid", None)
+            in_world = True if body_arr is None else int(body_arr[cid]) == 0
             aspect = feed.width / max(feed.height, 1)
             z = max(feed.zoom, 0.2)
-            if is_ortho:
-                self.model.cam_fovy[cid] = min(0.65, max(0.05, fovy0 / z))
-                # +pan_x (drag right) moves camera -X_cam; +pan_y (drag down) moves camera +Y_cam.
-                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * fovy0 * aspect, feed.pan_y * fovy0, 0.0))
-                self.model.cam_pos[cid, 0] = self._base_cam_pos[cid, 0] + dx
-                self.model.cam_pos[cid, 1] = self._base_cam_pos[cid, 1] + dy
-                self.model.cam_pos[cid, 2] = self._base_cam_pos[cid, 2] + dz
-            elif feed.camera.endswith("/wrist_cam"):
-                self.model.cam_fovy[cid] = min(92.0, max(10.0, fovy0 / z))
-                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * 0.14 * aspect, feed.pan_y * 0.14, 0.0))
-                self.model.cam_pos[cid, 0] = self._base_cam_pos[cid, 0] + dx
-                self.model.cam_pos[cid, 1] = self._base_cam_pos[cid, 1] + dy
-                self.model.cam_pos[cid, 2] = self._base_cam_pos[cid, 2] + dz
+            self.model.cam_fovy[cid] = (
+                min(0.65, max(0.05, fovy0 / z)) if is_ortho else min(90.0, max(9.0, fovy0 / z))
+            )
+
+            if not in_world:
+                # Body-mounted wrist_cam: orbit around fingertip pinch zone + pan in view plane.
+                d0 = 0.165
+                fwd0 = np.array(_qrot_wxyz(q0, (0.0, 0.0, -1.0)), dtype=np.float64)
+                pivot0 = pos0 + d0 * fwd0
+                hy = -0.5 * feed.rot_x * 0.9
+                hp = 0.5 * feed.rot_y * 0.8
+                q_loc = _qmul_wxyz(
+                    (math.cos(hy), 0.0, math.sin(hy), 0.0),
+                    (math.cos(hp), math.sin(hp), 0.0, 0.0),
+                )
+                q_orb = _qmul_wxyz(q0, q_loc)
+                fwd_new = np.array(_qrot_wxyz(q_orb, (0.0, 0.0, -1.0)), dtype=np.float64)
+                dp = np.array(
+                    _qrot_wxyz(q_orb, (-feed.pan_x * 0.14 * aspect, feed.pan_y * 0.14, 0.0)),
+                    dtype=np.float64,
+                )
+                self.model.cam_pos[cid] = pivot0 + dp - d0 * fwd_new
+                self.model.cam_quat[cid] = q_orb
+                continue
+
+            # World-frame cell cameras (cctv, top_ortho, side_ortho): turntable orbit + view pan.
+            d0 = 0.60 if is_ortho else 1.64
+            fwd0 = np.array(_qrot_wxyz(q0, (0.0, 0.0, -1.0)), dtype=np.float64)
+            pivot0 = pos0 + d0 * fwd0
+            r0 = pos0 - pivot0
+            rotated = abs(feed.rot_x) > 1e-4 or abs(feed.rot_y) > 1e-4
+            if rotated:
+                az0 = math.atan2(float(r0[1]), float(r0[0]))
+                el0 = math.asin(min(0.999, max(-0.999, float(r0[2]) / d0)))
+                az = az0 - feed.rot_x * math.pi * 0.65
+                el = min(
+                    math.radians(84.0),
+                    max(math.radians(6.0), el0 + feed.rot_y * math.pi * 0.45),
+                )
+                r_orb = np.array(
+                    [
+                        d0 * math.cos(el) * math.cos(az),
+                        d0 * math.cos(el) * math.sin(az),
+                        d0 * math.sin(el),
+                    ],
+                    dtype=np.float64,
+                )
+                q_orb = _look_at_wxyz(pivot0 + r_orb, pivot0)
             else:
-                self.model.cam_fovy[cid] = min(88.0, max(9.0, fovy0 / z))
-                # Translate camera in its view plane (clamped inside cell walls) + gentle pan/tilt
-                # around world Z (yaw) and local X (pitch) so the horizon stays level.
-                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * 0.95 * aspect, feed.pan_y * 0.95, 0.0))
-                nx = float(self._base_cam_pos[cid, 0]) + dx
-                ny = float(self._base_cam_pos[cid, 1]) + dy
-                nz = float(self._base_cam_pos[cid, 2]) + dz
-                if feed.bay in (1, 2, 3, 4):
-                    x0, x1, y0, y1 = cell_bounds(feed.bay)
-                    margin = 0.12
-                    nx = min(x1 - margin, max(x0 + margin, nx))
-                    ny = min(y1 - margin, max(y0 + margin, ny))
-                    nz = min(WALL_HEIGHT_M - margin, max(margin, nz))
-                self.model.cam_pos[cid, 0] = nx
-                self.model.cam_pos[cid, 1] = ny
-                self.model.cam_pos[cid, 2] = nz
-                # World-Z turntable yaw + local-X pitch keeps vertical walls upright (zero roll).
-                hy = 0.5 * (feed.pan_x * 0.32)
-                hp = 0.5 * (feed.pan_y * 0.28)
-                q_world_yaw = (math.cos(hy), 0.0, 0.0, math.sin(hy))
-                q_local_pitch = (math.cos(hp), math.sin(hp), 0.0, 0.0)
-                self.model.cam_quat[cid] = _qmul_wxyz(_qmul_wxyz(q_world_yaw, q0), q_local_pitch)
+                r_orb = r0
+                q_orb = q0
+
+            pan_scale = fovy0 if is_ortho else 1.15
+            dp = np.array(
+                _qrot_wxyz(q_orb, (-feed.pan_x * pan_scale * aspect, feed.pan_y * pan_scale, 0.0)),
+                dtype=np.float64,
+            )
+            pivot = pivot0 + dp
+            pos_new = pivot + r_orb
+            if not is_ortho and feed.bay in (1, 2, 3, 4):
+                x0, x1, y0, y1 = cell_bounds(feed.bay)
+                margin = 0.12
+                pos_new[0] = min(x1 - margin, max(x0 + margin, float(pos_new[0])))
+                pos_new[1] = min(y1 - margin, max(y0 + margin, float(pos_new[1])))
+                pos_new[2] = min(WALL_HEIGHT_M - margin, max(margin, float(pos_new[2])))
+                q_final = _look_at_wxyz(pos_new, pivot) if rotated else q_orb
+            else:
+                q_final = q_orb
+            self.model.cam_pos[cid] = pos_new
+            self.model.cam_quat[cid] = q_final
 
     def _renderer(self, width: int, height: int) -> Any:
         key = (width, height)

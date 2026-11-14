@@ -18,7 +18,15 @@ from teleop.atc.coordinator import OperatorInput
 from teleop.atc.stage import StageController
 from teleop.atc.types import N_BAYS
 from teleop.console.background import load_cycle
-from teleop.console.layout import PAN_LIMIT, VALID_VIEWS, ZOOM_MAX, ZOOM_MIN, LayoutMode, ViewState
+from teleop.console.layout import (
+    PAN_LIMIT,
+    ROT_LIMIT,
+    VALID_VIEWS,
+    ZOOM_MAX,
+    ZOOM_MIN,
+    LayoutMode,
+    ViewState,
+)
 from teleop.console.render import RenderWorker
 from teleop.console.server import ConsoleServer
 from teleop.console.snapshot import LatestSlot, SimSnapshot
@@ -91,17 +99,23 @@ def _next_view_state(prev: ViewState, msg: Mapping[str, Any]) -> ViewState:
         if msg.get("reset_zoom"):
             zooms.pop(zcam, None)
         else:
-            cur_z, cur_px, cur_py = zooms.get(zcam, (1.0, 0.0, 0.0))
+            cur_z, cur_px, cur_py, cur_rx, cur_ry = zooms.get(zcam, (1.0, 0.0, 0.0, 0.0, 0.0))
             z_raw = msg.get("zoom", cur_z)
             px_raw = msg.get("pan_x", cur_px)
             py_raw = msg.get("pan_y", cur_py)
+            rx_raw = msg.get("rot_x", cur_rx)
+            ry_raw = msg.get("rot_y", cur_ry)
             if isinstance(z_raw, int | float) and not isinstance(z_raw, bool):
                 cur_z = min(ZOOM_MAX, max(ZOOM_MIN, float(z_raw)))
             if isinstance(px_raw, int | float) and not isinstance(px_raw, bool):
                 cur_px = min(PAN_LIMIT, max(-PAN_LIMIT, float(px_raw)))
             if isinstance(py_raw, int | float) and not isinstance(py_raw, bool):
                 cur_py = min(PAN_LIMIT, max(-PAN_LIMIT, float(py_raw)))
-            zooms[zcam] = (cur_z, cur_px, cur_py)
+            if isinstance(rx_raw, int | float) and not isinstance(rx_raw, bool):
+                cur_rx = min(ROT_LIMIT, max(-ROT_LIMIT, float(rx_raw)))
+            if isinstance(ry_raw, int | float) and not isinstance(ry_raw, bool):
+                cur_ry = min(ROT_LIMIT, max(-ROT_LIMIT, float(ry_raw)))
+            zooms[zcam] = (cur_z, cur_px, cur_py, cur_rx, cur_ry)
     return ViewState(mode=mode, pinned_bay=pinned, cameras=cameras, bay_order=order, zooms=zooms)
 
 

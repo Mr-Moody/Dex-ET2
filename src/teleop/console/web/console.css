@@ -456,16 +456,6 @@ body {
   text-shadow: none;
   background: rgb(0 0 0 / 0.5);
 }
-.feed__bolt { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
-.feed__bolt-label { color: var(--muted); }
-.feed__bolt-track {
-  position: relative;
-  width: 90px; height: 6px;
-  background: rgb(255 255 255 / 0.14);
-}
-.feed__bolt-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--state); transition: width 120ms linear; }
-.feed__bolt.is-clear .feed__bolt-fill { background: var(--nominal); }
-.feed__bolt-val { min-width: 7.5em; text-align: right; }
 
 .feed__nosignal, .feed__lost {
   position: absolute; inset: 0;
@@ -555,6 +545,7 @@ body {
 .feed[draggable="true"] { cursor: grab; }
 .feed[draggable="true"]:active { cursor: grabbing; }
 .feed.is-panning { cursor: all-scroll !important; }
+.feed.is-rotating { cursor: ew-resize !important; }
 .feed.is-dragging { opacity: 0.45; }
 .feed.is-drop-target { outline: 2px dashed var(--safety); outline-offset: -3px; }
 .feed__zoom {
@@ -707,7 +698,6 @@ body {
   .feed--strip .feed__conf { display: none; }
   .brief__head { font-size: 19px; }
   .key__text { display: none; }
-  .feed__bolt-track { width: 60px; }
 }
 
 @media (max-width: 760px) {
