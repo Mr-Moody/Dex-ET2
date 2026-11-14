@@ -20,7 +20,7 @@ from teleop.atc.types import ConsoleInputState, SkillPrimitive
 from teleop.types import Pose
 from teleop.unoq import protocol as P
 from teleop.unoq.classifier import MahalanobisStallClassifier
-from teleop.unoq.dmp import LEAP_ACTUATORS, fit_rbf_dmp, pose_to_vec7
+from teleop.unoq.dmp import HAND_ACTUATORS, fit_rbf_dmp, pose_to_vec7
 from teleop.unoq.filter import JointsOneEuroFilter, PoseOneEuroFilter
 
 logger = logging.getLogger(__name__)
@@ -195,7 +195,7 @@ class UnoQServer:
         signature_id = req.get("signature_id")
         if signature_id is None:
             signature_id = f"Jam_Sig_{len(self.classifier.signatures(sku)) + 1}"
-        names = req.get("actuator_names") or LEAP_ACTUATORS
+        names = req.get("actuator_names") or HAND_ACTUATORS
         skill = fit_rbf_dmp(
             req["timestamps_s"],
             req["wrist_latch_se3"],

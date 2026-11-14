@@ -50,7 +50,7 @@ from teleop.retarget.calibration import Calibration
 from teleop.sim.hands import REPO_ROOT, load_hand
 from teleop.sim.loop import FixedRateLoop
 from teleop.unoq.client import UnoQClient
-from teleop.unoq.dmp import LEAP_ACTUATORS
+from teleop.unoq.dmp import HAND_ACTUATORS
 from teleop.unoq.protocol import DEFAULT_TCP_PORT, DEFAULT_UDP_PORT
 
 logger = logging.getLogger("teleop.atc")
@@ -119,7 +119,7 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
 
 
 class GloveOperator:
-    """Right-hand glove frames -> ``OperatorInput`` (wrist pose + LEAP targets by name)."""
+    """Right-hand glove frames -> ``OperatorInput`` (wrist pose + hand targets by name)."""
 
     def __init__(self, source: InputSource, wrist: WristSource, retargeter: Retargeter) -> None:
         self.source = source
@@ -128,9 +128,9 @@ class GloveOperator:
 
     @classmethod
     def build(cls, cfg: AtcConfig, model: Any) -> GloveOperator:
-        hand = load_hand("leap")
+        hand = load_hand("inspire")
         ranges: dict[str, tuple[float, float]] = {}
-        for name in LEAP_ACTUATORS:  # both active bays share one LEAP model: read Bay 1's
+        for name in HAND_ACTUATORS:  # both active bays share one hand model: read Bay 1's
             act = model.actuator(f"bay1/{name}")
             if bool(model.actuator_ctrllimited[act.id]):
                 lo, hi = (float(v) for v in model.actuator_ctrlrange[act.id])

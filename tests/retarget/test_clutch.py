@@ -18,7 +18,7 @@ from teleop.retarget.clutch import (
     RescueTrajectoryBuffer,
     bleed_off_targets,
     compose_split_view,
-    read_leap_q,
+    read_hand_q,
     rescue_camera_names,
     rescue_view_option,
 )
@@ -34,7 +34,7 @@ from teleop.sim.bays import (
 from teleop.sim.hands import load_hand
 from teleop.types import Pose
 from teleop.unoq.dmp import (
-    LEAP_ACTUATORS,
+    HAND_ACTUATORS,
     compose_pose,
     mat_to_quat,
     quat_to_mat,
@@ -62,14 +62,14 @@ def _rot_deg(a: Pose, b: Pose) -> float:
 
 def _models_present() -> bool:
     try:
-        right = load_hand("leap").mjcf["right"]
+        right = load_hand("inspire").mjcf["right"]
     except FileNotFoundError:
         return False
     return PANDA_XML.is_file() and right.is_file()
 
 
 needs_models = pytest.mark.skipif(
-    not _models_present(), reason="Panda/LEAP MJCFs missing; run scripts/fetch_models.py"
+    not _models_present(), reason="Panda/Inspire MJCFs missing; run scripts/fetch_models.py"
 )
 
 
@@ -152,11 +152,16 @@ def test_clutch_release_sets_qtarget_to_qactual_and_discards_incomplete_buffer()
     assert forces_before[:7].max() > 20.0  # the arm is pushing hard
 
     q_target, named = bleed_off_targets(model, data, "bay1")
-    assert q_target.shape == (23,)
+    assert q_target.shape == (7 + len(HAND_ACTUATORS),)
     assert set(named) == {f"bay1/{n}" for n in BAY_ACTUATORS}
     np.testing.assert_allclose(np.asarray(data.ctrl)[ids], q_target)
-    np.testing.assert_allclose(q_target, np.asarray(data.qpos)[joint_qadr])
-    np.testing.assert_allclose(q_target[7:], read_leap_q(model, data, "bay1"))
+    # Targets are the measured positions clipped to each servo's range (a coupled Inspire
+    # joint can sit a hair past its servo floor).
+    lo, hi = np.asarray(model.actuator_ctrlrange)[ids].T
+    np.testing.assert_allclose(q_target, np.clip(np.asarray(data.qpos)[joint_qadr], lo, hi))
+    np.testing.assert_allclose(
+        q_target[7:], np.clip(read_hand_q(model, data, "bay1"), lo[7:], hi[7:])
+    )
 
     # Force bleeds off: with targets on the measured joints, the arm stops instead of lunging.
     q_hold = q_target.copy()
@@ -178,10 +183,10 @@ def test_clutch_release_sets_qtarget_to_qactual_and_discards_incomplete_buffer()
     # A rescue released mid-jam is thrown away.
     buf = RescueTrajectoryBuffer(latch_world_pose(1, CANONICAL_LATCH))
     wrist = _pose(0.05, 0.0, 0.2)
-    q16 = read_leap_q(model, data, "bay1")
-    assert not buf.record(False, 0.0, wrist, q16, 0.1)  # clutch not held: nothing recorded
+    q_hand = read_hand_q(model, data, "bay1")
+    assert not buf.record(False, 0.0, wrist, q_hand, 0.1)  # clutch not held: nothing recorded
     for k in range(10):
-        assert buf.record(True, k / 60, wrist, q16, 0.1)
+        assert buf.record(True, k / 60, wrist, q_hand, 0.1)
     assert len(buf) == 10
     assert buf.finish(bolt_cleared=False) is None
     assert len(buf) == 0
@@ -191,12 +196,12 @@ def test_clutch_release_sets_qtarget_to_qactual_and_discards_incomplete_buffer()
 def test_new_clutch_hold_without_finish_drops_the_stale_hold() -> None:
     buf = RescueTrajectoryBuffer(LatchPose(position=(0.0, 0.0, 0.0)))
     wrist = _pose(0.1, 0.0, 0.0)
-    q16 = [0.0] * 16
+    q_hand = [0.0] * len(HAND_ACTUATORS)
     for t in (0.0, 0.1):
-        assert buf.record(True, t, wrist, q16, 0.0)
-    assert not buf.record(False, 0.2, wrist, q16, 0.0)  # released, but finish() never called
+        assert buf.record(True, t, wrist, q_hand, 0.0)
+    assert not buf.record(False, 0.2, wrist, q_hand, 0.0)  # released, but finish() never called
     for t in (5.0, 5.1, 5.2):
-        assert buf.record(True, t, wrist, q16, 0.0)
+        assert buf.record(True, t, wrist, q_hand, 0.0)
 
     traj = buf.finish(bolt_cleared=True)
     assert traj is not None
@@ -207,8 +212,8 @@ def test_finish_after_release_tick_keeps_the_hold() -> None:
     buf = RescueTrajectoryBuffer(LatchPose(position=(0.0, 0.0, 0.0)))
     wrist = _pose(0.1, 0.0, 0.0)
     for t in (0.0, 0.1, 0.2):
-        assert buf.record(True, t, wrist, [0.0] * 16, 0.0)
-    assert not buf.record(False, 0.3, wrist, [0.0] * 16, 0.0)
+        assert buf.record(True, t, wrist, [0.0] * len(HAND_ACTUATORS), 0.0)
+    assert not buf.record(False, 0.3, wrist, [0.0] * len(HAND_ACTUATORS), 0.0)
     traj = buf.finish(bolt_cleared=True)
     assert traj is not None
     assert len(traj) == 3
@@ -220,7 +225,7 @@ def test_successful_clutch_rescue_transforms_wrist_into_local_latch_frame() -> N
 
     n = 120
     local_truth: list[Pose] = []
-    q_truth = np.zeros((n, 16))
+    q_truth = np.zeros((n, len(HAND_ACTUATORS)))
     t0 = 1234.5  # clock time at clutch press
     for k in range(n):
         u = k / (n - 1)
@@ -228,9 +233,9 @@ def test_successful_clutch_rescue_transforms_wrist_into_local_latch_frame() -> N
             0.03 - 0.05 * u, 0.01 * math.sin(6 * u), 0.15 - 0.1 * u, (0.0, 0.4 * u, 0.2 * u)
         )
         local_truth.append(local)
-        q_truth[k] = 0.5 * u + 0.01 * np.arange(16)
+        q_truth[k] = 0.5 * u + 0.01 * np.arange(len(HAND_ACTUATORS))
         world = compose_pose(world_latch.as_pose(), local)
-        joints = dict(zip(LEAP_ACTUATORS, q_truth[k], strict=True))
+        joints = dict(zip(HAND_ACTUATORS, q_truth[k], strict=True))
         assert buf.record(True, t0 + k / 60, world, joints, 0.2 + 3.0 * (0.4 < u < 0.7))
     assert not buf.record(
         True, t0 + (n - 1) / 60, local_truth[-1], q_truth[-1], 0.0

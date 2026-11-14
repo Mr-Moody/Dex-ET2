@@ -27,14 +27,14 @@ mj: Any = _mujoco
 
 def _models_present() -> bool:
     try:
-        right = load_hand("leap").mjcf["right"]
+        right = load_hand("inspire").mjcf["right"]
     except FileNotFoundError:
         return False
     return PANDA_XML.is_file() and right.is_file()
 
 
 needs_models = pytest.mark.skipif(
-    not _models_present(), reason="Panda/LEAP MJCFs missing; run scripts/fetch_models.py"
+    not _models_present(), reason="Panda/Inspire MJCFs missing; run scripts/fetch_models.py"
 )
 
 SKU = "EV-LATCH-01"

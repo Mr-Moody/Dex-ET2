@@ -19,7 +19,7 @@ from teleop.unoq import protocol as P
 from teleop.unoq.classifier import MahalanobisStallClassifier
 from teleop.unoq.client import UnoQClient, UnoQError
 from teleop.unoq.dmp import (
-    LEAP_ACTUATORS,
+    HAND_ACTUATORS,
     compose_pose,
     evaluate_latch_frame,
     evaluate_rbf_dmp,
@@ -66,7 +66,7 @@ def _yaw_pose(x: float, y: float, z: float, yaw_deg: float) -> Pose:
 
 
 def synthetic_rescue(duration_s: float = 4.0, hz: float = 60.0) -> dict[str, Any]:
-    """A smooth thumb-hold + index-slide rescue in the latch frame (wrist, 16 joints, tau)."""
+    """A smooth thumb-hold + index-slide rescue in the latch frame (wrist, hand joints, tau)."""
     t = np.arange(0.0, duration_s + 1e-9, 1.0 / hz)
     u = t / duration_s
     pos = np.stack(
@@ -84,7 +84,8 @@ def synthetic_rescue(duration_s: float = 4.0, hz: float = 60.0) -> dict[str, Any
         for ui in u
     ]
     wrist = np.hstack([pos, np.asarray(quats)])
-    fingers = np.stack([0.8 * np.sin(math.pi * u * (1 + i / 16)) for i in range(16)], axis=1)
+    n = len(HAND_ACTUATORS)
+    fingers = np.stack([0.8 * np.sin(math.pi * u * (1 + i / n)) for i in range(n)], axis=1)
     tau = np.where((u > 0.4) & (u < 0.7), 3.0, 0.2)
     return {"t": t, "wrist": wrist, "fingers": fingers, "tau": tau}
 
@@ -164,8 +165,8 @@ def test_rbf_dmp_fit_completes_under_20ms_and_reconstructs_trajectory() -> None:
     assert min(times) < 0.020
     assert skill.fit_ms < 20.0
     assert skill.n_kernels == 30
-    assert skill.n_dims == 6 + 16
-    assert skill.actuator_names == LEAP_ACTUATORS
+    assert skill.n_dims == 6 + len(HAND_ACTUATORS)
+    assert skill.actuator_names == HAND_ACTUATORS
 
     duration = float(demo["t"][-1])
     for k in range(0, len(demo["t"]), 5):
@@ -174,7 +175,7 @@ def test_rbf_dmp_fit_completes_under_20ms_and_reconstructs_trajectory() -> None:
         truth = _vec7_pose(demo["wrist"][k])
         assert _pos_err(wrist, truth) < 0.002
         assert _rot_deg(wrist, truth) < 0.5
-        q = np.array([fingers[n] for n in LEAP_ACTUATORS])
+        q = np.array([fingers[n] for n in HAND_ACTUATORS])
         assert np.max(np.abs(q - demo["fingers"][k])) < 0.03
 
     # Nominal torque profile follows the demo's contact window.
@@ -209,7 +210,7 @@ def test_rbf_dmp_se3_warp_rotates_35deg_and_shifts_12cm_accurately() -> None:
         assert _pos_err(relative_pose(bay2, got2), relative_pose(bay1, got1)) < 1e-9
         assert _rot_deg(relative_pose(bay2, got2), relative_pose(bay1, got1)) < 1e-6
         np.testing.assert_allclose(
-            [fingers2[n] for n in LEAP_ACTUATORS], demo["fingers"][k], atol=0.03
+            [fingers2[n] for n in HAND_ACTUATORS], demo["fingers"][k], atol=0.03
         )
 
     # The goal wrist heading turns by the latch yaw.

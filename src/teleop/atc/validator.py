@@ -1,13 +1,13 @@
 """Bay physics rig, DMP replay and the 3-rollout headless validation gate (spec 4.4).
 
 ``BayRig`` wraps one bay of a compiled scene (Panda DLS IK, ``tau_ext`` estimator, latch
-controller, LEAP actuators by name). ``SkillReplay`` turns a ``SkillPrimitive`` into per-tick
+controller, hand actuators by name). ``SkillReplay`` turns a ``SkillPrimitive`` into per-tick
 wrist and finger commands in any latch frame. ``SkillValidator`` owns one reusable headless
 single-bay ``MjModel``/``MjData``: the three pose perturbations only move the latch body in the
 model (no XML recompile), so a gate run costs a few hundred physics steps per rollout.
 
 Torque convention: every ``tau_ext_inf`` used for stall signatures, the torque tube and the
-hard-max check is the inf-norm over the 16 LEAP hand joints only. Hand torques depend on the
+hard-max check is the inf-norm over the hand finger joints only. Hand torques depend on the
 contact in the latch frame, not on which Panda reached it, so they transfer between bays.
 
 Nothing here reads ``flap_hinge``: clearance is judged from ``x_bolt``, ``tau_ext`` and the
@@ -42,7 +42,7 @@ from teleop.sim.latch import LatchController, yaw_quat_wxyz
 from teleop.sim.torques import ExternalTorqueEstimator
 from teleop.types import Pose
 from teleop.unoq.dmp import (
-    LEAP_ACTUATORS,
+    HAND_ACTUATORS,
     compose_pose,
     evaluate_latch_frame,
     evaluate_rbf_dmp,
@@ -71,7 +71,8 @@ APPROACH_SPEED_MPS = 0.4
 COARSE_FACTOR = 2  # approach-only timestep multiplier (free space, no contacts)
 SETTLE_MAX_TICKS = 300  # 1.5 s to converge on an approach target
 APPROACH_ROT_SPEED = 1.5  # rad/s
-LIFT_HEIGHT_M = 0.14  # wrist height above the latch origin for free-space transits
+LIFT_HEIGHT_M = 0.18  # wrist height above the latch origin for free-space transits (clears
+# the curled Inspire index over the bolt hook)
 PRE_APPROACH_M = 0.04  # DMP pre-approach pose: this far above the DMP start, latch +Z
 
 # (dx m, dy m, dyaw deg) in the bay-local latch frame, spec 4.4.
@@ -183,7 +184,7 @@ def lifted(pose: Pose, z_world: float) -> Pose:
 
 
 class BayRig:
-    """One bay's IK, torque estimator, latch fault controller and LEAP actuators by name.
+    """One bay's IK, torque estimator, latch fault controller and hand actuators by name.
 
     The arm is only ever moved by ``command`` (IK + position servos). The single kinematic
     placement is ``home_keyframe`` once, when a scene or model is first built.
@@ -198,10 +199,10 @@ class BayRig:
         self.ik = PandaDiffIK(model, p)
         self.torque = ExternalTorqueEstimator(model, p)
         self.latch = LatchController(model, data, p)
-        self._leap_act = {n: int(model.actuator(f"{p}{n}").id) for n in LEAP_ACTUATORS}
-        self._leap_qadr = {
+        self._hand_act = {n: int(model.actuator(f"{p}{n}").id) for n in HAND_ACTUATORS}
+        self._hand_qadr = {
             n: int(model.jnt_qposadr[int(model.actuator_trnid[a][0])])
-            for n, a in self._leap_act.items()
+            for n, a in self._hand_act.items()
         }
         self._latch_body = int(model.body(f"{p}latch_base").id)
         self._site = int(model.site(f"{p}wrist_site").id)
@@ -257,7 +258,7 @@ class BayRig:
         return self.torque.estimate(self.data)
 
     def tau_hand_inf(self, tau: FloatArray | None = None) -> float:
-        """``|tau_ext|_inf`` over the 16 LEAP joints only (arm joints come first in ``tau``)."""
+        """``|tau_ext|_inf`` over the hand finger joints only (arm joints come first in ``tau``)."""
         t = self.tau_ext() if tau is None else tau
         return float(np.max(np.abs(t[N_ARM_DOF:])))
 
@@ -280,9 +281,9 @@ class BayRig:
         lo, hi = self._arm_range[:, 0], self._arm_range[:, 1]
         return bool(np.all(q >= lo - JOINT_LIMIT_TOL_RAD) and np.all(q <= hi + JOINT_LIMIT_TOL_RAD))
 
-    def leap_q(self) -> FloatArray:
+    def hand_q(self) -> FloatArray:
         qpos = np.asarray(self.data.qpos, dtype=np.float64)
-        return np.array([qpos[self._leap_qadr[n]] for n in LEAP_ACTUATORS], dtype=np.float64)
+        return np.array([qpos[self._hand_qadr[n]] for n in HAND_ACTUATORS], dtype=np.float64)
 
     # -- control
 
@@ -296,13 +297,13 @@ class BayRig:
         self.latch.reset(flap_jammed=flap_jammed, bolt_pinned=bolt_pinned)
 
     def command(self, wrist: Pose, fingers: Mapping[str, float] | None = None) -> None:
-        """One 60 Hz control tick: a DLS step towards ``wrist`` plus LEAP targets by name."""
+        """One 60 Hz control tick: a DLS step towards ``wrist`` plus hand targets by name."""
         self.ik.apply(self.data, self.ik.solve(self.data, wrist, CONTROL_DT))
         self.set_fingers(fingers)
 
     def set_fingers(self, fingers: Mapping[str, float] | None) -> None:
         for name, value in (fingers or {}).items():
-            self.data.ctrl[self._leap_act[name]] = value
+            self.data.ctrl[self._hand_act[name]] = value
 
 
 def step_physics(model: Any, data: Any, n: int = SUBSTEPS) -> None:

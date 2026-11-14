@@ -32,24 +32,15 @@ N_KERNELS = 30
 RIDGE = 1e-4
 WIDTH_SCALE = 0.65
 
-# Menagerie right LEAP hand actuators in model order (16 position servos).
-LEAP_ACTUATORS: tuple[str, ...] = (
-    "if_mcp_act",
-    "if_rot_act",
-    "if_pip_act",
-    "if_dip_act",
-    "mf_mcp_act",
-    "mf_rot_act",
-    "mf_pip_act",
-    "mf_dip_act",
-    "rf_mcp_act",
-    "rf_rot_act",
-    "rf_pip_act",
-    "rf_dip_act",
-    "th_cmc_act",
-    "th_axl_act",
-    "th_mcp_act",
-    "th_ipl_act",
+# Right Inspire RH56 hand actuators in model order (6 position servos: one per finger, whose
+# distal joint is coupled to it by an equality constraint, plus thumb flexion and thumb yaw).
+HAND_ACTUATORS: tuple[str, ...] = (
+    "pinky",
+    "ring",
+    "middle",
+    "index",
+    "thumb_proximal",
+    "thumb_yaw",
 )
 
 
@@ -207,7 +198,7 @@ def _tau_profile(u: FloatArray, tau: FloatArray, n_bins: int) -> FloatArray:
 def fit_rbf_dmp(
     timestamps_s: ArrayLike,
     wrist_latch_se3: ArrayLike,
-    fingers_q16: ArrayLike,
+    fingers_q: ArrayLike,
     tau_ext_inf: ArrayLike,
     n_kernels: int = N_KERNELS,
     ridge: float = RIDGE,
@@ -216,14 +207,14 @@ def fit_rbf_dmp(
     part_sku_id: str = "ev_latch_v1",
     signature_id: str = "Jam_Sig_1",
     prototype: StallSignature | Sequence[float] | None = None,
-    actuator_names: Sequence[str] = LEAP_ACTUATORS,
+    actuator_names: Sequence[str] = HAND_ACTUATORS,
     skill_id: str | None = None,
 ) -> SkillPrimitive:
     """Fit a latch-frame RBF-DMP to one rescue in a single ``n_kernels``-square ridge solve."""
     start = time.perf_counter()
     t = np.asarray(timestamps_s, dtype=np.float64).ravel()
     wrist = np.asarray(wrist_latch_se3, dtype=np.float64)
-    fingers = np.asarray(fingers_q16, dtype=np.float64)
+    fingers = np.asarray(fingers_q, dtype=np.float64)
     tau = np.asarray(tau_ext_inf, dtype=np.float64).ravel()
     n = t.shape[0]
     names = tuple(actuator_names)
@@ -232,7 +223,7 @@ def fit_rbf_dmp(
     if wrist.shape != (n, 7):
         raise ValueError(f"wrist_latch_se3 must be {n} x 7, got {wrist.shape}")
     if fingers.shape != (n, len(names)):
-        raise ValueError(f"fingers_q16 must be {n} x {len(names)}, got {fingers.shape}")
+        raise ValueError(f"fingers_q must be {n} x {len(names)}, got {fingers.shape}")
     if tau.shape != (n,):
         raise ValueError(f"tau_ext_inf must have {n} samples, got {tau.shape}")
     rel = t - t[0]
@@ -303,6 +294,6 @@ def evaluate_latch_frame(skill: SkillPrimitive, s: float) -> tuple[Pose, dict[st
 def evaluate_rbf_dmp(
     skill: SkillPrimitive, s: float, world_from_latch: Pose
 ) -> tuple[Pose, dict[str, float], float]:
-    """World wrist pose (warped into ``world_from_latch``), LEAP targets and ``tau_demo(s)``."""
+    """World wrist pose (warped into ``world_from_latch``), hand targets and ``tau_demo(s)``."""
     local, fingers, tau = evaluate_latch_frame(skill, s)
     return compose_pose(world_from_latch, local), fingers, tau

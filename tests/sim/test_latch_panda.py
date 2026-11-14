@@ -1,7 +1,7 @@
-"""T-110: sprung slide-bolt latch, 4-bay Panda+LEAP scene, DLS diff-IK and tau_ext estimator.
+"""T-110: sprung slide-bolt latch, 4-bay Panda+Inspire scene, DLS diff-IK and tau_ext estimator.
 
 Latch tests build a bare latch-only model (no third-party assets). The robot tests need the
-Menagerie Panda and LEAP models and skip when they have not been fetched.
+Menagerie Panda and Inspire models and skip when they have not been fetched.
 """
 
 from __future__ import annotations
@@ -188,26 +188,26 @@ def test_pinned_bolt_fault_locks_bolt_at_zero(rig: LatchRig) -> None:
     assert rig.ctl.is_cleared()
 
 
-# --------------------------------------------------------------------------- Panda + LEAP
+# --------------------------------------------------------------------------- Panda + Inspire
 
 
 def _models_present() -> bool:
     try:
-        right = load_hand("leap").mjcf["right"]
+        right = load_hand("inspire").mjcf["right"]
     except FileNotFoundError:
         return False
     return PANDA_XML.is_file() and right.is_file()
 
 
 needs_models = pytest.mark.skipif(
-    not _models_present(), reason="Panda/LEAP MJCFs missing; run scripts/fetch_models.py"
+    not _models_present(), reason="Panda/Inspire MJCFs missing; run scripts/fetch_models.py"
 )
 
 
 @pytest.fixture(scope="module")
 def single_bay() -> Any:
     if not _models_present():
-        pytest.skip("Panda/LEAP MJCFs missing; run `uv run python scripts/fetch_models.py`")
+        pytest.skip("Panda/Inspire MJCFs missing; run `uv run python scripts/fetch_models.py`")
     return build_single_bay_scene(CANONICAL_LATCH)
 
 
@@ -280,7 +280,7 @@ def test_external_torque_spike_detected_on_flap_collision(single_bay: Any) -> No
     data = mj.MjData(model)
     ik = PandaDiffIK(model, "bay1")
     est = ExternalTorqueEstimator(model, "bay1")
-    assert len(est.joint_names) == 23  # 7 arm + 16 LEAP
+    assert len(est.joint_names) == 19  # 7 arm + 12 Inspire finger joints
     ctl = LatchController(model, data, "bay1")
     world_latch = latch_world_pose(1, CANONICAL_LATCH)
     flap_geom = int(model.geom("bay1/flap_paddle").id)
@@ -319,13 +319,21 @@ def test_four_bay_scene_has_two_active_and_two_background_bays() -> None:
     model = build_four_bay_scene(CANONICAL_LATCH, BAY2_LATCH)
     data = mj.MjData(model)
     for bay in (1, 2, 3, 4):
-        for name in ("joint1", "joint7", "if_mcp", "th_ipl", "bolt_slide", "flap_hinge"):
+        for name in (
+            "joint1",
+            "joint7",
+            "index_proximal_joint",
+            "thumb_distal_joint",
+            "wrist_comp_x",
+            "bolt_slide",
+            "flap_hinge",
+        ):
             model.joint(f"bay{bay}/{name}")
-        for name in ("actuator1", "actuator7", "if_mcp_act", "th_axl_act", "rf_rot_act"):
+        for name in ("actuator1", "actuator7", "index", "thumb_yaw", "pinky"):
             model.actuator(f"bay{bay}/{name}")
         model.site(f"bay{bay}/wrist_site")
         reset_robot_home(model, data, bay)
-    assert int(model.nu) == 4 * 23
+    assert int(model.nu) == 4 * (7 + 6)
 
     background = {f"bay{b}/" for b in BACKGROUND_BAYS}
     for g in range(int(model.ngeom)):
