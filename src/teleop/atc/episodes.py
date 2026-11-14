@@ -12,14 +12,24 @@ dataset, so neither is touched from the control thread.
 
 ``close()`` drops episodes still open (an interrupted rescue), writes every finished one and
 finalises the dataset, so a session cut short by Ctrl+C still loads.
+
+Every saved episode gets a uid (:meth:`EpisodeSink.latest_episode_uid`). The Tier 3 copilot audit
+(``teleop.copilot.review``) finishes seconds later and calls :meth:`EpisodeSink.tag_episode` with
+``dataset_tag`` ``"approve"`` or ``"flag"``; ``teleop process`` then drops flagged episodes
+(``"copilot flagged"``). A tag that arrives before the episode is written goes straight into its
+sidecar line; a later one rewrites that line atomically, so the sidecar keeps one line per episode.
 """
 
 from __future__ import annotations
 
 import copy
 import importlib.util
+import itertools
+import json
 import logging
+import os
 import queue
+import tempfile
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -109,6 +119,7 @@ class _Episode:
 class _Finished:
     episode: _Episode
     meta: EpisodeMeta
+    uid: str
 
     @property
     def task(self) -> str:
@@ -175,6 +186,14 @@ class EpisodeSink:
         self._written = 0
         self._pending = 0  # finished episodes queued or being written
         self._closed = False
+        # Copilot dataset tags. ``_sidecar_lock`` serialises sidecar appends and rewrites; it is
+        # never taken while holding ``_lock``. ``_index`` maps a uid to its episode index once
+        # written (None while queued); ``_tags`` holds tags that arrived before that.
+        self._sidecar_lock = threading.Lock()
+        self._uid_seq = itertools.count()
+        self._latest_uid: dict[int, str] = {}
+        self._index: dict[str, int | None] = {}
+        self._tags: dict[str, dict[str, Any]] = {}
         self._thread = threading.Thread(target=self._write_loop, name="episode-writer", daemon=True)
         self._thread.start()
 
@@ -183,6 +202,36 @@ class EpisodeSink:
         """Episodes saved to the dataset so far."""
         with self._lock:
             return self._written
+
+    @property
+    def sidecar_path(self) -> Path:
+        return self.root / "meta" / "teleop_episodes.jsonl"
+
+    def latest_episode_uid(self, bay_id: int) -> str | None:
+        """The uid of the last episode ``bay_id`` finished and queued for saving, or None."""
+        with self._lock:
+            return self._latest_uid.get(bay_id)
+
+    def tag_episode(
+        self, uid: str, *, dataset_tag: str, audit: Mapping[str, Any] | None = None
+    ) -> bool:
+        """Attach a copilot ``dataset_tag`` (and its audit) to episode ``uid``.
+
+        Safe from any thread and after :meth:`close`. Returns False for an unknown uid (an
+        episode that was never queued, or failed to write) and leaves the sidecar untouched.
+        """
+        fields: dict[str, Any] = {"dataset_tag": dataset_tag}
+        if audit is not None:
+            fields["audit"] = dict(audit)
+        with self._lock:
+            if uid not in self._index:
+                return False
+            index = self._index[uid]
+            if index is None:  # still queued or being encoded: the writer merges it
+                self._tags[uid] = fields
+                return True
+        with self._sidecar_lock:
+            return self._rewrite_row(index, fields)
 
     # -- CoordinatorObserver (control thread)
 
@@ -256,9 +305,12 @@ class EpisodeSink:
             max_arm_ratio=ep.max_arm_ratio,
             aborted_reason=aborted_reason,
         )
+        uid = f"bay{bay_id}-{next(self._uid_seq):04d}-{os.urandom(3).hex()}"
         with self._lock:
             self._pending += 1
-        self._queue.put(_Finished(ep, meta))
+            self._index[uid] = None
+            self._latest_uid[bay_id] = uid
+        self._queue.put(_Finished(ep, meta, uid))
 
     def close(self) -> None:
         """Drop open episodes, write the finished ones and finalise the dataset."""
@@ -291,6 +343,9 @@ class EpisodeSink:
                 except Exception:
                     logger.exception("bay %d: failed to write episode", item.episode.bay)
                     self._recorder.discard_episode()
+                    with self._lock:  # never written: tags for it now report False
+                        self._index.pop(item.uid, None)
+                        self._tags.pop(item.uid, None)
                 finally:
                     with self._lock:
                         self._pending -= 1
@@ -319,11 +374,19 @@ class EpisodeSink:
             mj.mj_camlight(m, d)
             images = self._renderer.render(d, ep.bay)
             self._recorder.add_frame(f.state, f.action, images)
-        index = self._recorder.end_episode(
-            {**item.meta.to_json(), "recorded_at": ep.started_at, "frames": len(ep.frames)}
-        )
+        meta = {**item.meta.to_json(), "recorded_at": ep.started_at, "frames": len(ep.frames)}
         with self._lock:
-            self._written += 1
+            early = self._tags.pop(item.uid, None)
+        if early:
+            meta.update(early)
+        with self._sidecar_lock:
+            index = self._recorder.end_episode(meta)
+            with self._lock:
+                self._written += 1
+                self._index[item.uid] = index
+                late = self._tags.pop(item.uid, None)  # tagged while end_episode ran
+            if late:
+                self._rewrite_row(index, late)
         logger.info(
             "bay %d: saved episode %d (%s, %d frames, success=%s)",
             ep.bay,
@@ -332,6 +395,35 @@ class EpisodeSink:
             len(ep.frames),
             item.meta.success,
         )
+
+    def _rewrite_row(self, index: int, fields: Mapping[str, Any]) -> bool:
+        """Merge ``fields`` into sidecar line ``index`` via temp file + rename. Caller holds
+        ``_sidecar_lock``."""
+        path = self.sidecar_path
+        if not path.is_file():
+            return False
+        lines = path.read_text(encoding="utf-8").splitlines()
+        found = False
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("episode_index") == index:
+                row.update(fields)
+                lines[i] = json.dumps(row, default=str)
+                found = True
+                break
+        if not found:
+            return False
+        fd, tmp = tempfile.mkstemp(prefix=".teleop_episodes.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        return True
 
 
 def open_episode_sink(

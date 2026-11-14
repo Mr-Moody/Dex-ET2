@@ -4,6 +4,8 @@ An ATC dataset is one whose sidecar (``meta/teleop_episodes.jsonl``) lines carry
 (:class:`teleop.policy.schema.EpisodeMeta`). Episodes are dropped for one of the exact reason
 strings in :data:`DROP_REASONS`; kept episodes are trimmed to the frames between the first and
 the last commanded motion. ``write_clean`` then carries every sidecar label into the clean set.
+Episodes the Tier 3 copilot audit tagged ``dataset_tag: "flag"`` are dropped as
+``"copilot flagged"``; ``"approve"`` and untagged episodes are judged on the other rules only.
 
 The timestamp-gap rule reads ``max_gap_s`` from the sidecar (top level, or ``source_status`` as
 in legacy QC): LeRobot writes ``timestamp = frame_index / fps``, so the dataset itself never
@@ -34,6 +36,7 @@ DROP_REASONS: tuple[str, ...] = (
     "timestamp gap",
     "torque breach",
     "action out of range",
+    "copilot flagged",
 )
 RANGE_TOL = 1e-6
 _HAND_PREFIX = "hand/"
@@ -126,6 +129,8 @@ def _reasons(
         reasons.append("torque breach")
     if _out_of_range(actions, ranges):
         reasons.append("action out of range")
+    if meta.get("dataset_tag") == "flag":  # Tier 3 copilot audit (teleop.copilot.review)
+        reasons.append("copilot flagged")
     return reasons
 
 
