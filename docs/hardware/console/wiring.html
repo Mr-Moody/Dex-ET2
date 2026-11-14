@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ATC Console Wiring</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+body { margin: 0; }
+/* Layout: one technical sheet — header, schematic in its own scroll box, pin table, wiring rules. */
+:root {
+  --paper: #f6f7f5; --panel: #ffffff; --ink: #1d2422; --muted: #5d6865; --line: #cfd6d3;
+  --accent: #0f6e63;
+  --sig: #2f5fb3; --red: #c8352e; --grn: #1f8a4c; --amb: #b7791f; --pwr: #b4233c; --gnd: #3a4442; --ana: #7a3fb0;
+  --box: #eef2f0; --uno: #e4ecf6; --uno-edge: #2f5fb3;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #141917; --panel: #1b2220; --ink: #e3e9e6; --muted: #9aa7a2; --line: #33403c;
+    --accent: #4cc2b1;
+    --sig: #7ea6ec; --red: #f0716a; --grn: #5fcf8a; --amb: #e3b35a; --pwr: #f07c8f; --gnd: #b9c4c0; --ana: #c49af0;
+    --box: #222b28; --uno: #1d2838; --uno-edge: #7ea6ec;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #141917; --panel: #1b2220; --ink: #e3e9e6; --muted: #9aa7a2; --line: #33403c;
+  --accent: #4cc2b1;
+  --sig: #7ea6ec; --red: #f0716a; --grn: #5fcf8a; --amb: #e3b35a; --pwr: #f07c8f; --gnd: #b9c4c0; --ana: #c49af0;
+  --box: #222b28; --uno: #1d2838; --uno-edge: #7ea6ec;
+  color-scheme: dark;
+}
+body { background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-block: 28px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 28px; }
+header { display: grid; gap: 6px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font-size: clamp(24px, 4vw, 32px); line-height: 1.15; margin: 0; text-wrap: balance; font-weight: 700; }
+h2 { font-size: 18px; margin: 0 0 10px; text-wrap: balance; }
+.lede { color: var(--muted); max-width: 68ch; margin: 0; }
+.sheet { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.scroll { overflow-x: auto; }
+svg.schem { display: block; min-width: 820px; width: 100%; height: auto; }
+.schem text { font-family: var(--font-mono); fill: var(--ink); }
+.schem .muted { fill: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 22px; height: 3px; border-radius: 2px; display: inline-block; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+@media (max-width: 820px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+td.pin { font-family: var(--font-mono); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: baseline; }
+.rules { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+.rules li { display: grid; gap: 2px; padding-left: 14px; border-left: 3px solid var(--line); }
+.rules li.warn { border-left-color: var(--red); }
+.rules b { font-weight: 600; }
+.rules p { margin: 0; color: var(--muted); }
+code { font-family: var(--font-mono); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Single-plate prototype · Arduino UNO Q · joy-it SensorKit X40</div>
+    <h1>ATC Console Wiring</h1>
+    <p class="lede">A joystick for bay select, clutch and E-stop buttons, four bay LEDs and a buzzer on the UNO Q's 3.3&nbsp;V MCU headers, wired with jumper cables. A mini breadboard supplies the shared 3.3&nbsp;V and GND rails. The UNO Q's built-in 8×13 LED matrix is the bay dashboard and needs no wiring.</p>
+  </header>
+
+  <section class="sheet">
+    <div class="scroll">
+      <svg class="schem" id="schem" viewBox="0 0 1000 640" role="img" aria-label="Wiring schematic: joystick X and Y on A0 and A1 with its push switch on A2, clutch on D2, buzzer on D3, bay LEDs on D4 to D11, E-stop on D12, power rails from the UNO Q 3V3 and GND pins."></svg>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--ana)"></i>Joystick analog</span>
+      <span><i style="background:var(--sig)"></i>Button signal</span>
+      <span><i style="background:var(--red)"></i>LED red</span>
+      <span><i style="background:var(--grn)"></i>LED green (PWM pin)</span>
+      <span><i style="background:var(--amb)"></i>Buzzer (PWM pin)</span>
+      <span><i style="background:var(--pwr)"></i>3V3 rail</span>
+      <span><i style="background:var(--gnd)"></i>GND rail</span>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section>
+      <h2>Pin map</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>UNO Q pin</th><th>Module</th><th>Module pin</th><th>Firmware</th></tr></thead>
+          <tbody>
+            <tr><td class="pin">A0</td><td>Bay-select joystick · KY-023</td><td>VRx</td><td rowspan="2">push up / right / down / left → <code>BTN:BAY:1</code>…<code>4</code></td></tr>
+            <tr><td class="pin">A1</td><td>Bay-select joystick · KY-023</td><td>VRy</td></tr>
+            <tr><td class="pin">A2</td><td>Bay-select joystick · KY-023</td><td>SW (optional)</td><td>spare, stick press</td></tr>
+            <tr><td class="pin">D2</td><td>Clutch button · KY-004</td><td>S</td><td><code>CLUTCH:0|1</code></td></tr>
+            <tr><td class="pin">D12</td><td>E-stop button · KY-004</td><td>S</td><td><code>ESTOP:0|1</code></td></tr>
+            <tr><td class="pin">D3</td><td>Alert buzzer · KY-006 (passive)</td><td>S</td><td><code>tone()</code></td></tr>
+            <tr><td class="pin">D5 / D4</td><td>Bay 1 LED · KY-011</td><td>G / R</td><td rowspan="4"><code>CMD:BAY_STATE</code> → green pulse, red blink</td></tr>
+            <tr><td class="pin">D6 / D7</td><td>Bay 2 LED · KY-011</td><td>G / R</td></tr>
+            <tr><td class="pin">D9 / D8</td><td>Bay 3 LED · KY-011</td><td>G / R</td></tr>
+            <tr><td class="pin">D10 / D11</td><td>Bay 4 LED · KY-011</td><td>G / R</td></tr>
+            <tr><td class="pin">3V3</td><td>Breadboard + rail</td><td>joystick <b>+5V</b> pin and button <b>+</b> pins</td><td></td></tr>
+            <tr><td class="pin">GND</td><td>Breadboard − rail</td><td>every module <b>−</b> pin</td><td></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="lede" style="margin-top:10px">Free for later: D0/D1 (UART), D13, A3–A5. Green channels use PWM pins so the firmware can do the breathing pulse.</p>
+    </section>
+
+    <section>
+      <h2>Wiring rules</h2>
+      <ul class="rules">
+        <li class="warn"><b>LED resistors</b><p>KY-011 boards often have no series resistor. Look for tiny parts labelled 151, 221 or 331 on the LED board. If there are none, put a 150–220&nbsp;Ω resistor in series with each R and G line on the breadboard. Never drive a bare LED straight from a GPIO.</p></li>
+        <li class="warn"><b>Power the joystick from 3V3, never 5V</b><p>Its pin is labelled +5V, but connect it to the 3V3 rail. A0 and A1 are not 5&nbsp;V tolerant, and 3.3&nbsp;V also matches the ADC's full range.</p></li>
+        <li><b>Joystick directions</b><p>The firmware reads the centre position at boot and emits a bay event when the stick passes about 70% of its travel: up&nbsp;1, right&nbsp;2, down&nbsp;3, left&nbsp;4. Push each way once after assembly; if a direction lands on the wrong bay, swap or invert the axes in firmware.</p></li>
+        <li><b>Wire all three button pins</b><p>Connect S, + and − on both KY-004 buttons. Boards differ on whether pressing pulls S high or low, so the firmware reads the idle level at boot and treats the opposite level as pressed.</p></li>
+        <li><b>Check the silkscreen</b><p>Pin order differs between module batches. Match the letters printed on each board (S, +, −, R, G), not the position.</p></li>
+        <li><b>One ground</b><p>Every module's − pin goes to the breadboard GND rail, and the rail goes to a UNO Q GND pin. The buzzer's middle pin is unused.</p></li>
+      </ul>
+    </section>
+  </div>
+</div>
+
+<script>
+(function () {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("schem");
+  const el = (tag, attrs, text) => {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    svg.appendChild(n);
+    return n;
+  };
+  const wire = (x1, y1, x2, y2, c) => el("line", { x1, y1, x2, y2, stroke: `var(--${c})`, "stroke-width": 2.4, "stroke-linecap": "round" });
+  const dot = (x, y, c) => el("circle", { cx: x, cy: y, r: 3.6, fill: `var(--${c})` });
+  const gndSym = (x, y) => {
+    wire(x, y, x, y + 8, "gnd");
+    el("line", { x1: x - 9, y1: y + 8, x2: x + 9, y2: y + 8, stroke: "var(--gnd)", "stroke-width": 2 });
+    el("line", { x1: x - 6, y1: y + 12, x2: x + 6, y2: y + 12, stroke: "var(--gnd)", "stroke-width": 2 });
+    el("line", { x1: x - 3, y1: y + 16, x2: x + 3, y2: y + 16, stroke: "var(--gnd)", "stroke-width": 2 });
+  };
+  const flag = (x, y, label, c, dir) => {
+    const w = 38, x0 = dir > 0 ? x : x - w;
+    el("rect", { x: x0, y: y - 9, width: w, height: 18, rx: 9, fill: "var(--panel)", stroke: `var(--${c})`, "stroke-width": 1.6 });
+    el("text", { x: x0 + w / 2, y: y + 4, "text-anchor": "middle", "font-size": 11, style: `fill:var(--${c})`, "font-weight": 600 }, label);
+  };
+  const box = (x, y, w, h, title, part) => {
+    el("rect", { x, y, width: w, height: h, rx: 5, fill: "var(--box)", stroke: "var(--line)", "stroke-width": 1.4 });
+    el("text", { x: x + w / 2, y: y + h / 2 - 2, "text-anchor": "middle", "font-size": 12.5, "font-weight": 600 }, title);
+    el("text", { x: x + w / 2, y: y + h / 2 + 13, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, part);
+  };
+  const pinLabel = (x, y, t, anchor) => el("text", { x, y: y - 4, "text-anchor": anchor, "font-size": 10.5, class: "muted" }, t);
+
+  // UNO Q
+  const UX0 = 400, UX1 = 600;
+  el("rect", { x: UX0, y: 50, width: UX1 - UX0, height: 560, rx: 8, fill: "var(--uno)", stroke: "var(--uno-edge)", "stroke-width": 2 });
+  el("text", { x: 500, y: 82, "text-anchor": "middle", "font-size": 16, "font-weight": 600 }, "Arduino UNO Q");
+  el("text", { x: 500, y: 100, "text-anchor": "middle", "font-size": 11, class: "muted" }, "STM32U585 MCU · 3.3 V I/O");
+  el("rect", { x: 445, y: 270, width: 110, height: 66, rx: 4, fill: "none", stroke: "var(--uno-edge)", "stroke-dasharray": "4 3", "stroke-width": 1.2 });
+  el("text", { x: 500, y: 300, "text-anchor": "middle", "font-size": 11 }, "8×13 LED matrix");
+  el("text", { x: 500, y: 316, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, "bay dashboard");
+  el("text", { x: UX0 + 10, y: 128, "font-size": 10.5, class: "muted" }, "JANALOG");
+  el("text", { x: UX1 - 10, y: 128, "text-anchor": "end", "font-size": 10.5, class: "muted" }, "JDIGITAL");
+
+  const unoPin = (side, y, name) => {
+    const x = side < 0 ? UX0 : UX1;
+    el("text", { x: x - side * 10, y: y + 4, "text-anchor": side < 0 ? "start" : "end", "font-size": 12.5, "font-weight": 600 }, name);
+    return x;
+  };
+
+  // Left: bay-select joystick on A0..A2
+  el("rect", { x: 150, y: 150, width: 150, height: 210, rx: 6, fill: "var(--box)", stroke: "var(--line)", "stroke-width": 1.4 });
+  el("circle", { cx: 225, cy: 270, r: 26, fill: "none", stroke: "var(--muted)", "stroke-width": 1.4 });
+  el("circle", { cx: 225, cy: 270, r: 9, fill: "var(--muted)" });
+  el("text", { x: 225, y: 230, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, "1");
+  el("text", { x: 262, y: 274, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, "2");
+  el("text", { x: 225, y: 318, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, "3");
+  el("text", { x: 188, y: 274, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, "4");
+  el("text", { x: 225, y: 176, "text-anchor": "middle", "font-size": 12.5, "font-weight": 600 }, "Bay-select joystick");
+  el("text", { x: 225, y: 192, "text-anchor": "middle", "font-size": 10.5, class: "muted" }, "KY-023");
+  for (const [p, y, lab, dashed] of [["A0", 210, "VRx", false], ["A1", 250, "VRy", false], ["A2", 330, "SW", true]]) {
+    unoPin(-1, y, p);
+    const ln = wire(300, y, UX0, y, "ana"); if (dashed) ln.setAttribute("stroke-dasharray", "6 5");
+    dot(300, y, "ana"); dot(UX0, y, "ana");
+    pinLabel(306, y, lab + (dashed ? " (optional)" : ""), "start");
+  }
+  wire(150, 215, 118, 215, "pwr"); flag(118, 215, "3V3", "pwr", -1); pinLabel(144, 215, "+5V", "end");
+  wire(150, 310, 104, 310, "gnd"); gndSym(104, 310); pinLabel(144, 310, "GND", "end");
+
+  // Left bottom: breadboard rails fed from UNO 3V3 / GND
+  el("rect", { x: 120, y: 470, width: 180, height: 110, rx: 5, fill: "none", stroke: "var(--line)", "stroke-dasharray": "5 4", "stroke-width": 1.4 });
+  el("text", { x: 130, y: 490, "font-size": 11.5, "font-weight": 600 }, "Mini breadboard rails");
+  for (const [p, y, c, lab] of [["3V3", 520, "pwr", "+ rail → every 3V3 flag"], ["GND", 560, "gnd", "− rail → every ground"]]) {
+    unoPin(-1, y, p);
+    el("line", { x1: 140, y1: y, x2: 290, y2: y, stroke: `var(--${c})`, "stroke-width": 5, "stroke-linecap": "round" });
+    wire(290, y, UX0, y, c); dot(UX0, y, c);
+    el("text", { x: 140, y: y - 8, "font-size": 10.5, class: "muted" }, lab);
+  }
+
+  // Right: clutch, buzzer, 4 LEDs, E-stop on D2..D12
+  const RX0 = 700, RX1 = 860;
+  const rightMods = [
+    { title: "Clutch button", part: "KY-004", pins: [["D2", "S", "sig"]], plus: true },
+    { title: "Alert buzzer", part: "KY-006 passive", pins: [["D3", "S", "amb"]] },
+    { title: "Bay 1 LED", part: "KY-011", pins: [["D4", "R", "red"], ["D5", "G", "grn"]] },
+    { title: "Bay 2 LED", part: "KY-011", pins: [["D6", "G", "grn"], ["D7", "R", "red"]] },
+    { title: "Bay 3 LED", part: "KY-011", pins: [["D8", "R", "red"], ["D9", "G", "grn"]] },
+    { title: "Bay 4 LED", part: "KY-011", pins: [["D10", "G", "grn"], ["D11", "R", "red"]] },
+    { title: "E-stop button", part: "KY-004", pins: [["D12", "S", "sig"]], plus: true },
+  ];
+  let y = 130;
+  const STEP = 34;
+  for (const m of rightMods) {
+    const ys = m.pins.map((_, i) => y + i * STEP);
+    const top = ys[0] - 18, bot = ys[ys.length - 1] + 18;
+    box(RX0, top, RX1 - RX0, bot - top, m.title, m.part);
+    m.pins.forEach(([p, lab, c], i) => {
+      const yy = ys[i];
+      unoPin(1, yy, p);
+      wire(UX1, yy, RX0, yy, c); dot(UX1, yy, c); dot(RX0, yy, c);
+      pinLabel(RX0 - 6, yy, lab, "end");
+    });
+    const mid = (top + bot) / 2;
+    if (m.plus) {
+      wire(RX1, mid - 8, RX1 + 30, mid - 8, "pwr"); flag(RX1 + 30, mid - 8, "3V3", "pwr", 1); pinLabel(RX1 + 6, mid - 8, "+", "start");
+      wire(RX1, mid + 9, RX1 + 92, mid + 9, "gnd"); gndSym(RX1 + 92, mid + 9);
+    } else {
+      wire(RX1, mid, RX1 + 40, mid, "gnd"); gndSym(RX1 + 40, mid);
+      pinLabel(RX1 + 6, mid, "−", "start");
+    }
+    y = ys[ys.length - 1] + STEP + 10;
+  }
+})();
+</script>
+</body>
+</html>
