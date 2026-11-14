@@ -68,6 +68,9 @@ class SkillStore:
         self._records: list[dict[str, Any]] = []  # valid entries, as written to the file
         self._kept: list[dict[str, Any]] = []  # entries load skipped: preserved, never dropped
         self._unreadable = False  # the file on disk could not be parsed: keep it aside first
+        # Set by load/reset: lets on_deployed drop a deploy that straddled a reset (its skill is
+        # no longer in the coordinator's library, so it must not reach the file either).
+        self._coordinator: AtcCoordinator | None = None
         self._wake: queue.Queue[bool] | None = None
         self._writer: threading.Thread | None = None
 
@@ -75,6 +78,7 @@ class SkillStore:
 
     def load(self, coordinator: AtcCoordinator) -> LoadReport:
         """Clear the board and library, then restore every valid saved skill into both."""
+        self._coordinator = coordinator
         coordinator.reset_library()
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
@@ -94,6 +98,8 @@ class SkillStore:
         for i, item in enumerate(items):
             name = f"entry {i}"
             try:
+                if not isinstance(item["skill"], dict):
+                    raise TypeError("entry is not a skill object")
                 name = str(item["skill"].get("skill_id", name))
                 skill = SkillPrimitive.from_dict(item["skill"])
                 if skill.actuator_names != HAND_ACTUATORS:
@@ -116,6 +122,9 @@ class SkillStore:
 
     def on_deployed(self, skill: SkillPrimitive) -> None:
         """Queue a rewrite with ``skill`` added. Never touches the disk on the caller's thread."""
+        co = self._coordinator
+        if co is not None and skill.skill_id not in co.library:
+            return  # a reset cleared the library between the deploy and this call
         record = {
             "skill": skill.to_dict(),
             "learned_at": datetime.now().isoformat(timespec="seconds"),
@@ -184,20 +193,26 @@ class SkillStore:
 
     def reset(self, coordinator: AtcCoordinator) -> ResetReport:
         """Back the file up, clear the library and the board. Skills mid-replay run to the end."""
+        self._coordinator = coordinator
+        board_cleared = coordinator.reset_library()  # first: the board and library never outlive it
         with self._io:
             with self._lock:
                 self._records = []
                 self._kept = []
             backup: Path | None = None
-            if self.path.exists():
-                backup = self.path.with_name(f"{self.path.stem}-{_stamp()}.json.bak")
-                n = 1
-                while backup.exists():
-                    backup = backup.with_name(f"{self.path.stem}-{_stamp()}-{n}.json.bak")
-                    n += 1
-                os.replace(self.path, backup)
+            try:
+                if self.path.exists():
+                    backup = self.path.with_name(f"{self.path.stem}-{_stamp()}.json.bak")
+                    n = 1
+                    while backup.exists():
+                        backup = backup.with_name(f"{self.path.stem}-{_stamp()}-{n}.json.bak")
+                        n += 1
+                    os.replace(self.path, backup)
+            except OSError:
+                logger.exception("skills: could not back up %s", self.path)
+                backup = None
             self._unreadable = False
-        return ResetReport(board_cleared=coordinator.reset_library(), backup=backup)
+        return ResetReport(board_cleared=board_cleared, backup=backup)
 
     def entries(self) -> list[SkillEntry]:
         with self._lock:

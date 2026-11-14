@@ -170,6 +170,7 @@ def test_skipped_entries_survive_the_next_save(
     )
     store = SkillStore(path)
     store.load(coord)  # type: ignore[arg-type]
+    coord.library[skill.skill_id] = skill
     store.on_deployed(skill)
     store.close()
     assert _ids(path) == ["wrong-hand", skill.skill_id]
@@ -193,6 +194,7 @@ def test_deploy_after_truncated_load_keeps_the_broken_file_aside(
     path.write_text('{"version": 1, "skills": [{"skill"', encoding="utf-8")
     store = SkillStore(path)
     store.load(coord)  # type: ignore[arg-type]
+    coord.library[skill.skill_id] = skill
     store.on_deployed(skill)
     store.close()
     assert _ids(path) == [skill.skill_id]
@@ -283,7 +285,9 @@ def test_deploy_after_reset_writes_only_the_new_skill(
     store.on_deployed(skill)
     store.close()
     store.reset(coord)  # type: ignore[arg-type]
-    store.on_deployed(replace(skill, skill_id="after"))
+    after = replace(skill, skill_id="after")
+    coord.library["after"] = after  # the coordinator deploys into its library first
+    store.on_deployed(after)
     store.close()
     assert _ids(path) == ["after"]
 
@@ -319,3 +323,55 @@ def test_reset_during_autonomous_skill_lets_it_finish(
     assert running.n_kernels > 0 and coord.library == {}
     store.close()
     assert not path.exists()
+
+
+def test_backup_failure_still_clears_board_and_library(
+    tmp_path: Path,
+    coord: FakeCoordinator,
+    skill: SkillPrimitive,
+    server: UnoQServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import teleop.atc.skill_store as mod
+
+    path = tmp_path / "library.json"
+    _saved(path, skill)
+    coord.unoq.register_skill(skill)
+    coord.library[skill.skill_id] = skill
+
+    def locked(src: object, dst: object) -> None:
+        raise PermissionError("file in use")
+
+    monkeypatch.setattr(mod.os, "replace", locked)
+    report = SkillStore(path).reset(coord)  # type: ignore[arg-type]
+    assert report.backup is None and report.board_cleared is True
+    assert coord.library == {} and server.skills == {}
+
+
+def test_non_dict_skill_entries_are_skipped(
+    tmp_path: Path, coord: FakeCoordinator, skill: SkillPrimitive
+) -> None:
+    path = tmp_path / "library.json"
+    items = [
+        {"skill": ["not", "a", "dict"]},
+        {"skill": "text"},
+        42,
+        {"skill": skill.to_dict(), "learned_at": "t", "session": None},
+    ]
+    path.write_text(json.dumps({"version": 1, "skills": items}), encoding="utf-8")
+    report = SkillStore(path).load(coord)  # type: ignore[arg-type]
+    assert report.loaded == 1 and len(report.skipped) == 3
+
+
+def test_deploy_straddling_a_reset_is_not_resurrected(
+    tmp_path: Path, coord: FakeCoordinator, skill: SkillPrimitive
+) -> None:
+    path = tmp_path / "library.json"
+    store = SkillStore(path)
+    coord.library[skill.skill_id] = skill
+    store.on_deployed(skill)  # the coordinator deployed, then Start fresh ran, then the notice
+    store.close()
+    store.reset(coord)  # type: ignore[arg-type]
+    store.on_deployed(skill)  # late notice for a skill the reset already dropped
+    store.close()
+    assert not path.exists() and store.entries() == []
