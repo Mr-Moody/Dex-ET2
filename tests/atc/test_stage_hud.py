@@ -375,12 +375,14 @@ def test_cli_seed_reaches_coordinator(tmp_path: Path, monkeypatch: pytest.Monkey
     from teleop.atc.stage import StageController
     from teleop.commands import atc
 
-    seen: list[int] = []
+    seen: list[tuple[int, float, int]] = []
     real_build = StageController.build
 
     def spy(*args: object, **kwargs: object) -> StageController:
         ctl = real_build(*args, **kwargs)  # type: ignore[arg-type]
-        seen.append(ctl.coordinator.config.seed)
+        cfg = ctl.coordinator.config
+        assert ctl.coordinator.validator.pass_min == cfg.gate_pass_min
+        seen.append((cfg.seed, cfg.realism, cfg.gate_pass_min))
         return ctl
 
     monkeypatch.setattr(StageController, "build", staticmethod(spy))
@@ -400,7 +402,9 @@ def test_cli_seed_reaches_coordinator(tmp_path: Path, monkeypatch: pytest.Monkey
     ]
     assert atc.main([*base, "--seed", "5"]) == 0
     assert atc.main(base) == 0
-    assert seen == [5, 0]
+    assert atc.main([*base, "--realism", "0.5", "--gate-pass-min", "16"]) == 0
+    assert seen[0][0] == 5 and seen[1][0] == 0
+    assert seen[2][1:] == (0.5, 16)
 
 
 def test_resolve_seed_defaults() -> None:

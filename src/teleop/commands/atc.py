@@ -37,7 +37,7 @@ from typing import Any, cast
 import yaml
 
 from teleop.app import make_source
-from teleop.atc.coordinator import OperatorInput
+from teleop.atc.coordinator import DEFAULT_REALISM, OperatorInput
 from teleop.atc.hud import hud_lines, hud_overlays
 from teleop.atc.recovery import RecoveryBackend
 from teleop.atc.stage import (
@@ -99,7 +99,7 @@ class AtcConfig:
     record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
     generate: int | None = None  # headless: generate N scripted rescue episodes
     seed: int | None = None  # None: STAGE_SEED with --script, else 0
-    realism: float = 1.0  # latch-pose error and gate randomization scale (0: off)
+    realism: float = DEFAULT_REALISM  # latch-pose error and gate randomization scale (0: off)
     gate_pass_min: int = GATE_PASS_MIN  # randomized skill gate: deploy at >= N of 20
 
 

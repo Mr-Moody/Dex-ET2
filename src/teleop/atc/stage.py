@@ -41,7 +41,13 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from teleop.atc.coordinator import ROUTINE, AtcCoordinator, CoordinatorConfig, OperatorInput
+from teleop.atc.coordinator import (
+    DEFAULT_REALISM,
+    ROUTINE,
+    AtcCoordinator,
+    CoordinatorConfig,
+    OperatorInput,
+)
 from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
 from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
@@ -494,7 +500,7 @@ class StageController:
         include_background_bays: bool = False,
         unoq_label: str = "",
         seed: int = 0,
-        realism: float = 1.0,
+        realism: float = DEFAULT_REALISM,
         gate_pass_min: int = GATE_PASS_MIN,
     ) -> StageController:
         """``seed`` seeds the pose estimator and the skill gate (``CoordinatorConfig.seed``).
@@ -792,15 +798,15 @@ class StageController:
 # metres, finger press fraction): the wrist drops so the index sits low behind the bolt hook,
 # the thumb swings under the palm and presses the raised stopper flap flat at its free end,
 # then the wrist pushes the bolt clear. Same demonstration the T-140 tests use.
-# Tuned for the randomized gate: y -9 mm centres the hand on the flap paddle across the
-# pose-estimate y error, and the 2.2 s push keeps a stiff flap spring pressed down.
+# Kept as tuned on main: a retune for the randomized gate (x 0, y -9 mm, a 2.2 s push) never
+# cleared the bolt on an exact latch placement (realism 0), on Windows or Linux.
 RESCUE_PRESS = {"thumb_yaw": 0.6}
 RESCUE_WAYPOINTS: tuple[tuple[float, tuple[float, float, float], float], ...] = (
     (0.0, (0.0, 0.0, 0.0), 0.0),
-    (0.4981, (0.0, -0.009, -0.012), 0.0),
-    (0.8199, (0.0, -0.009, -0.012), 1.0),
-    (0.3333, (0.0, -0.009, -0.012), 1.0),
-    (2.2, (0.0458, -0.009, -0.012), 1.0),
+    (0.4981, (0.0055, -0.004, -0.012), 0.0),
+    (0.8199, (0.0055, -0.004, -0.012), 1.0),
+    (0.3333, (0.0055, -0.004, -0.012), 1.0),
+    (1.4385, (0.0055 + 0.0458, -0.004, -0.012), 1.0),
 )
 
 
@@ -874,12 +880,11 @@ class ScriptedGlove:
 
 # --------------------------------------------------------------------------- 6-beat director
 
-# Run seed for the scripted stage show: the smallest seed >= 0 at which the full 6-beat run
-# passes with realistic estimate error and the randomized 20-rollout gate (>= 18/20). The spec
-# allows fixed confirmed seeds for the stage. Pinned against the show's own config (cycle dwell
-# 1.0 s, background bays on, as `teleop atc --script` runs): seeds 0-9 give gate 18, 13, none
-# (earlier beat fails), 11, 9, 15, none, 17, 8 and 12 of 20, so only seed 0 passes the show.
-STAGE_SEED = 0
+# Run seed for the scripted stage show. The spec allows fixed confirmed seeds for the stage.
+# Pinned against the show's own config (cycle dwell 1.0 s, background bays on, DEFAULT_REALISM,
+# as `teleop atc --script` runs): seeds 0-7 pass the full show on Windows except 3 and 5, and on
+# Linux (CI) except 5. Seed 7 gives the gate 19/20 on both, the widest margin over the 18 bar.
+STAGE_SEED = 7
 
 BEATS: tuple[str, ...] = (
     "1 Routine autonomy",

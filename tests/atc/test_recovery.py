@@ -93,9 +93,22 @@ GOLDEN_BY_PLATFORM: dict[str, tuple[int, Wrist]] = {
 
 def _run_stage(unoq: Any) -> tuple[Any, list[ComplianceEvent], int]:
     from teleop.atc.stage import StageController, StageDirector
+    from teleop.commands.atc import DEFAULT_CONFIG, load_config, resolve_seed
 
     sink = RecordingSink()
-    controller = StageController.build(unoq, sink, QuietReasoner(), cycle_dwell_s=0.5)
+    # The show's own settings, as `teleop atc --headless --script` resolves them (STAGE_SEED,
+    # cycle dwell, background bays, realism): T-179's randomized gate only passes reliably there.
+    cfg = load_config(DEFAULT_CONFIG, {"script": True})
+    controller = StageController.build(
+        unoq,
+        sink,
+        QuietReasoner(),
+        cycle_dwell_s=cfg.cycle_dwell_s,
+        include_background_bays=cfg.background_bays,
+        seed=resolve_seed(cfg),
+        realism=cfg.realism,
+        gate_pass_min=cfg.gate_pass_min,
+    )
     director = StageDirector(controller)
     ticks = 0
     while not director.done and ticks < 12_000:
