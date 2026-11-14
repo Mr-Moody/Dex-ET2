@@ -31,7 +31,7 @@ def _view(*snaps: BaySnapshot, **kw: object) -> HudView:
         queue=(),
         background_bays=(3, 4),
         compliance="SOLANA  no events yet",
-        reasoning="NEMOTRON  idle",
+        reasoning="TRIAGE  idle",
     )
     return replace(base, **kw)  # type: ignore[arg-type]
 
