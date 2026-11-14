@@ -19,7 +19,7 @@ import io
 import logging
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -38,6 +38,17 @@ logger = logging.getLogger("teleop.console.render")
 JPEG_QUALITY = 80
 ERROR_BACKOFF_S = 1.0
 STRIP_EVERY = 3  # rescue mode: the small strip tiles refresh at a third of the frame rate
+
+
+class FeedRendererLike(Protocol):
+    def render(
+        self, snap: SimSnapshot, feeds: Sequence[FeedSpec], wall_t: float
+    ) -> tuple[list[tuple[int, bytes]], dict[int, float]]: ...
+
+    def close(self) -> None: ...
+
+
+RendererFactory = Callable[[Any, BackgroundPlayer | None], FeedRendererLike]
 
 
 class FramePublisher(Protocol):
@@ -151,8 +162,10 @@ class RenderWorker(threading.Thread):
         background: BackgroundCycle | None,
         fps: int = 30,
         telemetry_hz: float = 10.0,
+        renderer_factory: RendererFactory | None = None,
     ) -> None:
         super().__init__(name="console-render", daemon=True)
+        self.renderer_factory: RendererFactory = renderer_factory or FeedRenderer
         self.model = model
         self.snapshots = snapshots
         self.server = server
@@ -173,7 +186,7 @@ class RenderWorker(threading.Thread):
         self.server.publish_telemetry(msg)
 
     def run(self) -> None:
-        renderer: FeedRenderer | None = None
+        renderer: FeedRendererLike | None = None
         start = time.monotonic()
         next_tel = 0.0
         last_feeds: tuple[FeedSpec, ...] | None = None
@@ -196,7 +209,7 @@ class RenderWorker(threading.Thread):
                             if self.background is not None
                             else None
                         )
-                        renderer = FeedRenderer(self.model, player)
+                        renderer = self.renderer_factory(self.model, player)
                     t0 = time.perf_counter()
                     due = [
                         f
