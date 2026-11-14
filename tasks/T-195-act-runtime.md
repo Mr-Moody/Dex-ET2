@@ -1,7 +1,7 @@
 ---
 id: T-195
 title: Batched ACT inference worker and live ACT recovery
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/act-runtime
 depends_on: [T-191]
