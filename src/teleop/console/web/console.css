@@ -93,6 +93,27 @@ body {
 .bar__live { display: flex; align-items: center; gap: 14px; }
 .bar__clock { font-size: var(--t-l); font-weight: 300; }
 
+/* recovery backend chip: DMP is the always-available baseline (neutral); ACT health is colour */
+.rchip {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  min-height: 1.9rem; padding: 0 0.7rem;
+  border: 1px solid var(--hair); border-radius: 4px;
+  background: var(--pit); color: var(--text);
+  font-size: var(--t-xs); font-weight: 600; letter-spacing: 0.04em;
+  white-space: nowrap; cursor: pointer;
+}
+.rchip:hover { border-color: var(--muted); }
+.rchip__act { color: var(--muted); font-weight: 500; letter-spacing: 0; }
+.rchip[data-tone="ok"] { border-color: var(--auto); }
+.rchip[data-tone="ok"] .rchip__act { color: var(--auto); }
+.rchip[data-tone="warn"] { border-color: var(--queued); }
+.rchip[data-tone="warn"] .rchip__act { color: var(--queued); }
+.spark__tag {
+  padding: 0 0.3rem; border: 1px solid var(--auto); border-radius: 3px;
+  color: var(--auto); font-size: var(--t-xs); font-weight: 700; letter-spacing: 0.05em;
+}
+@media (max-width: 1150px) { .rchip__act { display: none; } }  /* name only; the rest is the tooltip */
+
 .live { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
 .live__dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--faint); }
 .live.is-up { color: var(--text); }

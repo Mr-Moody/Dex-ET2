@@ -262,6 +262,7 @@ key's outcome in its bottom-right overlay.
 | `F` | Arm the Bay 1 flap jam (causes a contact stall) |
 | `G` | Arm the Bay 2 flap jam |
 | `P` | Arm the Bay 2 pinned bolt (out-of-distribution, refused) |
+| `M` | Switch the recovery backend for the next stall (`dmp` → `hybrid` → `act`), see [Recovery policy (ACT)](#recovery-policy-act) |
 | `R` | Reset |
 
 Without gloves (`--source synthetic`), engaging the clutch on the bay waiting for rescue plays a
@@ -291,6 +292,41 @@ A typical manual run:
 | `--no-hotspot` | Leave the hotspot alone |
 | `--env-file PATH` | Read a different `.env` |
 | `--config PATH` | Stage config (`configs/atc.yaml`) |
+| `--recovery-backend dmp\|hybrid\|act` | How a matched stall is cleared (default `dmp`) |
+| `--act-checkpoint DIR`, `--act-device DEV` | Gated ACT run directory (with `gate.json`) and its torch device |
+| `--record-episodes DIR` | Save every recovery as a LeRobot episode |
+| `--headless --generate N` | Generate N scripted rescue episodes (needs `--record-episodes`) |
+
+## Recovery policy (ACT)
+
+A matched stall is normally cleared by a learned DMP skill (`--recovery-backend dmp`, the
+default and the behaviour before ACT existed). An ACT policy trained on rescue episodes can
+take over for the faults it has been gated on, with the DMP skill behind it.
+
+1. **Collect.** `uv run teleop atc --headless --no-audio --generate 300 --seed 1 --record-episodes data/episodes/gen-001`.
+   Glove rescues are added with `--record-episodes` on a live run.
+2. **Process.** `uv run teleop process --in data/episodes/gen-001 --out data/episodes/gen-001-qc`.
+3. **Train.** Follow the [Verda runbook](docs/training/verda.md) (`scripts/train_act.py`), then copy
+   `models/act/<run>/` back.
+4. **Gate.** `uv run teleop eval --checkpoint models/act/<run> --dataset data/episodes/gen-001-qc`
+   rolls the policy out in simulation per fault and writes `gate.json`. Only faults that pass the
+   bar are handed to ACT.
+5. **Run.** `uv run teleop atc --recovery-backend hybrid --act-checkpoint models/act/<run>`.
+
+| Backend | A matched stall is recovered by |
+|---|---|
+| `dmp` | The learned DMP skill, as always |
+| `hybrid` | ACT if its gate covers this stall and it is healthy, else DMP |
+| `act` | ACT only: a stall it does not cover goes to the operator queue, never to DMP |
+
+The console header shows the backend (`DMP`, `HYBRID`, `ACT`) with the ACT health and its
+inference p95 (`ACT ok 12 ms`); a bay recovered by ACT carries an `ACT` tag in the confidence
+list; the viewer HUD has a `RECOVERY hybrid | ACT ok p95 12 ms | flap` line. If ACT stops being
+healthy (its worker fails), the stage drops to `dmp` and says why in a toast.
+
+**Falling back.** Press `M` (or click the chip) to cycle the backend; it applies from the next
+stall and a recovery already running finishes on its own backend. Start with
+`--recovery-backend dmp` to never use ACT.
 
 ## Other tools
 
