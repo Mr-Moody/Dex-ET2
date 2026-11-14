@@ -1,7 +1,7 @@
 ---
 id: T-173
 title: Offscreen CCTV feed renderer and render worker thread
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/feed-renderer
 depends_on: [T-170, T-171, T-172]
