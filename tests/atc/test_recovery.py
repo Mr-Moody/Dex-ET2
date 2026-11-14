@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -64,9 +65,11 @@ def unoq() -> Iterator[Any]:
 
 # --------------------------------------------------------------------------- DMP golden run
 
-# Captured on main (91ffed4 + docs) before the recovery seam existed. ``recovery_backend: dmp``
-# must reproduce it exactly: same compliance events in the same order on the same bays, after
-# the same number of 60 Hz ticks.
+# Captured on main (5a40c38) before the recovery seam existed. ``recovery_backend: dmp`` must
+# reproduce it exactly: same compliance events in the same order on the same bays, after the
+# same number of 60 Hz ticks, ending at the same wrist positions. The float path differs by
+# platform (MuJoCo/NumPy builds), so ticks and wrist positions are pinned per platform: both
+# were checked unchanged on 5a40c38, this branch and the merge with main 93ee2b8.
 GOLDEN_EVENTS: list[tuple[str, int]] = [
     ("STALL_ALERT", 1),
     ("RESCUE_LOGGED", 1),
@@ -75,11 +78,17 @@ GOLDEN_EVENTS: list[tuple[str, int]] = [
     ("RESCUE_LOGGED", 2),
     ("OOD_REFUSAL", 2),
 ]
-GOLDEN_TICKS = 1143
-GOLDEN_WRIST = (
-    (-1.478592148, -1.977073149, 0.136353216),
-    (2.578930729, -1.881824412, 0.135630299),
-)
+Wrist = tuple[tuple[float, float, float], tuple[float, float, float]]
+GOLDEN_BY_PLATFORM: dict[str, tuple[int, Wrist]] = {
+    "win32": (
+        1143,
+        ((-1.478592148, -1.977073149, 0.136353216), (2.578930729, -1.881824412, 0.135630299)),
+    ),
+    "linux": (  # CI (ubuntu-latest) and WSL Ubuntu
+        1147,
+        ((-1.475288148, -1.977085085, 0.136342682), (2.578923263, -1.881827771, 0.135621698)),
+    ),
+}
 
 
 def _run_stage(unoq: Any) -> tuple[Any, list[ComplianceEvent], int]:
@@ -100,11 +109,15 @@ def test_dmp_mode_script_unchanged(unoq: Any) -> None:
     director, events, ticks = _run_stage(unoq)
     assert director.ok, director.results
     assert [(e.kind, e.bay_id) for e in events] == GOLDEN_EVENTS
-    assert ticks == GOLDEN_TICKS
+    golden = GOLDEN_BY_PLATFORM.get(sys.platform)
+    if golden is None:  # e.g. macOS: no reference captured; the events above still guard it
+        return
+    golden_ticks, golden_wrist = golden
+    assert ticks == golden_ticks
     wrist = tuple(
         tuple(round(float(v), 9) for v in director.co.rig(b).wrist_pose().position) for b in (1, 2)
     )
-    assert wrist == GOLDEN_WRIST
+    assert wrist == golden_wrist
 
 
 # --------------------------------------------------------------------------- backend selection
