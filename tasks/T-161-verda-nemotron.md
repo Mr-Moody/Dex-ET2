@@ -1,7 +1,7 @@
 ---
 id: T-161
 title: Verda Nemotron fleet reasoning co-pilot
-status: claimed
+status: in_review
 owner: ethan
 branch: feat/verda-nemotron-reasoner
 depends_on: [T-100]
