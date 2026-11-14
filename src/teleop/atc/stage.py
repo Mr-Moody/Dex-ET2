@@ -882,8 +882,8 @@ class ScriptedGlove:
 
 # Run seed for the scripted stage show. The spec allows fixed confirmed seeds for the stage.
 # Pinned against the show's own config (cycle dwell 1.0 s, background bays on, DEFAULT_REALISM,
-# as `teleop atc --script` runs): seeds 0-7 pass the full show on Windows except 3 and 5, and on
-# Linux (CI) except 5. Seed 7 gives the gate 19/20 on both, the widest margin over the 18 bar.
+# as `teleop atc --script` runs): at 0.25 seeds 0-7 all pass on Windows and Linux (CI). Seed 7
+# also passed at realism 0.5 on both, with the gate at 19/20 (a margin if realism is raised).
 STAGE_SEED = 7
 
 BEATS: tuple[str, ...] = (

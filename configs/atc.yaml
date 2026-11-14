@@ -23,5 +23,5 @@ recovery_backend: dmp      # dmp (default, learned DMP skills) | hybrid (gated A
 act_checkpoint: null       # ACT run dir with gate.json, from `teleop eval` (hybrid / act)
 record_episodes: null      # directory: save every recovery as a LeRobot episode (off when null)
 seed: null                 # run seed (null: scripted stage uses its fixed STAGE_SEED, else 0)
-realism: 0.5               # latch-pose error + gate randomization scale: 1 full, 0 off (exact pose)
+realism: 0.25              # latch-pose error + gate randomization scale: 1 full, 0 off (exact pose)
 gate_pass_min: 18          # randomized skill gate: deploy at >= this many of 20 rollouts

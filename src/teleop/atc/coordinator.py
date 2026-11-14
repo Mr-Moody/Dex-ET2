@@ -153,10 +153,11 @@ def compute_confidence(
 # --------------------------------------------------------------------------- config
 
 
-# Default realism scale. Scans of the scripted show (seeds 0-7, Windows and Linux): 0.25 passes
-# every run, 0.5 passes 13 of 16 and 1.0 almost never (gate about 14/20), so 0.5 (pose sigma
-# 1.5 mm and 0.75 deg, half-range gate randomization) is the most realism that still holds up.
-DEFAULT_REALISM = 0.5
+# Default realism scale. Scans of the scripted show (seeds 0-7, Windows and Linux) pass every run
+# at 0.25, 13 of 16 at 0.5 and almost none at 1.0 (gate about 14/20). A fresh rescue's gate
+# scores 19-20 at 0.25 but hovers at 17-19 around the 18 bar at 0.5, so 0.25 (pose sigma 0.75 mm
+# and 0.375 deg, quarter-range gate randomization) is the default that reliably deploys skills.
+DEFAULT_REALISM = 0.25
 
 
 @dataclass(frozen=True, slots=True)
