@@ -4,7 +4,7 @@
     teleop unoq [--host unoq.local] [--udp-port 15051] [--tcp-port 15052]
 
 ``--serve`` attaches the MCU operator console (``open_console()``) unless ``--no-console`` is
-given or no MCU is found.
+given, no MCU is found or opening it fails (the service still serves).
 
 Without ``--serve`` it connects (or falls back to the local loopback node), pings it and
 prints which node answered.
@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 def _attach_console(server: UnoQServer) -> McuConsoleBridge | None:
-    transport, kind = open_console()
+    try:
+        transport, kind = open_console()
+    except Exception as exc:  # e.g. arduino-router not ready yet at boot
+        logger.warning("unoq: MCU console unavailable (%s); serving without one", exc)
+        return None
     if kind == "software":
         logger.warning("unoq: no MCU console found; serving without one")
         return None
