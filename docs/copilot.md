@@ -296,3 +296,71 @@ Example output from the scripted stage:
 [16:39:14] BAY 1 GATE_RESULT          VALIDATING -> NOMINAL, C=0.64, bolt 5.6 cm, gate PASS 20/20, frame bay1/side_ortho 7441cd24b6794bb7, 10 rescue frames
 [16:39:20] BAY 2 AUTONOMOUS_STARTED   NOMINAL -> AUTONOMOUS_SKILL, C=0.36, bolt 3.4 cm, frame bay2/cctv 2e55add3d416dc4f
 ```
+
+## Live call-outs and speech (T-212)
+
+```bash
+uv run teleop atc --source synthetic                     # terminal 1; press F to jam Bay 1
+uv run python -m teleop.copilot run                      # terminal 2
+uv run python -m teleop.copilot run --mute --no-images   # print and log only, text-only requests
+```
+
+Flags: `--console URL` (default `COPILOT_CONSOLE_URL`), `--no-images`, `--mute`, `--env-file PATH`
+and `--log-dir DIR` (default `runs/copilot`, gitignored). Without `GEMINI_API_KEY` the command
+still runs: every call-out is the template, spoken with the system voice.
+
+### Call-outs (`teleop.copilot.callouts`, `teleop.copilot.prompts`)
+
+- **Model events:** `stall`, `refused`, `gate_result` and `autonomous_finished` ask the fast model
+  (`COPILOT_FAST_MODEL`, thinking `low`) with the bay's telemetry slice and its latest frame,
+  downscaled to at most 512 px (no frame with `--no-images`). The answer follows
+  `{"say", "detail", "severity"}`; `say` is clipped to 15 words and `detail` to 40.
+- **Templated events:** `rescue_started`, `rescue_released`, `validating` (its deep review is
+  `T-213`) and `autonomous_started` are fully described by telemetry, so they never call a model.
+- **The 1 s template.** If the model has not answered within 1 s, the deterministic template
+  (for example "Bay 1 stalled on a flap jam. Rescue needed.") is spoken at once. If the model's
+  line then arrives while the template is still waiting in the speech queue, it replaces it there;
+  if the template is already being spoken, the model's line is only printed and logged
+  (`(update)`). Model errors and malformed answers speak the template straight away.
+- **8 s hard timeout** (wall clock, on top of the client's per-socket timeout): a later answer is
+  dropped.
+- **One request per bay.** A newer event for a bay drops the older event's pending answer and
+  cancels that bay's lines that are still waiting to be spoken. While the older request is still
+  running, the newer event gets the template.
+
+### Speech (`teleop.copilot.speech`)
+
+- **Queue:** at most 2 lines wait. Alarms jump ahead of other lines; when the queue is full the
+  oldest non-alarm line is dropped (an info line never pushes out an alarm). Lines older than
+  10 s are dropped. Only `say` is spoken, never `detail`.
+- **Gemini TTS** (`COPILOT_TTS_MODEL`) returns a WAV, played with the first available of
+  `paplay`, `aplay`, `afplay` or PowerShell `System.Media.SoundPlayer`.
+- **Fallback:** if TTS fails or takes longer than 4 s, the same line is spoken with the system
+  voice (`System.Speech` on Windows, `say` on macOS, `spd-say`/`espeak` on Linux). The late WAV is
+  never played, so lines are never out of order, but it is cached: template lines repeat, so the
+  next "Clutch engaged on bay 1." plays the Gemini voice at once. The cache holds 32 lines.
+- **Voice:** `Kore`, a clear, firm and neutral prebuilt voice that stays intelligible over a noisy
+  booth. `Charon` is a calmer alternative (`COPILOT_VOICE=Charon`).
+- **`--mute`** speaks nothing; call-outs are still printed and logged.
+
+### Outputs
+
+```text
+[12:01:07] BAY 1 ALARM     Bay 1 stalled on a flap jam. Rescue needed.
+           NOMINAL -> RESCUE, C=0.24, bolt 3.4 of 5.2 cm, fault flap  [template; model slower than 1 s]
+```
+
+`runs/copilot/<date>.jsonl` gets one `event` record per event (bay, states, frame hash) and one
+`callout` record per call-out (source, model, latency, severity, text, frame hash). It never holds
+an image or the API key.
+
+### Demo check (2026-11-14)
+
+`teleop atc --source synthetic --script` and `python -m teleop.copilot run --mute`, run together on
+this laptop without a Gemini key (template path only). All eight scripted events produced their
+call-out 2–3 ms after the event record, in stage order: the Bay 1 stall, the clutch engage and
+release, validating, the gate (20 of 20), Bay 2's autonomous start and finish, and the Bay 2
+refusal. The JSONL log held only frame hashes.
+
+Still to measure with a key: the model's spoken stall call-out (target about 3 s after `F`) and
+how often Gemini TTS beats the 4 s cut-off. Run without `--mute` and add the numbers here.

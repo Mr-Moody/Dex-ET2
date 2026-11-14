@@ -222,6 +222,7 @@ __marimo__/
 # Project
 /data/
 /outputs/
+/runs/
 .env
 third_party/*
 !third_party/README.md

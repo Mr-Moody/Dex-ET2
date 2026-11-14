@@ -380,4 +380,8 @@ if __name__ == "__main__":
         from teleop.copilot.watch import watch_main
 
         raise SystemExit(watch_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["run"]:  # T-212: live spoken call-outs (teleop.copilot.run)
+        from teleop.copilot.run import run_main
+
+        raise SystemExit(run_main(sys.argv[2:]))
     raise SystemExit(main())
