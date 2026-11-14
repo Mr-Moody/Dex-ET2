@@ -447,6 +447,8 @@ def test_m_key_cycles_backend(unoq: Any) -> None:
 _ATC_ARGS = [
     "--headless",
     "--no-audio",
+    "--source",
+    "synthetic",
     "--unoq-host",
     "127.0.0.1",
     "--unoq-tcp-port",

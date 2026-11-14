@@ -192,24 +192,59 @@ its keys are unset, so the demo runs with an empty `.env`.
 | `NEMOTRON_MODEL` | `kimi-k3-1-pro` (the variable name is historical) | That default |
 | `SOLANA_RPC_URL`, `SOLANA_KEYPAIR_PATH` | Compliance chain | Local hash-chained audit log |
 | `UNOQ_HOST`, `UNOQ_PORT`, `UNOQ_SERIAL_PORT` | Real UNO Q edge node | In-process loopback mock |
-| `HOTSPOT_PASSWORD` | Laptop hotspot for the gloves (Windows) | Only needed with `--hotspot` |
+| `HOTSPOT_PASSWORD` | Laptop hotspot for the gloves (Windows) | Hotspot light stays off; fatal only with an explicit `--hotspot` |
 
 Kimi must be enabled for your project in the Verda Console under Inference. Otherwise requests
 return `subscription_required` and the reasoner quietly uses its offline text.
 
 ## Run the demo
 
-Run everything from the repo root.
+Run everything from the repo root. At the booth, one command brings everything up:
+
+```bash
+uv run teleop atc
+```
+
+It keeps the laptop hotspot up, listens for the Rokoko Studio glove stream on UDP 14043, connects
+to the UNO Q at `unoq.local` (or starts a local loopback node and swaps the board in when it
+appears), and opens the ops console with a live health strip. Start Rokoko Studio streaming
+(custom JSON v3 to `127.0.0.1:14043`) and power the UNO Q first; nothing else to configure. For
+the board itself, see [`firmware/unoq_app/README.md`](firmware/unoq_app/README.md).
+
+Without the hardware, pass `--source synthetic` (the scripted glove) and, if you like, `--script`:
 
 | What | Command |
 |---|---|
-| Scripted demo in the browser ops console (default) | `uv run teleop atc --source synthetic --script` |
+| Booth: gloves, UNO Q, hotspot, health strip | `uv run teleop atc` |
+| Scripted demo in the browser ops console | `uv run teleop atc --source synthetic --script` |
 | Scripted demo in the MuJoCo window | `uv run teleop atc --source synthetic --script --display viewer` |
 | Drive it yourself with the keyboard | `uv run teleop atc --source synthetic` |
 | Headless check (exits 0 only if all 6 beats pass) | `uv run teleop atc --source synthetic --headless --script --no-audio` |
-| With the real gloves (start Rokoko Studio streaming first) | `uv run teleop atc --source studio --script` |
 
-The console is served at <http://127.0.0.1:8765/> and opens in your browser.
+The console is served at <http://127.0.0.1:8765/> and opens in your browser. `--headless` never
+touches the hotspot and runs no health checks.
+
+### Health strip
+
+Three lights sit above the camera wall. Green is OK, amber is a warning, red is a failure and
+grey is off. A light that is not green says what to check; hover a green one for its detail. The
+MuJoCo viewer (`--display viewer`) shows the same levels as a line of HUD text, without Reconnect.
+
+| Light | Green when | Otherwise |
+|---|---|---|
+| Hotspot | The hotspot is up and at least one device has joined | Amber: up but nobody joined. Red: off or an error. Grey: `--no-hotspot`, not Windows, or no `HOTSPOT_PASSWORD` in `.env` |
+| Gloves | Right-hand frames arrived in the last 0.5 s | Red after 2 s without packets, or if UDP 14043 is taken. Grey with `--source synthetic` |
+| Panel | The UNO Q answers and its buttons sent a heartbeat in the last 0.5 s | Amber: board up but buttons not heard. Red: no board, running on the local loopback node (the keyboard still works) |
+
+**Reconnect** appears on a light that is not green and can be retried. It runs in the background,
+so the simulation never stalls: for Hotspot it brings the hotspot up again, for Gloves it reopens
+the Studio listener, and for Panel it tries the board now (and reopens `--serial-port` if set).
+The panel also retries the board by itself every 10 s, and swaps to the loopback node after two
+missed pings; the learned skills move with it.
+
+If the gloves are not green when you engage the clutch on a queued bay, that rescue plays the
+scripted rescue instead and the console says "gloves offline: playing scripted rescue". The
+choice holds until you release the clutch.
 
 The `--script` run plays six stage beats: routine autonomy, a fault and contact stall, the
 operator rescue, the edge skill fit and 3-rollout sim gate, Bay 2 pose generalization, and the
@@ -236,8 +271,8 @@ key's outcome in its bottom-right overlay.
 
 Without gloves (`--source synthetic`), engaging the clutch on the bay waiting for rescue plays a
 scripted rescue: the hand presses the stopper flap and slides the bolt clear, then holds. The
-hand stays still the rest of the time. With `--source studio`, your gloves drive the hand
-instead.
+hand stays still the rest of the time. With the default `--source studio`, your gloves drive the
+hand instead (or the scripted rescue plays, if the Gloves light is not green at the clutch).
 
 A typical manual run:
 
@@ -255,8 +290,10 @@ A typical manual run:
 | `--console-port N`, `--console-fps N` | Console server port and feed frame rate |
 | `--no-audio` | No spoken or audio cues |
 | `--no-background` | Leave out background Bays 3 and 4 (lighter) |
-| `--unoq-host IP` / `--serial-port PORT` | Use the real UNO Q instead of the mock |
-| `--hotspot` | Keep the laptop hotspot up for the gloves |
+| `--source studio\|synthetic\|replay` | Glove input (default `studio`; `synthetic` needs no hardware) |
+| `--unoq-host IP` / `--serial-port PORT` | Optional: a UNO Q not at `unoq.local`, or its MCU console on a laptop serial port |
+| `--hotspot` | Optional: the hotspot is on by default; this also makes a missing `HOTSPOT_PASSWORD` fatal |
+| `--no-hotspot` | Leave the hotspot alone |
 | `--env-file PATH` | Read a different `.env` |
 | `--config PATH` | Stage config (`configs/atc.yaml`) |
 

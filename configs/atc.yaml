@@ -1,5 +1,5 @@
 # teleop atc defaults. Every key can be overridden by the matching command-line flag.
-source: synthetic          # studio | synthetic | replay (glove input for operator rescues)
+source: studio             # studio (scripted rescue when no glove packets) | synthetic | replay
 replay_file: null          # required with source: replay
 studio:
   host: 0.0.0.0
@@ -10,6 +10,7 @@ unoq_host: unoq.local      # UNO Q edge node; falls back to a local loopback nod
 unoq_udp_port: 15051
 unoq_tcp_port: 15052
 serial_port: null          # UNO Q MCU console on a laptop serial port (UNOQ_SERIAL_PORT)
+hotspot: true              # keep the booth hotspot up (Windows; --no-hotspot; off with --headless)
 background_bays: true      # kinematic Bays 3-4 for the 4-bay layout
 cycle_dwell_s: 1.0         # pause between pallet cycles on a bay
 audio: true                # spoken status cues (always off with --headless)
