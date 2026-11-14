@@ -46,6 +46,24 @@ train = [
 viz = [
     "rerun-sdk>=0.43.2",
 ]
+# ACT training and live inference on the laptop GPU and on Verda. torch/torchvision come from
+# the PyTorch CUDA 13.2 index (see [tool.uv.sources]). The default `uv sync` (dev only) installs
+# no torch. The lock holds one torch, so `train` (and CI's `--all-groups`) resolve to the same
+# CUDA build; on Linux that matches PyPI's default CUDA 13 wheel, macOS keeps PyPI torch.
+act = [
+    "lerobot[training]>=0.7,<0.8",
+    "torch>=2.15,<2.16",
+    "torchvision>=0.29,<0.30",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132", group = "act", marker = "sys_platform != 'darwin'" }]
+torchvision = [{ index = "pytorch-cu132", group = "act", marker = "sys_platform != 'darwin'" }]
 
 [tool.ruff]
 line-length = 100
