@@ -1,7 +1,7 @@
 ---
 id: T-179
 title: Realism upgrades (pose estimate, touch re-localization, randomized gate)
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/realism-upgrades
 depends_on: [T-178]
