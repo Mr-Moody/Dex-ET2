@@ -41,20 +41,20 @@ class QCResult:
     warnings: list[str] = field(default_factory=lambda: [], compare=False)
 
 
-def _open_dataset(root: Path) -> Any:
+def open_dataset(root: Path) -> Any:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     mod: Any = importlib.import_module("lerobot.datasets.lerobot_dataset")
     return mod.LeRobotDataset(f"local/{root.name}", root=root)
 
 
-def _num_episodes(root: Path) -> int:
+def num_episodes(root: Path) -> int:
     info = root / "meta" / "info.json"
     if not info.is_file():
         return 0
     return int(json.loads(info.read_text(encoding="utf-8")).get("total_episodes", 0))
 
 
-def _read_sidecar(root: Path) -> dict[int, dict[str, Any]]:
+def read_sidecar(root: Path) -> dict[int, dict[str, Any]]:
     path = root / SIDECAR
     if not path.is_file():
         return {}
@@ -64,6 +64,17 @@ def _read_sidecar(root: Path) -> dict[int, dict[str, Any]]:
             row = json.loads(line)
             out[int(row["episode_index"])] = row
     return out
+
+
+def episode_actions(ds: Any, ep: int) -> NDArray[np.float32]:
+    """The ``(frames, action_dim)`` action array of episode ``ep`` of an open dataset."""
+    row = ds.meta.episodes[ep]
+    lo, hi = int(row["dataset_from_index"]), int(row["dataset_to_index"])
+    if hi <= lo:
+        names = list(ds.meta.features["action"].get("names") or [])
+        return np.zeros((0, max(len(names), 1)), np.float32)
+    col = ds.hf_dataset[lo:hi]["action"]
+    return np.stack([np.asarray(a, dtype=np.float32) for a in col])
 
 
 def _score_frames(meta: Mapping[str, Any], n: int) -> list[int] | None:
@@ -158,22 +169,15 @@ def run_qc(
     ranges: Mapping[str, tuple[float, float]] | None = None,
 ) -> list[QCResult]:
     root = Path(ds_root)
-    if _num_episodes(root) == 0:
+    if num_episodes(root) == 0:
         return []
-    ds = _open_dataset(root)
+    ds = open_dataset(root)
     names = list(ds.meta.features["action"].get("names") or [])
-    sidecar = _read_sidecar(root)
+    sidecar = read_sidecar(root)
     fps = int(ds.fps)
     results: list[QCResult] = []
     for ep in range(int(ds.meta.total_episodes)):
-        row = ds.meta.episodes[ep]
-        lo, hi = int(row["dataset_from_index"]), int(row["dataset_to_index"])
-        col = ds.hf_dataset[lo:hi]["action"]
-        actions = (
-            np.stack([np.asarray(a, dtype=np.float32) for a in col])
-            if hi > lo
-            else np.zeros((0, max(len(names), 1)), np.float32)
-        )
+        actions = episode_actions(ds, ep)
         meta = sidecar.get(ep, {})
         warns: list[str] = []
         status: Any = meta.get("source_status")
@@ -326,8 +330,8 @@ def write_clean(
         for r in kept:  # validate every source before anything is written
             src = r.source_root or Path(ds_root)
             if src not in datasets:
-                datasets[src] = _open_dataset(src)
-                sidecars[src] = _read_sidecar(src)
+                datasets[src] = open_dataset(src)
+                sidecars[src] = read_sidecar(src)
         first = next(iter(datasets.values()))
         for src, d in datasets.items():
             if int(d.fps) != int(first.fps) or _clean_features(d) != _clean_features(first):
