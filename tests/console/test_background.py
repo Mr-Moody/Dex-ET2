@@ -109,3 +109,28 @@ def test_player_leaves_active_bays_alone() -> None:
 def test_player_skips_absent_bays() -> None:
     model = build_four_bay_scene(include_background_bays=False)
     assert BackgroundPlayer(load_cycle(), model).apply(mj.MjData(model), 0.0) == {}
+
+
+@needs_models
+def test_player_wraps_arm_and_conveyor_pitch_without_snapping() -> None:
+    from teleop.console.background import PHASE_OFFSETS
+    from teleop.sim.cells import PACK_PITCH_M
+
+    model = build_four_bay_scene()
+    data = mj.MjData(model)
+    player = BackgroundPlayer(load_cycle(), model)
+    _, _, loop_s = player.loop_params()
+    t_wrap = (1.0 - PHASE_OFFSETS[3]) * loop_s
+
+    player.apply(data, t_wrap - 1e-4)
+    q_before = float(data.qpos[model.joint("bay3/joint1").qposadr[0]])
+    st_before = player.conveyor_statuses(t_wrap - 1e-4)[3]
+
+    player.apply(data, t_wrap + 1e-4)
+    q_after = float(data.qpos[model.joint("bay3/joint1").qposadr[0]])
+    st_after = player.conveyor_statuses(t_wrap + 1e-4)[3]
+
+    assert q_before == pytest.approx(q_after, abs=2e-3)
+    assert st_before.pack_dy_m == pytest.approx(PACK_PITCH_M, abs=2e-3)
+    assert st_after.pack_dy_m == pytest.approx(0.0, abs=2e-3)
+    assert st_before.belt_dist_m == pytest.approx(st_after.belt_dist_m, abs=2e-3)

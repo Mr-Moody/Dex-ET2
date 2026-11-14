@@ -398,3 +398,74 @@ def test_zoom_pan_and_orbit_adjust_private_model_only(monkeypatch: pytest.Monkey
         assert np.allclose(r.model.cam_pos[0], orig_pos)
     finally:
         r.close()
+
+
+def test_conveyor_cleats_and_latches_move_with_belt_and_estop_freezes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teleop.atc.hud import ConveyorStatus
+    from teleop.console import render as render_mod
+    from teleop.console.layout import FeedSpec
+    from teleop.sim.cells import BEACON_ESTOP_RGBA, BEACON_FEED_RGBA
+
+    class StubRenderer:
+        def __init__(self, model: Any, height: int, width: int) -> None:
+            self.shape = (height, width, 3)
+
+        def update_scene(self, data: Any, camera: str, **kwargs: Any) -> None:
+            pass
+
+        def render(self) -> np.ndarray:
+            return np.zeros(self.shape, dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(render_mod.mj, "Renderer", StubRenderer)
+    xml = """<mujoco><worldbody>
+      <camera name="overview" pos="0 -5 3" fovy="55"/>
+      <geom name="conveyor_cleat_bay1_00" type="box" pos="-1.5 -2.0 -0.05" size="0.25 0.01 0.003"/>
+      <geom name="bay1/conveyor_beacon" type="cylinder" pos="-1.9 -2.3 0.2" size="0.03 0.03"/>
+      <body name="bay1/latch_base" pos="-1.5 -2.0 0.02"><geom size="0.05"/></body>
+      <body name="bay1/cell_jig_pack" pos="-1.5 -2.0 0.0"><geom size="0.05"/></body>
+      <body><freejoint/><geom size="0.1"/></body></worldbody></mujoco>"""
+    model = mj.MjModel.from_xml_string(xml)
+    cleat_id = int(model.geom("conveyor_cleat_bay1_00").id)
+    beacon_id = int(model.geom("bay1/conveyor_beacon").id)
+    latch_id = int(model.body("bay1/latch_base").id)
+    pack_id = int(model.body("bay1/cell_jig_pack").id)
+    orig_cleat_y = float(model.geom_pos[cleat_id, 1])
+    orig_latch_y = float(model.body_pos[latch_id, 1])
+    orig_pack_y = float(model.body_pos[pack_id, 1])
+
+    feeding = HudView(
+        bays=_view().bays,
+        queue=(),
+        conveyors=(ConveyorStatus(1, "feeding", 0.12, 0.08),),
+    )
+    estopped = HudView(
+        bays=_view().bays,
+        queue=(1,),
+        conveyors=(ConveyorStatus(1, "estop", 0.12, 0.08),),
+    )
+    r = FeedRenderer(model, None)
+    try:
+        r.render(
+            SimSnapshot.capture(mj.MjData(model), feeding, 0.0),
+            [FeedSpec(0, "overview", 0, "main", 64, 48)],
+            1.0,
+        )
+        assert float(r.model.geom_pos[cleat_id, 1]) == pytest.approx(orig_cleat_y + 0.12)
+        assert float(r.model.body_pos[latch_id, 1]) == pytest.approx(orig_latch_y + 0.08)
+        assert float(r.model.body_pos[pack_id, 1]) == pytest.approx(orig_pack_y + 0.08)
+        assert np.allclose(r.model.geom_rgba[beacon_id], BEACON_FEED_RGBA)
+        assert float(model.body_pos[latch_id, 1]) == pytest.approx(orig_latch_y)
+
+        r.render(
+            SimSnapshot.capture(mj.MjData(model), estopped, 0.0),
+            [FeedSpec(0, "overview", 0, "main", 64, 48)],
+            2.0,
+        )
+        assert np.allclose(r.model.geom_rgba[beacon_id], BEACON_ESTOP_RGBA)
+    finally:
+        r.close()

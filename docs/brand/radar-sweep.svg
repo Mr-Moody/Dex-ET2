@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="480" height="480" role="img" aria-label="Radar sweep logo">
+  <defs>
+    <mask id="gaps" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
+      <rect width="120" height="120" fill="#fff"/>
+      <g fill="#000">
+        <circle cx="108.9" cy="77.8" r="9"/><circle cx="102.6" cy="30.2" r="9"/><circle cx="60" cy="8" r="9"/>
+        <circle cx="17.4" cy="30.2" r="9"/><circle cx="11.1" cy="77.8" r="9"/>
+      </g>
+    </mask>
+  </defs>
+  <g mask="url(#gaps)">
+    <path d="M60 60 L102.6 30.2 A52 52 0 0 1 108.9 77.8 Z" fill="#e8590c" fill-opacity="0.9"/>
+    <g fill="none" stroke="#14202e" stroke-width="4">
+      <circle cx="60" cy="60" r="52"/><circle cx="60" cy="60" r="32"/><circle cx="60" cy="60" r="12"/>
+    </g>
+  </g>
+  <g fill="#14202e">
+    <circle cx="108.9" cy="77.8" r="6"/><circle cx="102.6" cy="30.2" r="6"/><circle cx="60" cy="8" r="6"/>
+    <circle cx="17.4" cy="30.2" r="6"/><circle cx="11.1" cy="77.8" r="6"/>
+    <circle cx="60" cy="60" r="4"/>
+  </g>
+</svg>

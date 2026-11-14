@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from teleop.atc.hud import STATE_LABELS, HudView
+from teleop.atc.hud import STATE_LABELS, ConveyorStatus, HudView
 from teleop.atc.types import BOLT_CLEARED_M, N_BAYS, BaySnapshot, BayState
 from teleop.console.layout import FeedSpec
 
@@ -136,8 +136,15 @@ class TelemetryAdapter:
         snaps: Mapping[int, BaySnapshot],
         background_confidence: Mapping[int, float],
         faults: Mapping[int, dict[str, str]],
+        conveyors: Mapping[int, ConveyorStatus],
     ) -> dict[str, Any]:
         hist = self._history[k]
+        conv = conveyors.get(k)
+        conv_dict = (
+            None
+            if conv is None
+            else {"mode": conv.mode, "pack_dy_cm": round(conv.pack_dy_m * 100.0, 2)}
+        )
         if k in snaps:
             s = snaps[k]
             hist.append(round(s.confidence, 3))
@@ -153,6 +160,7 @@ class TelemetryAdapter:
                 "replayed": False,
                 "x_bolt_cm": round(s.x_bolt_m * 100.0, 2),
                 "fault": faults.get(k),
+                "conveyor": conv_dict,
                 "pose_sigma_mm": _finite_or_none(s.pose_sigma_mm),
                 "pose_sigma_yaw_deg": _finite_or_none(s.pose_sigma_yaw_deg),
                 "touch_correction_mm": _finite_or_none(s.touch_correction_mm),
@@ -173,6 +181,7 @@ class TelemetryAdapter:
                 "replayed": True,
                 "x_bolt_cm": None,
                 "fault": None,
+                "conveyor": conv_dict,
                 "pose_sigma_mm": None,
                 "pose_sigma_yaw_deg": None,
                 "touch_correction_mm": None,
@@ -189,6 +198,7 @@ class TelemetryAdapter:
             "replayed": False,
             "x_bolt_cm": None,
             "fault": None,
+            "conveyor": None,
             "pose_sigma_mm": None,
             "pose_sigma_yaw_deg": None,
             "touch_correction_mm": None,
@@ -203,6 +213,7 @@ class TelemetryAdapter:
         *,
         view_state: Any = None,
         dummy_status: Mapping[str, Any] | None = None,
+        background_conveyors: Mapping[int, ConveyorStatus] | None = None,
     ) -> dict[str, Any]:
         """One telemetry message. Call at the telemetry rate: each call adds a history sample."""
         wall = self._clock().strftime("%H:%M:%S")
@@ -227,6 +238,11 @@ class TelemetryAdapter:
         self._track_line("reasoning", view.reasoning, sim_t, wall)
 
         faults = {bay: {"kind": kind, "phase": phase} for bay, kind, phase in view.faults}
+        conveyors: dict[int, ConveyorStatus] = (
+            dict(background_conveyors) if background_conveyors is not None else {}
+        )
+        for c in view.conveyors:
+            conveyors[c.bay_id] = c
         g = view.gate
         gate = None
         if any(v is not None for v in (g.fit_ms, g.passed, g.total, g.ok)):
@@ -248,6 +264,8 @@ class TelemetryAdapter:
         mains = [f for f in feeds_t if f.role == "main"]
         if not mains:
             mode = "grid"
+        elif any(f.camera == "overview" for f in mains):
+            mode = "overview"
         elif r.bay_id is not None and any(f.bay == r.bay_id for f in mains):
             mode = "rescue"
         else:
@@ -267,7 +285,7 @@ class TelemetryAdapter:
                     for f in feeds_t
                 ],
                 "bays": [
-                    self._bay_entry(k, snaps, background_confidence, faults)
+                    self._bay_entry(k, snaps, background_confidence, faults, conveyors)
                     for k in range(1, N_BAYS + 1)
                 ],
                 "bolt_clear_cm": round(BOLT_CLEARED_M * 100.0, 2),

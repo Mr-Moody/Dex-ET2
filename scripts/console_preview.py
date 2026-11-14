@@ -20,7 +20,8 @@ from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports]  (Pill
 
 from teleop.atc.hud import GateStatus, HudView, RescueStatus
 from teleop.atc.types import BaySnapshot, BayState
-from teleop.console.layout import FeedSpec, feed_layout
+from teleop.console.layout import FeedSpec, ViewState, feed_layout
+from teleop.console.run import _next_view_state
 from teleop.console.server import ConsoleServer
 from teleop.console.telemetry import TelemetryAdapter
 
@@ -122,20 +123,38 @@ def fake_health(now: float) -> list[dict[str, object]]:
 
 
 def placeholder_jpeg(feed: FeedSpec, t: float) -> bytes:
-    img = Image.new("RGB", (feed.width, feed.height), (22, 26, 30))
+    img = Image.new("RGB", (feed.width, feed.height), (29, 44, 38))
     draw = ImageDraw.Draw(img)
-    for i in range(0, feed.width, 40):
-        draw.line([(i, 0), (i, feed.height)], fill=(30, 35, 40))
-    x = int((t * 60) % feed.width)
-    draw.rectangle([x, feed.height * 0.55, x + 60, feed.height * 0.62], fill=(242, 183, 5))
-    draw.text((16, feed.height // 2 - 10), f"{feed.camera}  ({feed.role})", fill=(200, 205, 210))
+    # Sustainable warehouse clerestory band + conveyor belt + moving EV battery packs.
+    draw.rectangle([0, 0, feed.width, int(feed.height * 0.28)], fill=(44, 68, 58))
+    belt_y0, belt_y1 = int(feed.height * 0.52), int(feed.height * 0.68)
+    draw.rectangle([0, belt_y0 - 4, feed.width, belt_y1 + 4], fill=(42, 118, 82))
+    draw.rectangle([0, belt_y0, feed.width, belt_y1], fill=(28, 32, 34))
+    for i in range(-1, feed.width // 60 + 2):
+        cx = int((i * 60 + t * 50) % (feed.width + 60)) - 30
+        draw.line([(cx, belt_y0), (cx, belt_y1)], fill=(60, 68, 70), width=2)
+    x = int((t * 50) % feed.width)
+    draw.rectangle(
+        [x, belt_y0 + 4, x + 64, belt_y1 - 4], fill=(38, 128, 112), outline=(242, 183, 5)
+    )
+    draw.text(
+        (16, int(feed.height * 0.36)),
+        f"{feed.camera} · EV Battery Recycling Conveyor ({feed.role})",
+        fill=(218, 232, 224),
+    )
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=70)
+    img.save(buf, format="JPEG", quality=75)
     return buf.getvalue()
 
 
 def run(port: int, hold_rescue: bool, bays: Sequence[int]) -> None:
-    server = ConsoleServer(port=port)
+    vstate = [ViewState()]
+
+    def on_msg(msg: dict[str, object]) -> None:
+        if msg.get("type") == "view":
+            vstate[0] = _next_view_state(vstate[0], msg)
+
+    server = ConsoleServer(port=port, on_client_message=on_msg)
     server.start()
     print(f"console preview: {server.url}  (Ctrl+C to stop)", flush=True)
     adapter = TelemetryAdapter(bays, [b for b in (3, 4) if b in bays])
@@ -146,10 +165,10 @@ def run(port: int, hold_rescue: bool, bays: Sequence[int]) -> None:
             now = time.monotonic() - t0
             t = now % LOOP_S
             view = scene(t, hold_rescue)
-            feeds = feed_layout(bays, view.rescue.bay_id)
+            feeds = feed_layout(bays, view.rescue.bay_id, vstate[0])
             if now >= next_tel:
                 bg = {3: 0.96 + 0.03 * math.sin(now), 4: 0.95 + 0.03 * math.cos(now * 1.3)}
-                msg = adapter.build(view, now, feeds, bg)
+                msg = adapter.build(view, now, feeds, bg, view_state=vstate[0])
                 msg["health"] = fake_health(now)
                 server.publish_telemetry(msg)
                 next_tel += 1.0 / TELEMETRY_HZ

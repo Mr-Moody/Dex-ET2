@@ -61,7 +61,7 @@ def bays_in_model(model: Any) -> tuple[int, ...]:
 
 def _next_view_state(prev: ViewState, msg: Mapping[str, Any]) -> ViewState:
     mode_raw = msg.get("mode", prev.mode)
-    mode: LayoutMode = mode_raw if mode_raw in ("auto", "grid", "pin") else prev.mode
+    mode: LayoutMode = mode_raw if mode_raw in ("auto", "grid", "pin", "overview") else prev.mode
     pinned = prev.pinned_bay
     if "pinned_bay" in msg:
         pb = msg["pinned_bay"]
@@ -97,7 +97,7 @@ def _next_view_state(prev: ViewState, msg: Mapping[str, Any]) -> ViewState:
         order = tuple(dedup)
     zooms = dict(prev.zooms)
     zcam = msg.get("zoom_cam")
-    if isinstance(zcam, str) and "/" in zcam:
+    if isinstance(zcam, str) and ("/" in zcam or zcam == "overview"):
         if msg.get("reset_zoom"):
             zooms.pop(zcam, None)
         else:

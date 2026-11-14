@@ -19,7 +19,7 @@ from typing import Any
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
 from teleop.atc.types import N_BAYS, LatchPose
-from teleop.sim.cells import add_cell, apply_visual_style, look_at_xyaxes
+from teleop.sim.cells import add_cell, add_warehouse, apply_visual_style, look_at_xyaxes
 from teleop.sim.hands import REPO_ROOT, load_hand
 from teleop.sim.ik import ARM_JOINTS, PANDA_HOME
 from teleop.sim.latch import add_latch_to_spec
@@ -29,13 +29,13 @@ mj: Any = _mujoco
 
 PANDA_XML = REPO_ROOT / "third_party" / "menagerie" / "franka_emika_panda" / "panda_nohand.xml"
 
-# 4 m apart on a 2x2 grid: each bay sits in its own walled cell (``teleop.sim.cells``), so no
-# bay's CCTV camera can see another bay.
+# Spread across the recycling warehouse on a 6.4 m x 6.8 m grid so each bay sits on its own
+# segmented conveyor line with dedicated infeed/outfeed machines and wide logistics aisles.
 BAY_BASES: dict[int, tuple[float, float, float]] = {
-    1: (-2.0, -2.0, 0.0),
-    2: (2.0, -2.0, 0.0),
-    3: (-2.0, 2.0, 0.0),
-    4: (2.0, 2.0, 0.0),
+    1: (-3.2, -3.4, 0.0),
+    2: (3.2, -3.4, 0.0),
+    3: (-3.2, 3.4, 0.0),
+    4: (3.2, 3.4, 0.0),
 }
 ACTIVE_BAYS = (1, 2)
 BACKGROUND_BAYS = (3, 4)
@@ -166,7 +166,7 @@ def _new_spec(name: str) -> Any:
     world.add_geom(
         name="floor",
         type=mj.mjtGeom.mjGEOM_PLANE,
-        size=[7.0, 7.0, 0.1],
+        size=[14.0, 14.0, 0.1],
         rgba=[0.32, 0.34, 0.38, 1.0],
         friction=[1.0, 0.005, 0.0001],
     )
@@ -276,11 +276,11 @@ def _add_bay(spec: Any, bay_id: int, local_latch: LatchPose, *, collide: bool) -
 
 
 def _add_overview_camera(spec: Any, include_background: bool) -> None:
-    """High bird's-eye view down into the open-top cells (the passive viewer's fallback)."""
-    target = (0.3, 0.0 if include_background else -2.0, 0.0)
-    pos = (0.3, target[1] - 4.5, 9.0)
+    """Elevated mezzanine view across the battery-recycling warehouse and 4 conveyor cells."""
+    target = (0.45, 0.20 if include_background else -3.0, -0.05)
+    pos = (0.45, -8.25, 4.35 if include_background else 3.20)
     spec.worldbody.add_camera(
-        name=OVERVIEW_CAMERA, pos=list(pos), xyaxes=look_at_xyaxes(pos, target), fovy=60.0
+        name=OVERVIEW_CAMERA, pos=list(pos), xyaxes=look_at_xyaxes(pos, target), fovy=56.0
     )
 
 
@@ -292,6 +292,7 @@ def build_four_bay_spec(
     from teleop.retarget.clutch import add_rescue_cameras
 
     spec = _new_spec("atc_four_bay")
+    add_warehouse(spec, include_background_bays)
     poses = {1: bay1_pose, 2: bay2_pose}
     if include_background_bays:
         poses.update({bay_id: CANONICAL_LATCH for bay_id in BACKGROUND_BAYS})

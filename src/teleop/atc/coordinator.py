@@ -60,6 +60,7 @@ from teleop.atc.estimate import (
     contact_offset,
     touch_correct,
 )
+from teleop.atc.hud import ConveyorMode, ConveyorStatus
 from teleop.atc.recovery import (
     BaySignals,
     CoordinatorObserver,
@@ -116,6 +117,7 @@ from teleop.sim.bays import (
     build_four_bay_scene,
     reset_robot_home,
 )
+from teleop.sim.cells import CONVEYOR_SPEED_M_S, PACK_PITCH_M
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
@@ -403,6 +405,10 @@ class _Bay:
     prev_cmd_pos: FloatArray | None = None
     prev_wrist_pos: FloatArray | None = None
     outcome: str = ""
+    belt_mode: ConveyorMode = "paused"
+    belt_transfer: bool = False
+    belt_dist_m: float = 0.0
+    pack_dy_m: float = 0.0
 
 
 class AtcCoordinator:
@@ -591,6 +597,18 @@ class AtcCoordinator:
     def outcome(self, bay_id: int) -> str:
         return self._bays[bay_id].outcome
 
+    def conveyor_status(self, bay_id: int) -> ConveyorStatus:
+        bay = self._bays[bay_id]
+        return ConveyorStatus(
+            bay_id=bay_id,
+            mode=bay.belt_mode,
+            belt_dist_m=bay.belt_dist_m,
+            pack_dy_m=bay.pack_dy_m,
+        )
+
+    def conveyors(self) -> tuple[ConveyorStatus, ...]:
+        return tuple(self.conveyor_status(b) for b in sorted(self._bays))
+
     def estimate(self, bay_id: int) -> LatchEstimate:
         return self._bays[bay_id].rig.estimate
 
@@ -656,6 +674,9 @@ class AtcCoordinator:
         bay.match = None
         bay.skill_id = None
         bay.outcome = ""
+        if not bay.belt_transfer:
+            bay.pack_dy_m = 0.0
+            bay.belt_mode = "paused"
         bay.breach_lock = False
         bay.trigger_reason = ""
         bay.confidence = 1.0
@@ -688,7 +709,37 @@ class AtcCoordinator:
         for bay in self._bays.values():
             self._sense(bay)
         self._promote()
+        self._update_conveyors(console)
         return self.snapshots()
+
+    def _update_conveyors(self, console: ConsoleInputState) -> None:
+        step = CONVEYOR_SPEED_M_S * CONTROL_DT
+        for bay in self._bays.values():
+            if console.estop or bay.state in (
+                BayState.STALLED,
+                BayState.QUEUED,
+                BayState.RESCUE,
+                BayState.OOD_ESCALATED,
+                BayState.VALIDATING,
+            ):
+                bay.belt_mode = "estop"
+                continue
+            if bay.belt_transfer:
+                bay.belt_mode = "feeding"
+                bay.pack_dy_m += step
+                bay.belt_dist_m += step
+                if bay.pack_dy_m >= PACK_PITCH_M:
+                    # Seamless modular wrap: incoming pack lands at 0.0 right as latch resets.
+                    bay.pack_dy_m = 0.0
+                    bay.belt_transfer = False
+                    bay.belt_mode = "paused"
+                    if bay.pending_latch is not None:
+                        jam, pin = bay.pending_latch
+                        bay.pending_latch = None
+                        bay.rig.reset_latch(flap_jammed=jam, bolt_pinned=pin)
+                continue
+            bay.belt_mode = "paused"
+            bay.pack_dy_m = 0.0
 
     # ------------------------------------------------------------------ control phase
 
@@ -754,6 +805,15 @@ class AtcCoordinator:
     def _control_approach(self, bay: _Bay) -> None:
         plan = bay.approach
         assert plan is not None
+        if bay.belt_transfer:
+            # Lift to hover and wait above the belt while the cleared pack glides to +PACK_PITCH_M
+            # and the fresh upstream pack glides into 0.0 (preserving the open bolt until wrap).
+            if plan.index < 2:
+                bay.hold_pose = plan.step()
+            self._command(
+                bay, bay.hold_pose or bay.rig.wrist_pose(), self.routine.fingers, v_cmd=0.0
+            )
+            return
         if plan.index >= 1 and bay.pending_latch is not None:  # lifted clear: reset the latch
             jam, pin = bay.pending_latch
             bay.pending_latch = None
@@ -906,9 +966,13 @@ class AtcCoordinator:
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
                 bay.outcome = "cleared"
-                # Hold where the wrist is, not at the push target that leads it: a held lead
-                # keeps driving the bolt into its end stop through the stiff Inspire finger.
-                bay.hold_pose = rig.wrist_pose()
+                bay.belt_transfer = True
+                # Lift slightly clear of the bolt hook so the conveyor can advance the cleared pack.
+                wrist = rig.wrist_pose()
+                bay.hold_pose = wrist
+                bay.move = SmoothMove(
+                    wrist, translate_pose(wrist, np.array([0.0, 0.0, 0.08])), 0.25
+                )
                 bay.detector.reset()
                 return
             trigger = bay.detector.update(
@@ -1216,9 +1280,12 @@ class AtcCoordinator:
         act = rec is not None and rec.kind == "act"
         bay.auto = None
         bay.outcome = "cleared autonomously"
+        bay.belt_transfer = True
         bay.state = BayState.NOMINAL
         bay.routine_active = False
-        bay.hold_pose = bay.rig.wrist_pose()
+        wrist = bay.rig.wrist_pose()
+        bay.hold_pose = wrist
+        bay.move = SmoothMove(wrist, translate_pose(wrist, np.array([0.0, 0.0, 0.08])), 0.25)
         bay.prev_cmd_pos = None
         by = "the ACT policy" if act else (skill.skill_id if skill else "?")
         metadata: dict[str, Any] = {
@@ -1380,7 +1447,10 @@ class AtcCoordinator:
             bay.outcome = "rescued, skill rejected by validation gate"
         bay.state = BayState.NOMINAL
         bay.routine_active = False
-        bay.hold_pose = bay.rig.wrist_pose()
+        bay.belt_transfer = True
+        wrist = bay.rig.wrist_pose()
+        bay.hold_pose = wrist
+        bay.move = SmoothMove(wrist, translate_pose(wrist, np.array([0.0, 0.0, 0.08])), 0.25)
         bay.prev_cmd_pos = None
 
     # ------------------------------------------------------------------ hooks

@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 FeedRole = Literal["tile", "main", "strip"]
-LayoutMode = Literal["auto", "grid", "pin"]
+LayoutMode = Literal["auto", "grid", "pin", "overview"]
 
+OVERVIEW_CAM = "overview"  # matches ``teleop.sim.bays.OVERVIEW_CAMERA``
 CCTV_SUFFIX = "cctv"  # matches ``teleop.sim.cells.cctv_camera_name``
 WRIST_SUFFIX = "wrist_cam"  # matches ``teleop.sim.bays.wrist_camera_name`` (and T-191)
 TOP_SUFFIX = "top_ortho"  # matches ``teleop.retarget.clutch.rescue_camera_names``
@@ -125,6 +126,18 @@ def feed_layout(
     """Feeds for the bays present; supports equal grid, auto-rescue focus, and manual pinning."""
     ordered = _ordered_bays(bays, view_state)
     mode: LayoutMode = view_state.mode if view_state is not None else "auto"
+
+    if mode == "overview":
+        z, px, py, rx, ry = (
+            view_state.zoom_for(OVERVIEW_CAM)
+            if view_state is not None
+            else (1.0, 0.0, 0.0, 0.0, 0.0)
+        )
+        mains_ov = (FeedSpec(0, OVERVIEW_CAM, 0, "main", MAIN[0], MAIN[1], z, px, py, rx, ry),)
+        strips_ov = tuple(
+            _feed(1 + i, b, CCTV_SUFFIX, "strip", STRIP, view_state) for i, b in enumerate(ordered)
+        )
+        return mains_ov + strips_ov
 
     focus_bay: int | None = None
     if mode == "grid":

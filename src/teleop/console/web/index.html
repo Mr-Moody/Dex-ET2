@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fleet operations</title>
+  <title>Fleet operations · EV Battery Recycling Plant</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="console.css">
 </head>
@@ -12,10 +12,12 @@
     <div class="bar__site">
       <span class="bar__mark" aria-hidden="true"></span>
       <h1>Fleet operations</h1>
-      <span class="bar__line">Battery disassembly line</span>
+      <span class="bar__eco">Circular EV Plant</span>
+      <span class="bar__line">Battery disassembly warehouse · 4 segmented conveyors</span>
       <span class="bar__badge" id="dummy-badge" hidden title="Temporary dummy Rokoko glove streamer is active. Swap out when real gloves connect.">TEMP: Dummy gloves</span>
     </div>
     <div class="bar__views" role="toolbar" aria-label="Camera layout">
+      <button type="button" class="vbtn" id="view-overview" title="Wide mezzanine camera across the sustainable warehouse, 4 segmented conveyor belts, and all 4 separated arms">Plant Overview</button>
       <button type="button" class="vbtn" id="view-grid" title="Show all 4 bays equally in a 2x2 grid">4-Up Equal</button>
       <button type="button" class="vbtn is-active" id="view-auto" title="Equal grid normally; auto-pin rescue bay">Auto Focus</button>
       <span class="bar__sep" aria-hidden="true"></span>
@@ -23,7 +25,7 @@
       <div class="bar__pins" id="pin-bar"></div>
     </div>
     <div class="bar__live">
-      <span class="bar__shift" id="shift">4 bays, 1 operator on shift</span>
+      <span class="bar__shift" id="shift">4 stations · 4 conveyors · 1 operator</span>
       <span class="live" id="live"><span class="live__dot" aria-hidden="true"></span><span id="live-text">Connecting</span></span>
       <time class="bar__clock" id="clock">--:--:--</time>
     </div>
