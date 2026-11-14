@@ -122,6 +122,7 @@ class AtcConfig:
     seed: int | None = None  # None: STAGE_SEED with --script, else 0
     realism: float = DEFAULT_REALISM  # latch-pose error and gate randomization scale (0: off)
     gate_pass_min: int = GATE_PASS_MIN  # randomized skill gate: deploy at >= N of 20
+    gemini: bool = True  # Tier 2 grasp gate on Gemini when GEMINI_API_KEY is set (--no-gemini)
     dummy_glove: bool = False  # TODO(rokoko-gloves-swap): temporary dummy UDP/UI operator
     glove_filter: bool = True  # 1-Euro smoothing of the glove wrist pose and finger targets
 
@@ -332,6 +333,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     add_hotspot_args(ap)
     ap.add_argument("--no-hotspot", action="store_true", help="do not keep the booth hotspot up")
+    ap.add_argument(
+        "--no-gemini",
+        dest="gemini",
+        action="store_false",
+        default=None,
+        help="no Gemini grasp gate (local Gemma if COPILOT_LOCAL_URL is set, else physics only)",
+    )
     return ap
 
 
@@ -544,6 +552,8 @@ def _run_booth(
             return 1
         controller.coordinator.set_observer(sink_handle)
         stack.callback(_close_episodes, controller, sink_handle)
+    if not cfg.headless:  # headless runs (CI, --generate) stay physics-only and deterministic
+        _setup_copilot(cfg, controller, stack)
     if "--generate" in hooks:
         assert cfg.generate is not None
         n = int(hooks["--generate"](controller, sink_handle, cfg.generate, resolve_seed(cfg)))
@@ -583,6 +593,44 @@ def _run_booth(
         stack.callback(health.stop)
     operator_box.append(glove)
     return _run(cfg, controller, glove, health)
+
+
+def _setup_copilot(
+    cfg: AtcConfig, controller: StageController, stack: contextlib.ExitStack
+) -> None:
+    """Attach the Tier 2 grasp gate: Gemini, else local Gemma, else nothing (physics only).
+
+    Advisory side effects only: the gate can withhold a skill from the Fleet Library and speaks
+    its verdict; it never sends console keys or commands a robot.
+    """
+    from teleop.copilot.config import CopilotConfig
+    from teleop.copilot.gate import build_grasp_gate
+
+    try:
+        ccfg = CopilotConfig.from_env(mute=not cfg.audio)
+    except ValueError as exc:
+        logger.warning("atc: copilot config invalid (%s); grasp gate off", exc)
+        return
+    use_gemini = cfg.gemini and ccfg.has_key
+    if not use_gemini and not ccfg.local_url:
+        logger.info("atc: grasp gate physics only (no GEMINI_API_KEY / COPILOT_LOCAL_URL)")
+        return
+    speaker = _copilot_speaker(ccfg) if use_gemini and cfg.audio else None
+    if speaker is not None:
+        stack.callback(speaker.close)
+    gate = build_grasp_gate(ccfg, use_gemini=use_gemini, speaker=speaker)
+    stack.callback(gate.close)
+    controller.coordinator.grasp_gate = gate
+    logger.info("atc: grasp gate %s (%s)", gate.source, gate.model)
+
+
+def _copilot_speaker(ccfg: Any) -> Any:
+    """The Tier 1 voice: Gemini TTS streamed over SSE, system voice as the fallback."""
+    from teleop.copilot.speech import Speaker
+    from teleop.copilot.tts_stream import GeminiStreamingTTS
+
+    streamer = GeminiStreamingTTS(ccfg.gemini_api_key, model=ccfg.tts_model, voice=ccfg.voice)
+    return Speaker(streamer, tts_model=ccfg.tts_model, voice=ccfg.voice, mute=ccfg.mute)
 
 
 def rescue_label(operator_box: list[Any]) -> Callable[[], str]:

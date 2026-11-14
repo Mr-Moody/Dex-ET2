@@ -58,7 +58,7 @@ class RescueStatus:
 
 @dataclass(frozen=True, slots=True)
 class GateStatus:
-    """Latest UNO Q DMP fit and randomized sim gate result."""
+    """Latest UNO Q DMP fit and randomized sim + VLM grasp gate result."""
 
     fit_ms: float | None = None
     passed: int | None = None
@@ -67,6 +67,10 @@ class GateStatus:
     ok: bool | None = None
     conditions: str | None = None  # what the gate randomized, shown after the verdict
     worst_failure: str | None = None  # most extreme condition among failed rollouts
+    vlm_verdict: str | None = None
+    vlm_reason: str | None = None
+    vlm_latency_ms: float | None = None
+    vlm_model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +119,11 @@ class HudView:
     powered_off: frozenset[int] = frozenset()  # bays (live or replayed) cut by the E-stop
     recovery: RecoveryStatus = field(default_factory=RecoveryStatus)
     recovery_bays: tuple[tuple[int, str], ...] = ()  # (bay, "dmp" | "act") while recovering
+    audit: dict[str, Any] | None = None
+
+
+def _ascii_clean(text: str) -> str:
+    return "".join(c if 32 <= ord(c) < 127 or c == "\n" else "?" for c in text)
 
 
 # --------------------------------------------------------------------------- pieces
@@ -182,15 +191,25 @@ def format_rescue(rescue: RescueStatus) -> str:
 
 def format_gate(gate: GateStatus) -> str:
     fit = f"{gate.fit_ms:.1f} ms" if gate.fit_ms is not None else "--"
+    vlm_suffix = ""
+    if gate.vlm_verdict is not None:
+        vlm_part = f"VLM: {_ascii_clean(gate.vlm_verdict).upper()}"
+        if gate.vlm_latency_ms is not None:
+            vlm_part += f" ({gate.vlm_latency_ms:.0f} ms)"
+        if gate.vlm_reason:
+            reason = _ascii_clean(gate.vlm_reason).replace("\n", " ").strip()
+            if reason:
+                vlm_part += f" [{reason[:48]}]"
+        vlm_suffix = f" | {vlm_part}"
     if gate.passed is None or gate.total is None:
-        return f"UNO Q DMP fit: {fit} | Sim Gate: --"
+        return f"UNO Q DMP fit: {fit} | Sim Gate: --{vlm_suffix}"
     verdict = "PASS" if gate.ok else "FAIL"
     elapsed = f" ({gate.elapsed_s:.2f} s)" if gate.elapsed_s is not None else ""
     if gate.conditions:
         label = f"Skill gate {gate.passed}/{gate.total} {verdict} ({gate.conditions})"
     else:
         label = f"Sim Gate: {gate.passed}/{gate.total} {verdict}"
-    return f"UNO Q DMP fit: {fit} | {label}{elapsed}"
+    return f"UNO Q DMP fit: {fit} | {label}{elapsed}{vlm_suffix}"
 
 
 def format_recovery(rec: RecoveryStatus) -> str:
