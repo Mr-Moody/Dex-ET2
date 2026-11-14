@@ -136,7 +136,7 @@ def test_reasoners_satisfy_fleet_reasoner_protocol() -> None:
 
 def test_resolve_completions_url_normalises_variants_and_rejects_bad_schemes() -> None:
     assert DEFAULT_VERDA_BASE_URL == "https://inference.verda.com/v1"
-    assert SYSTEM_PROMPT.startswith("detailed thinking off\n")
+    assert "detailed thinking" not in SYSTEM_PROMPT  # Nemotron-only toggle, removed for Kimi
     assert (
         resolve_completions_url("https://containers.verda.com/my-nemotron")
         == "https://containers.verda.com/my-nemotron/v1/chat/completions"
@@ -190,7 +190,8 @@ def test_from_env_selects_mode_and_never_calls_network_at_init() -> None:
     with VerdaNemotronReasoner.from_env({"VERDA_API_KEY": "sk-test"}, transport=fake) as r:
         assert r.mode == "verda"
         assert r.endpoint_url == f"{DEFAULT_VERDA_BASE_URL}/chat/completions"
-        assert r.model == DEFAULT_NEMOTRON_MODEL
+        assert r.model == DEFAULT_NEMOTRON_MODEL == "kimi-k3-1-pro"
+        assert r.reasoning_effort == "none"
 
     # Malformed URL with API key degrades cleanly to offline mode instead of raising.
     with VerdaNemotronReasoner.from_env(
@@ -211,6 +212,7 @@ def test_from_env_selects_mode_and_never_calls_network_at_init() -> None:
         {"close_grace_s": -1.0},
         {"close_grace_s": float("nan")},
         {"max_workers": 0},
+        {"reasoning_effort": "extreme"},
     ):
         with pytest.raises(ValueError):
             VerdaNemotronReasoner(**bad_kwargs)  # type: ignore[arg-type]
@@ -321,6 +323,7 @@ def test_async_worker_triages_stall_validation_gate_and_ood_refusal() -> None:
         assert key == "sk-verda-123"
         assert payload["model"] == "nvidia/Llama-3.3-Nemotron-Super-49B-v1"
         assert payload["response_format"] == {"type": "json_object"}
+        assert payload["reasoning_effort"] == "none"
         assert r.counts()["remote_ok"] == 3
         assert r.counts()["errors"] == 0
 
@@ -860,3 +863,56 @@ def test_module_cli_status_and_demo_run_offline(
     assert "[STALL_ALERT bay=1]" in out_demo
     assert "[VALIDATION_GATE bay=1]" in out_demo
     assert "[OOD_REFUSAL bay=2]" in out_demo
+
+
+# ── Kimi K3.1 Pro (Verda Inference API) specifics ────────────────────────────────────────────
+
+
+def kimi_envelope(content: str, *, finish_reason: str = "stop") -> dict[str, Any]:
+    env = chat_envelope(content, model="kimi-k3-1-pro")
+    env["choices"][0]["finish_reason"] = finish_reason
+    env["choices"][0]["message"]["reasoning_content"] = "Bolt stalled at the flap; {not json"
+    return env
+
+
+def test_kimi_ignores_reasoning_content_and_parses_content() -> None:
+    verdict = {
+        "headline": "Bay 1 flap stall",
+        "operator_guidance": "Lift the flap, then pull the bolt past 5.2 cm.",
+        "compliance_rationale": "Contact stall logged for ev_latch_v1.",
+    }
+    fake = FakeVerdaTransport(lambda _p: kimi_envelope(json.dumps(verdict)))
+    with VerdaNemotronReasoner(api_key="sk-verda", transport=fake) as r:
+        r.submit(make_ctx(bay_id=1))
+        assert r.flush(timeout_s=2.0)
+        v = r.latest_verdict(1)
+        assert v is not None and v.headline == "Bay 1 flap stall"
+        assert v.model == "kimi-k3-1-pro"
+        payload = fake.calls[0][2]
+        assert payload["model"] == "kimi-k3-1-pro"
+        assert payload["reasoning_effort"] == "none"
+
+
+def test_kimi_empty_content_after_length_cutoff_falls_back_to_triage() -> None:
+    fake = FakeVerdaTransport(lambda _p: kimi_envelope("", finish_reason="length"))
+    ctx = make_ctx(bay_id=2)
+    with VerdaNemotronReasoner(api_key="sk-verda", transport=fake) as r:
+        r.submit(ctx)
+        assert r.flush(timeout_s=2.0)
+        v = r.latest_verdict(2)
+        assert v is not None and v.headline == triage(ctx)[0]
+        assert r.counts()["remote_ok"] == 0
+
+
+def test_reasoning_effort_can_be_omitted_or_overridden() -> None:
+    fake = FakeVerdaTransport()
+    with VerdaNemotronReasoner(api_key="k", transport=fake, reasoning_effort=None) as r:
+        r.submit(make_ctx(bay_id=1))
+        assert r.flush(timeout_s=2.0)
+    with VerdaNemotronReasoner.from_env(
+        {"VERDA_API_KEY": "k"}, transport=fake, reasoning_effort="low"
+    ) as r:
+        r.submit(make_ctx(bay_id=1))
+        assert r.flush(timeout_s=2.0)
+    assert "reasoning_effort" not in fake.calls[0][2]
+    assert fake.calls[1][2]["reasoning_effort"] == "low"
