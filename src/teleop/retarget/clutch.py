@@ -12,6 +12,7 @@ the latch, shown picture-in-picture next to the overview camera.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from teleop.unoq.dmp import (
 from teleop.unoq.protocol import OP_FIT_DMP
 
 mj: Any = _mujoco
+logger = logging.getLogger(__name__)
 
 FloatArray = NDArray[np.float64]
 
@@ -201,7 +203,12 @@ class RescueTrajectory:
 
 
 class RescueTrajectoryBuffer:
-    """Records one clutch hold; ``finish()`` keeps it only if the bolt was cleared."""
+    """Records one clutch hold; ``finish()`` keeps it only if the bolt was cleared.
+
+    A released tick (``record(False, ...)``) marks the end of the hold. ``finish()`` can still
+    keep it afterwards, but if a new hold starts first, the old samples are dropped so two
+    holds are never joined into one trajectory.
+    """
 
     MIN_SAMPLES = 2
 
@@ -218,11 +225,13 @@ class RescueTrajectoryBuffer:
         self._wrist: list[list[float]] = []
         self._q: list[list[float]] = []
         self._tau: list[float] = []
+        self._hold_ended = False
 
     def __len__(self) -> int:
         return len(self._t)
 
     def clear(self) -> None:
+        self._hold_ended = False
         self._t.clear()
         self._wrist.clear()
         self._q.clear()
@@ -239,9 +248,17 @@ class RescueTrajectoryBuffer:
         """Append one control tick if the clutch is held. Returns whether it was recorded.
 
         Ticks that do not advance time are dropped so the payload stays strictly increasing.
+        A held tick after a released one, with no ``finish()`` in between, starts a new hold
+        and discards the previous one.
         """
         if not clutch_pressed:
+            self._hold_ended = bool(self._t)
             return False
+        if self._hold_ended:
+            logger.warning(
+                "new clutch hold before finish(): dropping %d stale samples", len(self._t)
+            )
+            self.clear()
         if self._t and t_s <= self._t[-1]:
             return False
         if isinstance(leap_q, Mapping):
