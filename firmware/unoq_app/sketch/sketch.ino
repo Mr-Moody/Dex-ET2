@@ -12,8 +12,8 @@
     Onboard 8x13 LED matrix: one 3-column x 8-row tile per bay + a status column.
 
   - Polls clutch, E-stop, joystick switch and the fault rig at 1 kHz (5 ms debounce); samples
-    the joystick at 100 Hz. Each stick direction selects the bay it is mapped to (default up 1,
-    right 2, down 3, left 4; recalibrate on the console, see "Joystick calibration").
+    the joystick at 100 Hz. Each stick direction selects the bay it is mapped to (default left 1,
+    right 2, up 3, down 4 like the keyboard arrows; recalibrate on the console, see "Joystick calibration").
   - Buttons: the level read at boot is "released", so either KY-004 polarity works. Do not
     hold the clutch or the E-stop while the board boots.
   - E-stop latches per robot: a press cuts power to the selected bay (its LED goes solid red
@@ -212,9 +212,9 @@ static uint8_t joyHits = 0;
 static uint8_t joyPending = DIR_NONE;
 static bool joyRaw = false;
 
-// Bay selected by each direction. Default for the plate's mounting: up 1, right 2, down 3,
-// left 4 with higher VRx = right and lower VRy = up.
-static uint8_t joyMap[4] = {2, 4, 3, 1};
+// Bay selected by each direction. Default for the plate's mounting: left 1, right 2, up 3,
+// down 4 (like the keyboard arrows) with higher VRx = right and lower VRy = up.
+static uint8_t joyMap[4] = {2, 1, 4, 3};
 
 static void sendJoyMap(const char *prefix) {
   char buf[24];

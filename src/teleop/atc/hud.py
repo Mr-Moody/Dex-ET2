@@ -222,7 +222,7 @@ def hud_overlays(
     stage = "\n".join(
         x for x in (f"BEAT {view.beat}" if view.beat else "", last_key, view.unoq) if x
     )
-    keys = "1-4 bay | SPACE clutch | F/G/P faults | R reset"
+    keys = "Arrows bay (L1 R2 U3 D4) | SPACE clutch | F/G/P faults | R reset"
     return [
         (int(font.mjFONT_BIG), int(grid.mjGRID_TOPLEFT), labels, values),
         (int(font.mjFONT_NORMAL), int(grid.mjGRID_TOPRIGHT), status, ""),

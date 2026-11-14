@@ -13,7 +13,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -259,6 +259,12 @@ class UnoQClient:
     def set_bay_state(self, bay_id: int, state: BayState) -> None:
         """Set one bay's LED state on the board's MCU console (no-op without a console)."""
         self.request({"op": P.OP_SET_BAY_STATE, "bay_id": bay_id, "state": state.name})
+
+    def set_power_mask(self, powered_off: Iterable[int]) -> None:
+        """Set which bays the board's E-stop has cut (keeps the MCU and its LEDs in step)."""
+        self.request(
+            {"op": P.OP_SET_POWER_MASK, "powered_off": sorted(int(b) for b in powered_off)}
+        )
 
     def joystick(self, action: str = "status", **fields: Any) -> dict[str, Any]:
         """Joystick map / calibration on the board's MCU console (``OP_JOYSTICK``)."""

@@ -253,3 +253,49 @@ def test_console_state_op_carries_powered_off() -> None:
     reply = server.handle({"op": P.OP_CONSOLE_STATE})
     assert reply["console"]["powered_off"] == [3]
     P.encode(reply)  # JSON-safe
+
+
+# ---------------------------------------------------------------- keyboard / button parity (T-225)
+
+
+def test_heartbeat_without_a_bay_does_not_restamp_every_beat() -> None:
+    clock, _, bridge = _rig()
+    bridge.handle_line("BTN:BAY:2")
+    stamp = bridge.state().timestamp_ns
+    clock.advance(0.05)
+    bridge.handle_line("HB:0:0:0:0:0")  # MCU rebooted: no bay, we keep Bay 2
+    clock.advance(0.05)
+    bridge.handle_line("HB:0:0:0:0:0")
+    assert bridge.state().selected_bay == 2
+    assert bridge.state().timestamp_ns == stamp  # else this console always wins the merge
+
+
+def test_set_power_mask_reaches_the_mcu_and_waits_for_its_echo() -> None:
+    _, mcu, bridge = _rig()
+    bridge.set_power_mask({1, 3})
+    assert "CMD:POWER_MASK:5" in mcu.received and mcu.powered_off == {1, 3}
+    assert bridge.state().powered_off == frozenset()  # until the MCU echoes it
+    bridge.pump()
+    assert bridge.state().powered_off == frozenset({1, 3})
+
+
+def test_server_set_power_mask_op_drives_the_attached_bridge() -> None:
+    mcu = SoftwareMcu()
+    server = UnoQServer()
+    server.attach_console(McuConsoleBridge(mcu))
+    try:
+        assert server.handle({"op": P.OP_SET_POWER_MASK, "powered_off": [2]})["ok"]
+        assert mcu.powered_off == {2}
+        assert server.handle({"op": P.OP_SET_POWER_MASK, "powered_off": [5]})["ok"] is False
+        assert UnoQServer().handle({"op": P.OP_SET_POWER_MASK, "powered_off": []})["ok"]
+    finally:
+        server.stop()
+
+
+def test_console_state_op_never_waits_for_the_main_lock() -> None:
+    """A DMP fit holds the main lock; the clutch poll must still answer at once."""
+    server = UnoQServer()
+    server.set_console_state(ConsoleInputState(selected_bay=1, clutch=True))
+    with server._lock:  # pyright: ignore[reportPrivateUsage]
+        reply = server.handle({"op": P.OP_CONSOLE_STATE})
+    assert reply["console"]["clutch"] is True

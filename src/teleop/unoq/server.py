@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive
+from teleop.atc.types import N_BAYS, BayState, ConsoleInputState, SkillPrimitive
 from teleop.types import Pose
 from teleop.unoq import protocol as P
 from teleop.unoq.classifier import MahalanobisStallClassifier
@@ -77,6 +77,7 @@ class UnoQServer:
         self._bridge: McuConsoleBridge | None = None  # set once, before serving
         self._last_heard_ns: int | None = None
         self._lock = threading.Lock()
+        self._console_lock = threading.Lock()  # console state only: polls never wait on a fit
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._conns: set[socket.socket] = set()
@@ -91,6 +92,7 @@ class UnoQServer:
             P.OP_CONSOLE_STATE: self._console_state,
             P.OP_SET_BAY_STATE: self._set_bay_state,
             P.OP_JOYSTICK: self._joystick,
+            P.OP_SET_POWER_MASK: self._set_power_mask,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -145,7 +147,7 @@ class UnoQServer:
 
     def set_console_state(self, state: ConsoleInputState) -> None:
         """Called by the MCU serial bridge whenever the operator console changes."""
-        with self._lock:
+        with self._console_lock:
             self._console = state
 
     def attach_console(self, bridge: McuConsoleBridge) -> None:
@@ -164,7 +166,7 @@ class UnoQServer:
         while not self._stop.is_set():
             heard = bridge.last_heard_ns
             state = bridge.state()
-            with self._lock:
+            with self._console_lock:
                 self._console = state
                 self._last_heard_ns = heard
             self._stop.wait(CONSOLE_SYNC_S)
@@ -178,8 +180,12 @@ class UnoQServer:
         if handler is None:
             return P.error(f"unknown op {op!r}")
         try:
-            if op in (P.OP_SET_BAY_STATE, P.OP_JOYSTICK):
+            if op in (P.OP_SET_BAY_STATE, P.OP_JOYSTICK, P.OP_SET_POWER_MASK):
                 return handler(dict(request))  # MCU write may block: never under the lock
+            if op == P.OP_CONSOLE_STATE:
+                # The laptop's clutch dead-man polls this every 50 ms: never queue it behind a
+                # DMP fit or a classify holding the main lock.
+                return handler(dict(request))
             with self._lock:
                 return handler(dict(request))
         except (KeyError, TypeError, ValueError, OSError) as exc:
@@ -252,9 +258,18 @@ class UnoQServer:
         return P.ok(skill_id=skill.skill_id, signature_samples=n)
 
     def _console_state(self, _: dict[str, Any]) -> dict[str, Any]:
-        heard = self._last_heard_ns
+        with self._console_lock:
+            console, heard = self._console, self._last_heard_ns
         age = None if heard is None else max(0, (time.monotonic_ns() - heard) // 1_000_000)
-        return P.ok(console=console_to_dict(self._console), mcu_heartbeat_age_ms=age)
+        return P.ok(console=console_to_dict(console), mcu_heartbeat_age_ms=age)
+
+    def _set_power_mask(self, req: dict[str, Any]) -> dict[str, Any]:
+        bays = frozenset(int(b) for b in req["powered_off"])
+        if not bays <= set(range(1, N_BAYS + 1)):
+            raise ValueError(f"bays must be in 1..{N_BAYS}: {sorted(bays)}")
+        if self._bridge is not None:
+            self._bridge.set_power_mask(bays)
+        return P.ok()
 
     def _set_bay_state(self, req: dict[str, Any]) -> dict[str, Any]:
         bay_id = int(req["bay_id"])
@@ -319,6 +334,8 @@ class UnoQServer:
             except OSError:
                 break
             conn.settimeout(None)
+            with contextlib.suppress(OSError):  # small replies: never wait on Nagle
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             with self._lock:
                 self._conns.add(conn)
             th = threading.Thread(target=self._serve_conn, args=(conn,), daemon=True)

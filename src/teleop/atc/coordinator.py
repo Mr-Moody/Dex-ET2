@@ -30,6 +30,8 @@ name) must stay below ``arm_torque_margin`` (0.8). A breach in the routine is a 
 trigger (no 300 ms wait); in autonomous replay it aborts and escalates; in an operator rescue it
 bleeds off and discards the recording until the clutch is released; elsewhere it bleeds off to a
 zero-velocity hold. The validator fails a rollout on the same ratio.
+The clutch teleop target is bounded to lead the measured wrist by a few cm, less under load,
+and yields before the guard, so ordinary glove motion never trips it.
 
 Motion: the arm only moves through IK + the position servos. ``start_cycle`` lifts the hand
 clear, resets the latch faults, then follows a rate-limited path to the routine start. The one
@@ -121,7 +123,14 @@ from teleop.sim.cells import CONVEYOR_SPEED_M_S, PACK_PITCH_M
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
-from teleop.unoq.dmp import HAND_ACTUATORS, compose_pose, mat_to_quat
+from teleop.unoq.dmp import (
+    HAND_ACTUATORS,
+    compose_pose,
+    mat_to_quat,
+    quat_to_mat,
+    so3_exp,
+    so3_log,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +205,13 @@ class CoordinatorConfig:
     # (6-9 s wall); applying at a fixed sim time keeps seeded runs tick-for-tick reproducible.
     gate_deadline_s: float = 10.0
     push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
+    # Clutch teleop target bounds (see ``AtcCoordinator._teleop_target``). The scripted
+    # rescue leads <= 7 mm and 0.033 rad and peaks at an arm torque ratio of 0.47.
+    teleop_lead_m: float = 0.03  # free space: ~0.3 m/s tracking
+    teleop_lead_rad: float = 0.15
+    teleop_contact_ratio: float = 0.25  # loaded arm: tighten the lead ...
+    teleop_contact_lead_m: float = 0.01
+    teleop_yield_ratio: float = 0.5  # ... and yield well before arm_torque_margin
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +357,27 @@ class OperatorInput:
 
 def _fingers_array(fingers: Mapping[str, float]) -> FloatArray:
     return np.array([fingers.get(n, 0.0) for n in HAND_ACTUATORS], dtype=np.float64)
+
+
+def bounded_lead(target: Pose, wrist: Pose, max_m: float, max_rad: float) -> Pose:
+    """``target`` pulled back towards ``wrist`` to lead it by at most ``max_m`` and ``max_rad``.
+
+    Position moves along the straight line, orientation along the geodesic, so the IK keeps
+    chasing the same target direction. A target within both bounds is returned unchanged.
+    """
+    p_w, p_t = pose_position(wrist), pose_position(target)
+    d = p_t - p_w
+    dist = float(np.linalg.norm(d))
+    r_w = quat_to_mat(wrist.orientation)
+    w = so3_log(r_w.T @ quat_to_mat(target.orientation))
+    angle = float(np.linalg.norm(w))
+    if dist <= max_m and angle <= max_rad:
+        return target
+    pos = p_w + d * (max_m / dist) if dist > max_m else p_t
+    quat = (
+        mat_to_quat(r_w @ so3_exp(w * (max_rad / angle))) if angle > max_rad else target.orientation
+    )
+    return Pose(orientation=quat, position=(float(pos[0]), float(pos[1]), float(pos[2])))
 
 
 @dataclass
@@ -887,8 +924,10 @@ class AtcCoordinator:
         if engaged and operator is not None:
             if not bay.clutch_held:
                 self._start_episode(bay, "operator")
-            cmd = bay.indexer.update(True, operator.glove_wrist, bay.rig.wrist_pose())
+            wrist = bay.rig.wrist_pose()
+            cmd = bay.indexer.update(True, operator.glove_wrist, wrist)
             if cmd is not None:
+                cmd = self._teleop_target(bay, cmd, wrist)
                 self._episode_tick(bay, cmd, operator.hand_targets)
                 self._command(bay, cmd, operator.hand_targets)
                 bay.hold_pose = cmd
@@ -903,6 +942,30 @@ class AtcCoordinator:
             self._release_clutch(bay)
             return
         self._hold(bay)
+
+    def _teleop_target(self, bay: _Bay, cmd: Pose, wrist: Pose) -> Pose:
+        """The clutch target the arm may chase this tick: a bounded lead that yields under load.
+
+        The relative clutch maps the glove 1:1, so its raw target can run tens of cm ahead of
+        the wrist (fast free-space motion) or deep into the latch (pressing down). Either way a
+        Panda joint saturates (the 12 Nm wrist joints within millimetres of blocked travel), the
+        arm torque guard trips and the clutch is locked out until release: the hand freezes.
+        So the target leads the measured wrist by at most ``teleop_lead_m`` in free space and
+        ``teleop_contact_lead_m`` once the last sensed arm torque ratio reaches
+        ``teleop_contact_ratio``; from ``teleop_yield_ratio`` the arm yields for a tick (target
+        = measured wrist, IK restarted from the measurement) instead of pushing on to the guard.
+        The guard itself is unchanged. The scripted rescue stays inside every bound.
+        """
+        cfg = self.config
+        if bay.arm_ratio >= cfg.teleop_yield_ratio:
+            bay.rig.ik.reset()
+            return wrist
+        lead_m = (
+            cfg.teleop_contact_lead_m
+            if bay.arm_ratio >= cfg.teleop_contact_ratio
+            else cfg.teleop_lead_m
+        )
+        return bounded_lead(cmd, wrist, lead_m, cfg.teleop_lead_rad)
 
     def _calibrate_demo_touch(self, bay: _Bay) -> None:
         """Record the demo's own index contact offset at its first bolt-encoder movement.
