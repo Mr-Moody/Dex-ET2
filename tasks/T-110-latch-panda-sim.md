@@ -1,12 +1,12 @@
 ---
 id: T-110
 title: 3-box sprung slide-bolt MJCF, 4-bay Panda+LEAP scene, DLS diff-IK & mj_inverse
-status: todo
-owner: null
-branch: null
+status: in_review
+owner: lead-laptop
+branch: feat/latch-panda-sim
 depends_on: [T-100]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-110-3-box-sprung-slide-bolt-mjcf-4-bay-pandaleap-scene-dls-diff-ik--mj_inverse
-claimed_at: null
+claimed_at: '2026-11-14T01:00:34+00:00'
 ---
 
 **P0 Simulation & Kinematics track. Edit only `src/teleop/sim/{latch,ik,torques,bays}.py` and `tests/sim/test_latch_panda.py`.**
