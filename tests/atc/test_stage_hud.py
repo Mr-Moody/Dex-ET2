@@ -230,13 +230,13 @@ def unoq() -> Iterator[object]:
 
 @needs_models
 def test_atc_headless_scripted_6_beat_stage_run_completes(unoq: object) -> None:
-    from teleop.atc.stage import BEATS, StageController, StageDirector
+    from teleop.atc.stage import BEATS, STAGE_SEED, StageController, StageDirector
     from teleop.unoq.client import UnoQClient
 
     assert isinstance(unoq, UnoQClient)
     sink, reasoner, speaker = RecordingSink(), RecordingReasoner(), FakeSpeaker()
     controller = StageController.build(
-        unoq, sink, reasoner, audio=AudioCues(speaker), cycle_dwell_s=0.5
+        unoq, sink, reasoner, audio=AudioCues(speaker), cycle_dwell_s=0.5, seed=STAGE_SEED
     )
     director = StageDirector(controller)
     for _ in range(12_000):
@@ -253,7 +253,7 @@ def test_atc_headless_scripted_6_beat_stage_run_completes(unoq: object) -> None:
     assert kinds[:4] == ["STALL_ALERT", "RESCUE_LOGGED", "VALIDATION_GATE", "SKILL_DEPLOYED"]
     assert len(co.library) == 1
     view = controller.hud_view()
-    assert view.gate.ok and view.gate.passed == 3 and view.gate.total == 3
+    assert view.gate.ok and (view.gate.passed or 0) >= 18 and view.gate.total == 20
     assert view.gate.fit_ms is not None
     # Beat 5: Bay 2 cleared its rotated/shifted jam autonomously.
     autonomous = [e for e in sink.events if e.kind == "RESCUE_LOGGED" and e.bay_id == 2]

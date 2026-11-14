@@ -410,7 +410,9 @@ class AtcCoordinator:
         self.reasoner = reasoner
         self.hand_spec = hand_spec
         self.config = config or CoordinatorConfig()
-        self.validator = validator or SkillValidator(hand_spec, self.config.tau_hard_max)
+        self.validator = validator or SkillValidator(
+            hand_spec, self.config.tau_hard_max, seed=self.config.seed
+        )
         self.routine = routine or ROUTINE
         self.library: dict[str, SkillPrimitive] = {}
         self.time_s = 0.0

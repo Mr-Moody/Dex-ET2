@@ -1,10 +1,11 @@
-"""Bay physics rig, DMP replay and the 3-rollout headless validation gate (spec 4.4).
+"""Bay physics rig, DMP replay and the 20-rollout randomized headless validation gate.
 
 ``BayRig`` wraps one bay of a compiled scene (Panda DLS IK, ``tau_ext`` estimator, latch
 controller, hand actuators by name). ``SkillReplay`` turns a ``SkillPrimitive`` into per-tick
 wrist and finger commands in any latch frame. ``SkillValidator`` owns one reusable headless
-single-bay ``MjModel``/``MjData``: the three pose perturbations only move the latch body in the
-model (no XML recompile), so a gate run costs a few hundred physics steps per rollout.
+single-bay ``MjModel``/``MjData``: each seeded rollout only moves the latch body and scales a few
+model parameters in place (no XML recompile), so a gate run costs a few hundred physics steps
+per rollout.
 
 Torque convention: every ``tau_ext_inf`` used for stall signatures, the torque tube and the
 hard-max check is the inf-norm over the hand finger joints only. Hand torques depend on the
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import math
 import time
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -27,7 +29,14 @@ import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 from numpy.typing import NDArray
 
-from teleop.atc.estimate import LatchEstimate
+from teleop.atc.estimate import (
+    POSE_SIGMA_XY_M,
+    POSE_SIGMA_YAW_RAD,
+    TOUCH_SIGMA_M,
+    LatchEstimate,
+    TouchDetector,
+    touch_correct,
+)
 from teleop.atc.types import BOLT_CLEARED_M, LatchPose, SkillPrimitive
 from teleop.sim.bays import (
     CANONICAL_LATCH,
@@ -76,6 +85,8 @@ APPROACH_ROT_SPEED = 1.5  # rad/s
 LIFT_HEIGHT_M = 0.18  # wrist height above the latch origin for free-space transits (clears
 # the curled Inspire index over the bolt hook)
 PRE_APPROACH_M = 0.04  # DMP pre-approach pose: this far above the DMP start, latch +Z
+# MjData fields restored before every rollout (independent trials from the ready pose).
+_SNAPSHOT_FIELDS = ("qpos", "qvel", "act", "ctrl", "qacc_warmstart", "eq_active", "time")
 
 # (dx m, dy m, dyaw deg) in the bay-local latch frame, spec 4.4.
 PERTURBATIONS_DEG: tuple[tuple[float, float, float], ...] = (
@@ -84,6 +95,20 @@ PERTURBATIONS_DEG: tuple[tuple[float, float, float], ...] = (
     (0.08, 0.06, 30.0),
 )
 VALIDATION_BUDGET_S = 0.4
+
+# Randomized gate (spec G3): N seeded rollouts, deploy at >= GATE_PASS_MIN passes.
+GATE_ROLLOUTS = 20
+GATE_PASS_MIN = 18
+GATE_JITTER_XY_M = 0.01  # uniform extra latch offset on top of the spec-4.4 perturbation
+GATE_JITTER_YAW_DEG = 3.0
+# Estimate error at replay time: the stall touch already pinned the push axis (~touch sigma),
+# y and yaw keep the full G1 error.
+GATE_EST_SIGMA_X_M = TOUCH_SIGMA_M
+GATE_EST_SIGMA_Y_M = POSE_SIGMA_XY_M
+GATE_EST_SIGMA_YAW_RAD = POSE_SIGMA_YAW_RAD
+GATE_FLAP_STIFFNESS_SPREAD = 0.20  # scale in [0.8, 1.2]
+GATE_FLAP_SPRINGREF_SPREAD_DEG = 3.0
+GATE_FRICTION_SPREAD = 0.25  # hand and latch sliding friction scale in [0.75, 1.25]
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -447,6 +472,17 @@ class SkillReplay:
 
 
 @dataclass(frozen=True, slots=True)
+class RolloutConditions:
+    """The randomized simulator conditions of one gate rollout."""
+
+    perturbation: tuple[float, float, float]  # true latch: dx m, dy m, dyaw deg (bay-local)
+    est_error: tuple[float, float, float]  # replay frame - truth, latch frame: dx m, dy m, dyaw rad
+    flap_stiffness_scale: float
+    flap_springref_deg: float
+    friction_scale: float  # hand and latch geoms, sliding friction
+
+
+@dataclass(frozen=True, slots=True)
 class RolloutResult:
     perturbation: tuple[float, float, float]  # dx m, dy m, dyaw deg
     bolt_x_m: float
@@ -455,12 +491,18 @@ class RolloutResult:
     joint_limits_ok: bool
     cleared: bool
     passed: bool
+    conditions: RolloutConditions
+    # Mid-replay touch: the signed push-axis correction (None: no touch) and whether the
+    # outlier gate rejected it.
+    touch_correction_m: float | None = None
+    touch_rejected: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class ValidationReport:
     results: tuple[RolloutResult, ...]
     elapsed_s: float
+    threshold: int = GATE_PASS_MIN
 
     @property
     def total(self) -> int:
@@ -471,19 +513,32 @@ class ValidationReport:
         return sum(r.passed for r in self.results)
 
     @property
+    def pass_rate(self) -> float:
+        return self.n_passed / self.total if self.total else 0.0
+
+    @property
     def passed(self) -> bool:
-        return self.n_passed == self.total
+        return self.n_passed >= self.threshold
 
 
 class SkillValidator:
-    """Pre-deployment gate: 3 headless single-bay rollouts across latch pose perturbations.
+    """Pre-deployment gate: ``n_rollouts`` seeded randomized headless single-bay rollouts.
+
+    Each rollout draws (``draw_conditions``, seeded from the run seed and the skill id) a true
+    latch pose (a spec-4.4 perturbation, cycled, plus jitter), the replay-time pose-estimate
+    error, the flap spring stiffness and rest angle, and the hand and latch sliding friction.
+    The validator is the simulator here: it moves the true latch body and scales the model
+    parameters, and restores them after every rollout. The skill only ever sees the noisy
+    estimate (truth + ``est_error``), the way a live bay does, and is re-anchored mid-replay by a
+    fingertip touch (bolt encoder or wrist springs) exactly as in the coordinator.
 
     Every rollout is physical: the arm lifts clear of the previous latch pose, the latch is
-    moved to the perturbed frame and reset to its jammed stall state (bolt at the skill's
-    recorded stall x, flap released), then the arm approaches a pre-approach pose 4 cm above
-    the DMP start under IK and the position servos, blends into the DMP and replays it. A
-    rollout passes when ``x_bolt >= 0.052``, hand ``max |tau_ext|_inf < tau_hard_max``, every
-    Panda joint stays below ``arm_margin`` of its force limit and inside its joint limits.
+    moved to the drawn frame and reset to its jammed stall state (bolt at the skill's recorded
+    stall x, flap released), then the arm approaches a pre-approach pose 4 cm above the DMP
+    start under IK and the position servos, blends into the DMP and replays it. A rollout
+    passes when ``x_bolt >= 0.052``, hand ``max |tau_ext|_inf < tau_hard_max``, every Panda
+    joint stays below ``arm_margin`` of its force limit and inside its joint limits. The gate
+    passes at ``pass_min`` of ``n_rollouts``.
 
     The only kinematic placement is the home keyframe applied once when the model is built.
     """
@@ -495,23 +550,86 @@ class SkillValidator:
         base_latch: LatchPose = CANONICAL_LATCH,
         perturbations_deg: Sequence[tuple[float, float, float]] = PERTURBATIONS_DEG,
         arm_margin: float = ARM_TORQUE_MARGIN,
+        n_rollouts: int = GATE_ROLLOUTS,
+        pass_min: int = GATE_PASS_MIN,
+        seed: int = 0,
     ) -> None:
+        if not 0 < pass_min <= n_rollouts:
+            raise ValueError(f"pass_min {pass_min} must be in 1..n_rollouts ({n_rollouts})")
         self.hand_spec = hand_spec
         self.tau_hard_max = tau_hard_max
         self.arm_margin = arm_margin
         self.base_latch = base_latch
         self.perturbations_deg = tuple(perturbations_deg)
+        self.n_rollouts = n_rollouts
+        self.pass_min = pass_min
+        self.seed = seed
         self.model: Any = build_single_bay_scene(base_latch)
         self.data: Any = mj.MjData(self.model)
         self.rig = BayRig(self.model, self.data, 1)
+        m, p = self.model, self.rig.prefix
+        flap = m.joint(f"{p}flap_hinge")  # simulator side only: randomized, never read back
+        self._flap_jnt = int(flap.id)
+        self._flap_qadr = int(flap.qposadr[0])
+        self._nominal_springref_deg = math.degrees(float(m.qpos_spring[self._flap_qadr]))
+        self.contact_geoms = self._hand_and_latch_geoms()
         self.rig.home_keyframe()
         self._move_to_ready_pose()
+        self._ready_state = self._snapshot()
+
+    def _hand_and_latch_geoms(self) -> NDArray[np.int64]:
+        """Colliding geoms in the hand subtree (the Inspire base body) and the latch subtree.
+
+        Selected by body name, so the set follows the scene, not geom index constants.
+        """
+        m, p = self.model, self.rig.prefix
+        roots = {
+            int(m.body(f"{p}{self.hand_spec.base_body}").id),
+            int(m.body(f"{p}latch_base").id),
+        }
+        ids: list[int] = []
+        for g in range(int(m.ngeom)):
+            if not (int(m.geom_contype[g]) or int(m.geom_conaffinity[g])):
+                continue
+            b = int(m.geom_bodyid[g])
+            while b not in roots and b != 0:
+                b = int(m.body_parentid[b])
+            if b in roots:
+                ids.append(g)
+        return np.asarray(ids, dtype=np.int64)
+
+    def draw_conditions(self, skill_id: str) -> tuple[RolloutConditions, ...]:
+        """The gate's randomized conditions, seeded by ``(seed, crc32(skill_id))``."""
+        rng = np.random.default_rng((self.seed, zlib.crc32(skill_id.encode("utf-8"))))
+        out: list[RolloutConditions] = []
+        for i in range(self.n_rollouts):
+            dx, dy, dyaw = self.perturbations_deg[i % len(self.perturbations_deg)]
+            jx, jy = rng.uniform(-GATE_JITTER_XY_M, GATE_JITTER_XY_M, size=2)
+            jyaw = rng.uniform(-GATE_JITTER_YAW_DEG, GATE_JITTER_YAW_DEG)
+            ex = rng.normal(0.0, GATE_EST_SIGMA_X_M)
+            ey = rng.normal(0.0, GATE_EST_SIGMA_Y_M)
+            eyaw = rng.normal(0.0, GATE_EST_SIGMA_YAW_RAD)
+            k = rng.uniform(1.0 - GATE_FLAP_STIFFNESS_SPREAD, 1.0 + GATE_FLAP_STIFFNESS_SPREAD)
+            ref = self._nominal_springref_deg + rng.uniform(
+                -GATE_FLAP_SPRINGREF_SPREAD_DEG, GATE_FLAP_SPRINGREF_SPREAD_DEG
+            )
+            mu = rng.uniform(1.0 - GATE_FRICTION_SPREAD, 1.0 + GATE_FRICTION_SPREAD)
+            out.append(
+                RolloutConditions(
+                    perturbation=(dx + float(jx), dy + float(jy), dyaw + float(jyaw)),
+                    est_error=(float(ex), float(ey), float(eyaw)),
+                    flap_stiffness_scale=float(k),
+                    flap_springref_deg=float(ref),
+                    friction_scale=float(mu),
+                )
+            )
+        return tuple(out)
 
     def _move_to_ready_pose(self) -> None:
         """Physically bring the arm from the home keyframe to a ready pose above the latch.
 
-        Done once at construction (not part of any timed rollout), so the first rollout starts
-        from a pose comparable to where every later one starts.
+        Done once at construction (not part of any timed rollout). The state here is the
+        snapshot every rollout starts from.
         """
         rig = self.rig
         ready = wrist_pose_over_latch(rig.world_latch(), LIFT_HEIGHT_M)
@@ -523,23 +641,57 @@ class SkillValidator:
             if plan.done and rig.reached(ready):
                 break
 
+    def _snapshot(self) -> dict[str, FloatArray]:
+        d = self.data
+        return {f: np.array(getattr(d, f), copy=True) for f in _SNAPSHOT_FIELDS}
+
+    def _restore_snapshot(self) -> None:
+        """Independent trials: every rollout starts from the same clean ready state.
+
+        Restores the dynamic state (``qpos``, ``qvel``, ``act``, ``ctrl``, the warmstart, the
+        equality toggles and the time) captured after the ready move, re-derives everything
+        else with ``mj_forward`` and resets the IK's commanded-joint memory.
+        """
+        m, d = self.model, self.data
+        for f, v in self._ready_state.items():
+            if f == "time":
+                d.time = float(v)
+            else:
+                getattr(d, f)[...] = v
+        d.qfrc_applied[:] = 0.0
+        d.xfrc_applied[:] = 0.0
+        m.opt.timestep = 1.0 / PHYSICS_HZ
+        mj.mj_forward(m, d)
+        self.rig.ik.reset()
+
     def _rollout(
         self,
         skill: SkillPrimitive,
-        perturbation: tuple[float, float, float],
+        cond: RolloutConditions,
         cache: dict[int, tuple[Pose, dict[str, float], float]],
     ) -> RolloutResult:
-        dx, dy, dyaw_deg = perturbation
+        """One rollout under ``cond``. ``validate`` restores the model parameters afterwards."""
+        dx, dy, dyaw_deg = cond.perturbation
         rig, m, d = self.rig, self.model, self.data
-        new_latch = latch_world_pose(1, self.base_latch.offset(dx, dy, math.radians(dyaw_deg)))
-        new_wfl = new_latch.as_pose()
-        y0 = SkillReplay(skill, new_wfl, hold_s=0.0).command(0.0)
-        up = local_axis_world(new_wfl, 2)
-        pre = translate_pose(y0.wrist, PRE_APPROACH_M * up)
-        lift_z = new_latch.position[2] + LIFT_HEIGHT_M
-        plan = ApproachPlan(
-            rig.wrist_pose(), [lifted(rig.wrist_pose(), lift_z), lifted(pre, lift_z), pre]
+        self._restore_snapshot()
+        m.jnt_stiffness[self._flap_jnt] *= cond.flap_stiffness_scale
+        m.qpos_spring[self._flap_qadr] = math.radians(cond.flap_springref_deg)
+        m.geom_friction[self.contact_geoms, 0] *= cond.friction_scale
+
+        true_latch = latch_world_pose(1, self.base_latch.offset(dx, dy, math.radians(dyaw_deg)))
+        ex, ey, eyaw = cond.est_error
+        c, s = math.cos(true_latch.yaw_rad), math.sin(true_latch.yaw_rad)
+        est_latch = true_latch.offset(c * ex - s * ey, s * ex + c * ey, eyaw)
+        # What a live bay holds at replay time: the stall touch already pinned the push axis.
+        estimate = LatchEstimate(
+            est_latch, GATE_EST_SIGMA_Y_M, GATE_EST_SIGMA_X_M, GATE_EST_SIGMA_YAW_RAD, True
         )
+        est_wfl = est_latch.as_pose()
+        y0 = SkillReplay(skill, est_wfl, hold_s=0.0).command(0.0)
+        up = local_axis_world(est_wfl, 2)
+        pre = translate_pose(y0.wrist, PRE_APPROACH_M * up)
+        lift_z = est_latch.position[2] + LIFT_HEIGHT_M
+        above = lifted(pre, lift_z)
 
         max_tau = 0.0
         max_ratio = 0.0
@@ -554,58 +706,102 @@ class SkillValidator:
 
         latch_ready = False
         rig.ik.reset()
-        settle_ticks = 0
         m.opt.timestep = COARSE_FACTOR / PHYSICS_HZ
-        while (
-            not plan.done
-            or not latch_ready
-            or (not rig.reached(pre) and settle_ticks < SETTLE_MAX_TICKS)
-        ):
-            settle_ticks += 1 if plan.done else 0
-            if plan.index >= 1 and not latch_ready:  # lifted clear: move + reset the latch
-                rig.set_world_latch(new_latch)
-                rig.reset_latch(flap_jammed=True)
-                rig.set_bolt_x(skill.prototype.x_bolt_m)
-                latch_ready = True
-            rig.command(plan.step(), y0.fingers)
-            step_physics(m, d, SUBSTEPS // COARSE_FACTOR)  # coarse physics, free space only
-            monitor()
+        # Two legs, each settled on its target before the next starts: lift and turn into the
+        # skill's orientation at the lift height, then descend to the pre-approach pose. A large
+        # wrist turn can leave the arm sagging behind its plan; descending from there would
+        # drive the hand into the hook.
+        for waypoints, target in (([lifted(rig.wrist_pose(), lift_z), above], above), ([pre], pre)):
+            plan = ApproachPlan(rig.wrist_pose(), waypoints)
+            settle_ticks = 0
+            while (
+                not plan.done
+                or not latch_ready
+                or (not rig.reached(target) and settle_ticks < SETTLE_MAX_TICKS)
+            ):
+                settle_ticks += 1 if plan.done else 0
+                if plan.index >= 1 and not latch_ready:  # lifted clear: move + reset the latch
+                    rig.set_world_latch(true_latch)  # the simulator's truth
+                    rig.set_estimate(estimate)  # what control sees from here on
+                    rig.reset_latch(flap_jammed=True)
+                    rig.set_bolt_x(skill.prototype.x_bolt_m)
+                    latch_ready = True
+                rig.command(plan.step(), y0.fingers)
+                step_physics(m, d, SUBSTEPS // COARSE_FACTOR)  # coarse physics, free space only
+                monitor()
 
         m.opt.timestep = 1.0 / PHYSICS_HZ  # full-rate physics for the contact replay
         replay = SkillReplay(
             skill,
-            new_wfl,
+            est_wfl,
             start_wrist=pre,
             start_fingers=y0.fingers,
             blend_s=0.2,
             hold_s=0.2,
             latch_cache=cache,
         )
+        # Replay touch exactly as the coordinator runs it: armed at replay start, encoder-only,
+        # with the skill's own demo contact offset (no offset: no replay touch).
+        touch = TouchDetector()
+        if skill.touch_offset_m is None:
+            touch.disarm()
+        touch_shift: float | None = None
+        touch_rejected = False
         cleared = False
         for k in range(int(math.ceil(replay.total_s / CONTROL_DT))):
             cmd = replay.command(k * CONTROL_DT)
             rig.command(cmd.wrist, cmd.fingers)
             step_physics(m, d)
             monitor()
-            if rig.bolt_x() >= BOLT_CLEARED_M:
+            x_bolt = rig.bolt_x()
+            if x_bolt >= BOLT_CLEARED_M:
                 cleared = True
                 break
+            if touch.update(x_bolt, None):
+                est = touch_correct(
+                    rig.estimate, rig.index_tip_world(), x_bolt, skill.touch_offset_m
+                )
+                rig.set_estimate(est)  # a rejected touch keeps the pose and records the outlier
+                touch_rejected = est.rejected_correction_m is not None
+                touch_shift = est.rejected_correction_m if touch_rejected else est.last_correction_m
+                if not touch_rejected:
+                    replay.rebase(rig.world_from_latch(), (k + 1) * CONTROL_DT)
         passed = (
             cleared and max_tau < self.tau_hard_max and max_ratio < self.arm_margin and limits_ok
         )
         return RolloutResult(
-            perturbation, rig.bolt_x(), max_tau, max_ratio, limits_ok, cleared, passed
+            cond.perturbation,
+            rig.bolt_x(),
+            max_tau,
+            max_ratio,
+            limits_ok,
+            cleared,
+            passed,
+            cond,
+            touch_shift,
+            touch_rejected,
         )
 
     def validate(self, skill: SkillPrimitive) -> ValidationReport:
         t0 = time.perf_counter()
         cache: dict[int, tuple[Pose, dict[str, float], float]] = {}
-        results = tuple(self._rollout(skill, p, cache) for p in self.perturbations_deg)
-        return ValidationReport(results, time.perf_counter() - t0)
+        m = self.model
+        nominal = (m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy())
+        results: list[RolloutResult] = []
+        for cond in self.draw_conditions(skill.skill_id):
+            try:
+                results.append(self._rollout(skill, cond, cache))
+            finally:  # exact restore, even if the rollout raised
+                m.geom_friction[:] = nominal[0]
+                m.jnt_stiffness[:] = nominal[1]
+                m.qpos_spring[:] = nominal[2]
+        return ValidationReport(tuple(results), time.perf_counter() - t0, self.pass_min)
 
 
 __all__ = [
     "CONTROL_DT",
+    "GATE_PASS_MIN",
+    "GATE_ROLLOUTS",
     "PERTURBATIONS_DEG",
     "TAU_HARD_MAX_NM",
     "TAU_MARGIN_NM",
@@ -613,6 +809,7 @@ __all__ = [
     "ApproachPlan",
     "BayRig",
     "ReplayCommand",
+    "RolloutConditions",
     "RolloutResult",
     "SkillReplay",
     "SkillValidator",

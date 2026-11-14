@@ -1,4 +1,4 @@
-"""T-140: ATC fleet coordinator, confidence C(t), FIFO queue, torque tube and 3-rollout gate.
+"""T-140: ATC fleet coordinator, confidence C(t), FIFO queue, torque tube and 20-rollout gate.
 
 The scripted operator drives the coordinator through its public rescue/clutch API
 (``ConsoleInputState`` + ``OperatorInput``). Tests read ``flap_hinge`` only to assert simulator
@@ -33,9 +33,15 @@ from teleop.atc.types import (
 )
 from teleop.atc.validator import (
     CONTROL_DT,
+    GATE_PASS_MIN,
+    GATE_ROLLOUTS,
+    PERTURBATIONS_DEG,
     ApproachPlan,
+    RolloutConditions,
+    RolloutResult,
     SkillReplay,
     SkillValidator,
+    ValidationReport,
     lifted,
     pose_position,
     step_physics,
@@ -175,13 +181,15 @@ def rig(unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator) -> Rig
 # Waypoints (duration s, wrist delta from the safe hover in the latch frame in metres, finger
 # press fraction). The index finger rests behind the bolt hook, the thumb presses the raised
 # stopper flap flat (press fraction 1), then the wrist pushes the bolt clear.
+# Tuned for the randomized gate: y -9 mm centres the hand on the flap paddle across the
+# pose-estimate y error, and the 2.2 s push keeps a stiff flap spring pressed down.
 DEMO_PRESS = {"thumb_yaw": 0.6}
 DEMO_WAYPOINTS: list[tuple[float, tuple[float, float, float], float]] = [
     (0.0, (0.0, 0.0, 0.0), 0.0),
-    (0.4981, (0.0055, -0.004, -0.012), 0.0),
-    (0.8199, (0.0055, -0.004, -0.012), 1.0),
-    (0.3333, (0.0055, -0.004, -0.012), 1.0),
-    (1.4385, (0.0055 + 0.0458, -0.004, -0.012), 1.0),
+    (0.4981, (0.0, -0.009, -0.012), 0.0),
+    (0.8199, (0.0, -0.009, -0.012), 1.0),
+    (0.3333, (0.0, -0.009, -0.012), 1.0),
+    (2.2, (0.0458, -0.009, -0.012), 1.0),
 ]
 
 
@@ -436,7 +444,7 @@ def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> 
     assert len(co.rescue_slot_holders()) == 1
 
 
-def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg_12cm(
+def test_end_to_end_bay1_rescue_fits_dmp_passes_20_rollouts_and_bay2_clears_35deg_12cm(
     rig: Rig, validator: SkillValidator
 ) -> None:
     co = rig.co
@@ -453,13 +461,8 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
     assert co.state(1) == BayState.NOMINAL
     assert co.rig(1).bolt_x() >= BOLT_CLEARED_M
     report = co.last_report
-    assert report is not None and report.passed and report.total == 3
-    assert [r.perturbation for r in report.results] == [
-        (-0.08, -0.06, -30.0),
-        (0.0, 0.0, 0.0),
-        (0.08, 0.06, 30.0),
-    ]
-    assert all(r.bolt_x_m >= BOLT_CLEARED_M and r.joint_limits_ok for r in report.results)
+    assert report is not None and report.total == 20 and report.passed
+    assert report.threshold == GATE_PASS_MIN
     assert all(r.max_tau_ext_inf_nm < 12.0 for r in report.results)
     assert rig.sink.kinds() == [
         "STALL_ALERT",
@@ -474,13 +477,13 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
         "RESCUE_LOGGED",
         "VALIDATION_GATE",
     ]
-    assert rig.reasoner.contexts[-1].rollout_passed == 3
+    assert (rig.reasoner.contexts[-1].rollout_passed or 0) >= GATE_PASS_MIN
+    assert rig.reasoner.contexts[-1].rollout_total == GATE_ROLLOUTS
 
-    # The gate itself is fast (best of three warm runs). The spec target is VALIDATION_BUDGET_S
-    # (0.4 s), but CI runners and the booth laptop measure ~0.45-0.65 s, so assert a regression
-    # ceiling instead of the target, which wall-clock jitter would make flaky.
-    elapsed = min(validator.validate(skill).elapsed_s for _ in range(3))
-    assert elapsed < 1.0, f"validation gate took {elapsed:.3f}s"
+    # The 20-rollout gate measures ~6-9 s on the booth laptop (more replay time with the slower
+    # 2.2 s push, wall-clock jitter under load), so assert a regression ceiling with a ~2x margin
+    # rather than a target.
+    assert report.elapsed_s < 15.0, f"validation gate took {report.elapsed_s:.3f}s"
 
     # Bay 2 sits at +12 cm / +35 deg relative to Bay 1's latch frame.
     l1, l2 = co.rig(1).true_world_latch(), co.rig(2).true_world_latch()  # scene layout
@@ -921,3 +924,115 @@ def test_replay_rebase_blends_to_the_corrected_frame(rig: Rig) -> None:
     mid, old_mid = at(replay, t0 + 0.1), at(SkillReplay(skill, wfl), t0 + 0.1)
     assert np.linalg.norm(mid - old_mid) > 1e-4 and np.linalg.norm(mid - at(ref, t0 + 0.1)) > 1e-4
     np.testing.assert_allclose(at(replay, t0 + 0.25), at(ref, t0 + 0.25), atol=1e-9)
+
+
+# --------------------------------------------------------------------------- randomized gate
+
+
+def _res(passed: bool) -> RolloutResult:
+    cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
+    return RolloutResult(
+        (0.0, 0.0, 0.0), 0.06 if passed else 0.03, 1.0, 0.1, True, passed, passed, cond
+    )
+
+
+@pytest.fixture(scope="module")
+def rescued_skill(hand_spec: HandSpec, validator: SkillValidator) -> Iterator[SkillPrimitive]:
+    """The scripted Bay 1 rescue skill, fitted once per module."""
+    server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0, name="test-node").start()
+    client = UnoQClient(
+        "127.0.0.1", server.udp_port, server.tcp_port, local_server=server
+    ).connect()
+    try:
+        rig = Rig(client, hand_spec, validator)
+        _rescued_rig(rig)
+        yield next(iter(rig.co.library.values()))
+    finally:
+        client.close()
+
+
+def test_gate_conditions_are_seeded_and_cover_spec_offsets(validator: SkillValidator) -> None:
+    a, b = validator.draw_conditions("s/1"), validator.draw_conditions("s/1")
+    assert a == b and len(a) == 20
+    assert {round(c.perturbation[2] / 30) for c in a} == {-1, 0, 1}  # all three spec yaws
+    assert all(0.8 <= c.flap_stiffness_scale <= 1.2 for c in a)
+    assert all(abs(c.flap_springref_deg - 35.0) <= 3.0 for c in a)
+    assert all(0.75 <= c.friction_scale <= 1.25 for c in a)
+    assert a != validator.draw_conditions("s/2")  # the skill id seeds the gate RNG
+
+
+def test_rollout_restores_model_parameters(
+    validator: SkillValidator, rescued_skill: SkillPrimitive
+) -> None:
+    m = validator.model
+    before = m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy()
+    report = validator.validate(rescued_skill)
+    assert report.total == GATE_ROLLOUTS
+    np.testing.assert_array_equal(m.geom_friction, before[0])
+    np.testing.assert_array_equal(m.jnt_stiffness, before[1])
+    np.testing.assert_array_equal(m.qpos_spring, before[2])
+
+
+def test_rollout_restores_model_parameters_when_a_rollout_raises(
+    validator: SkillValidator, rescued_skill: SkillPrimitive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = validator.model
+    before = m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy()
+
+    def boom(*_: object, **__: object) -> None:
+        raise RuntimeError("rollout crashed")
+
+    monkeypatch.setattr(validator.rig, "command", boom)
+    with pytest.raises(RuntimeError, match="rollout crashed"):
+        validator.validate(rescued_skill)
+    np.testing.assert_array_equal(m.geom_friction, before[0])
+    np.testing.assert_array_equal(m.jnt_stiffness, before[1])
+    np.testing.assert_array_equal(m.qpos_spring, before[2])
+
+
+def test_threshold_rule() -> None:
+    r = ValidationReport(
+        results=(_res(True),) * 18 + (_res(False),) * 2, elapsed_s=1.0, threshold=18
+    )
+    assert r.passed and r.pass_rate == pytest.approx(0.9)
+    assert not dataclasses.replace(r, threshold=19).passed
+
+
+def _run_conditions(
+    validator: SkillValidator,
+    skill: SkillPrimitive,
+    conds: tuple[RolloutConditions, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> ValidationReport:
+    monkeypatch.setattr(validator, "draw_conditions", lambda _skill_id: conds)
+    return validator.validate(skill)
+
+
+def test_gate_rollouts_are_independent_trials(
+    validator: SkillValidator, rescued_skill: SkillPrimitive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jammed = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.2, 38.0, 1.25)
+    nominal = RolloutConditions((0.08, 0.06, 30.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
+    report = _run_conditions(validator, rescued_skill, (nominal, jammed, nominal), monkeypatch)
+    first, _, again = report.results
+    assert first == again  # the rollout in between leaves nothing behind
+
+
+def test_rescued_skill_carries_its_demo_contact_offset(rescued_skill: SkillPrimitive) -> None:
+    assert rescued_skill.touch_offset_m is not None
+    assert -0.03 < rescued_skill.touch_offset_m < 0.0  # the hook face sits ahead of the tip
+
+
+def test_replay_touch_uses_the_skill_offset(
+    validator: SkillValidator, rescued_skill: SkillPrimitive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exact = [RolloutConditions(p, (0.0, 0.0, 0.0), 1.0, 35.0, 1.0) for p in PERTURBATIONS_DEG]
+    ahead = [dataclasses.replace(c, est_error=(0.001, 0.0, 0.0)) for c in exact]
+    results = _run_conditions(validator, rescued_skill, (*exact, *ahead), monkeypatch).results
+    shifts = [r.touch_correction_m for r in results]
+    assert all(s is not None for s in shifts) and not any(r.touch_rejected for r in results)
+    nom, plus = np.array(shifts[:3], dtype=float), np.array(shifts[3:], dtype=float)
+    assert np.all(np.abs(nom) < 0.0015)  # the demo's own offset: no posture bias
+    # +1 mm along the push axis is corrected by about -1 mm (mean over the spec poses; a single
+    # contact's encoder trigger scatters by a few tenths of a mm).
+    assert float(np.mean(plus - nom)) == pytest.approx(-0.001, abs=4e-4)
