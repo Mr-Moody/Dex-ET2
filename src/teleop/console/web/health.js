@@ -6,6 +6,7 @@
   const RECONNECT_TARGETS = ["hotspot", "gloves", "panel"];
   const LABELS = { hotspot: "Hotspot", gloves: "Gloves", panel: "Control panel" };
   const strip = document.getElementById("health");
+  let lastSig = null; // JSON of the list last rendered
   const last = {}; // name -> previous level, to toast only on a transition to fail
 
   function sendReconnect(name) {
@@ -59,10 +60,17 @@
   function renderHealth(list) {
     if (!Array.isArray(list)) {
       strip.hidden = true;
+      lastSig = null;
       return;
     }
-    strip.replaceChildren(...list.map(pill));
-    strip.hidden = list.length === 0;
+    // Telemetry arrives at ~10 Hz; rebuilding the pills each time would drop button clicks
+    // and restart the spinner, so the DOM is only touched when the health list changed.
+    const sig = JSON.stringify(list);
+    if (sig !== lastSig) {
+      lastSig = sig;
+      strip.replaceChildren(...list.map(pill));
+      strip.hidden = list.length === 0;
+    }
     for (const h of list) {
       if (h.level === "fail" && last[h.name] !== undefined && last[h.name] !== "fail") {
         if (typeof toast === "function") toast("!", `${LABELS[h.name] || h.name}: ${h.summary}`, "warn");
