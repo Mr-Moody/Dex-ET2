@@ -391,6 +391,8 @@ refusal. The JSONL log held only frame hashes.
 
 With the persistent Windows voice and no Gemini TTS, five of six lines started speaking as soon as
 the call-out was made (0.0 s); one waited 1.3 s behind the line before it. Saying a line takes
-3–7 s at the default speaking rate. With `--gemini-tts` and the 1.5 s cut-off, every line had
+3–7 s at the default speaking rate. The voice now runs faster
+(System.Speech rate 2; `say` and `espeak` at 230 words a minute; `spd-say -r 30`): the stall line
+went from 4.7 s to 3.6 s and the refusal from 6.7 s to 5.3 s. With `--gemini-tts` and the 1.5 s cut-off, every line had
 started 1.5 s late (4.2 s for one that queued). Each `speech` record now has `start_ms` (queued
 to speaking) and `speak_ms`.

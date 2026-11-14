@@ -226,9 +226,10 @@ def test_player_and_voice_commands(system: str, monkeypatch: pytest.MonkeyPatch)
     player = wav_player_command("C:/tmp/a.wav")
     assert voice is not None
     if system == "Windows":
-        assert "it''s bay 1" in voice[-1] and player is not None and "PlaySync" in player[-1]
+        assert "it''s bay 1" in voice[-1] and "$s.Rate = 2" in voice[-1]
+        assert player is not None and "PlaySync" in player[-1]
     else:
-        assert voice == ["say", "it's bay 1"]
+        assert voice == ["say", "-r", "230", "it's bay 1"]
 
 
 def test_linux_without_players_has_no_commands(monkeypatch: pytest.MonkeyPatch) -> None:

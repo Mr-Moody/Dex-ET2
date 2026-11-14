@@ -42,6 +42,12 @@ TTS_DEADLINE_S = 1.5  # Gemini TTS took 4+ s on every live line; see docs/copilo
 TTS_REQUEST_TIMEOUT_S = 15.0  # per-socket limit for the late request; the deadline is above
 WAV_CACHE_SIZE = 32  # template lines repeat ("Clutch engaged on bay 1."), so keep their audio
 PLAY_TIMEOUT_S = 30.0
+# Faster than the default voices (which made lines take 3-7 s): System.Speech runs -10..10 (0 is
+# normal, 2 is about a third faster); macOS ``say`` and ``espeak`` default to about 175 words a
+# minute; ``spd-say`` takes -100..100.
+WINDOWS_VOICE_RATE = 2
+WORDS_PER_MINUTE = 230
+SPD_SAY_RATE = 30
 
 Clock = Callable[[], int]
 
@@ -84,15 +90,17 @@ def system_voice_command(text: str) -> list[str] | None:
         quoted = text.replace("'", "''")
         script = (
             "Add-Type -AssemblyName System.Speech; "
-            "(New-Object System.Speech.Synthesis.SpeechSynthesizer)"
-            f".Speak('{quoted}')"
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$s.Rate = {WINDOWS_VOICE_RATE}; $s.Speak('{quoted}')"
         )
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
     if system == "Darwin":
-        return ["say", text]
-    for tool in ("spd-say", "espeak-ng", "espeak"):
+        return ["say", "-r", str(WORDS_PER_MINUTE), text]
+    if shutil.which("spd-say"):
+        return ["spd-say", "-r", str(SPD_SAY_RATE), text]
+    for tool in ("espeak-ng", "espeak"):
         if shutil.which(tool):
-            return [tool, text]
+            return [tool, "-s", str(WORDS_PER_MINUTE), text]
     return None
 
 
@@ -143,6 +151,7 @@ _VOICE_SCRIPT = (
     "[Console]::InputEncoding = [Text.Encoding]::UTF8; "
     "Add-Type -AssemblyName System.Speech; "
     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+    f"$s.Rate = {WINDOWS_VOICE_RATE}; "
     "[Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); "
     "while (($l = [Console]::In.ReadLine()) -ne $null) { "
     "if ($l.Length -gt 0) { $s.Speak($l) }; "
