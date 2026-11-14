@@ -11,6 +11,7 @@ dependencies = [
     "lz4>=4.4.5",
     "mujoco>=4.0.1",
     "numpy>=2.0",
+    "pillow>=13.0.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
     "solders>=0.23",

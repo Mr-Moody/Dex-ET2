@@ -1,12 +1,12 @@
 ---
 id: T-173
 title: Offscreen CCTV feed renderer and render worker thread
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: lead-laptop
+branch: feat/feed-renderer
 depends_on: [T-170, T-171, T-172]
 plan: docs/superpowers/plans/2026-11-14-fleet-ops-console.md#task-t-173-offscreen-feed-renderer-and-render-worker
-claimed_at: null
+claimed_at: '2026-11-14T05:51:27+00:00'
 ---
 
 **Fleet ops console, rendering. Edit only `src/teleop/console/{snapshot,render}.py`, `tests/console/test_render.py`, and `pyproject.toml`/`uv.lock` (`uv add pillow` only).**
