@@ -1,7 +1,7 @@
 ---
 id: T-199
 title: Show the Panda arm in the console rescue close-ups
-status: claimed
+status: in_review
 owner: ethan
 branch: fix/rescue-views-show-arm
 depends_on: [T-173]
