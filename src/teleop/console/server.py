@@ -69,8 +69,7 @@ def _scrub_json(obj: Any) -> Any:
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, Mapping):
-        items = cast("Mapping[object, object]", obj).items()
-        return {str(k): _scrub_json(v) for k, v in items}
+        return {str(k): _scrub_json(v) for k, v in cast("Mapping[Any, Any]", obj).items()}
     if isinstance(obj, list | tuple):
         return [_scrub_json(v) for v in cast("Sequence[object]", obj)]
     return obj

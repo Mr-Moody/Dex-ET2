@@ -45,8 +45,7 @@ def _scrub(obj: Any) -> Any:
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, Mapping):
-        items = cast("Mapping[object, object]", obj).items()
-        return {str(k): _scrub(v) for k, v in items}
+        return {str(k): _scrub(v) for k, v in cast("Mapping[Any, Any]", obj).items()}
     if isinstance(obj, list | tuple):
         return [_scrub(v) for v in cast("Sequence[object]", obj)]
     return obj
@@ -296,19 +295,19 @@ class TelemetryAdapter:
                 gate["vlm_reason"] = vlm_reason
                 gate["vlm_latency_ms"] = vlm_latency_ms
                 gate["vlm_model"] = vlm_model
+                vlm_source: Any = getattr(g, "vlm_source", None)  # optional GateStatus field
+                if vlm_source is not None:
+                    gate["vlm_source"] = vlm_source
         view_audit: Any = getattr(view, "audit", None)
+        raw_audit: Any = self._latest_audit
         if view_audit is not None:
-            raw_audit: Any = (
-                view_audit.to_dict()
-                if hasattr(view_audit, "to_dict") and callable(view_audit.to_dict)
-                else (
-                    dict(cast("Mapping[str, Any]", view_audit))
-                    if isinstance(view_audit, Mapping)
-                    else view_audit
-                )
-            )
-        else:
-            raw_audit = self._latest_audit
+            to_dict: Any = getattr(view_audit, "to_dict", None)
+            if callable(to_dict):
+                raw_audit = to_dict()
+            elif isinstance(view_audit, Mapping):
+                raw_audit = dict(cast("Mapping[str, Any]", view_audit))
+            else:
+                raw_audit = view_audit
         rec = view.recovery
         recovery = {
             "backend": rec.backend,
