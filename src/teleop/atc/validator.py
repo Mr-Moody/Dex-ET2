@@ -27,6 +27,7 @@ import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.atc.estimate import LatchEstimate
 from teleop.atc.types import BOLT_CLEARED_M, LatchPose, SkillPrimitive
 from teleop.sim.bays import (
     CANONICAL_LATCH,
@@ -206,7 +207,9 @@ class BayRig:
         }
         self._latch_body = int(model.body(f"{p}latch_base").id)
         self._site = int(model.site(f"{p}wrist_site").id)
+        self._index_tip_site = int(model.site(f"{p}right_index_tip").id)
         self._bolt_qadr = int(model.joint(f"{p}bolt_slide").qposadr[0])
+        self.estimate = LatchEstimate(self.true_world_latch(), 0.0, 0.0, 0.0)
         arm = [model.joint(n) for n in self.torque.joint_names[:7]]
         self._arm_range = np.array([model.jnt_range[int(j.id)] for j in arm], dtype=np.float64)
         self._arm_qadr = np.array([int(j.qposadr[0]) for j in arm])
@@ -222,17 +225,33 @@ class BayRig:
 
     # -- frames
 
-    def world_latch(self) -> LatchPose:
+    def true_world_latch(self) -> LatchPose:
+        """Ground-truth latch pose: for display and tests only, never for control."""
         pos = self.model.body_pos[self._latch_body]
         q = self.model.body_quat[self._latch_body]  # wxyz, a pure yaw
         yaw = 2.0 * math.atan2(float(q[3]), float(q[0]))
         return LatchPose(position=(float(pos[0]), float(pos[1]), float(pos[2])), yaw_rad=yaw)
 
+    def world_latch(self) -> LatchPose:
+        """The control-side latch pose: the (noisy) estimate, not the ground truth."""
+        return self.estimate.pose
+
     def world_from_latch(self) -> Pose:
         return self.world_latch().as_pose()
 
+    def set_estimate(self, est: LatchEstimate) -> None:
+        self.estimate = est
+
+    def index_tip_world(self) -> FloatArray:
+        """World position of the right index fingertip site (forward kinematics: proprioception)."""
+        return np.array(self.data.site_xpos[self._index_tip_site], dtype=np.float64)
+
     def set_world_latch(self, pose: LatchPose) -> None:
-        """Move the latch body in the compiled model (no recompile). Call before ``reset``."""
+        """Move the latch body in the compiled model (no recompile). Call before ``reset``.
+
+        The estimate is set to the same pose with zero sigma (an exact placement).
+        """
+        self.estimate = LatchEstimate(pose, 0.0, 0.0, 0.0)
         self.model.body_pos[self._latch_body] = np.asarray(pose.position, dtype=np.float64)
         self.model.body_quat[self._latch_body] = np.asarray(
             yaw_quat_wxyz(pose.yaw_rad), dtype=np.float64

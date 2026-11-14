@@ -50,6 +50,12 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.atc.estimate import (
+    POSE_SIGMA_XY_M,
+    POSE_SIGMA_YAW_RAD,
+    LatchEstimate,
+    LatchEstimator,
+)
 from teleop.atc.types import (
     BOLT_CLEARED_M,
     BaySnapshot,
@@ -157,6 +163,9 @@ class CoordinatorConfig:
     max_classify_s: float = 0.3
     # The Inspire fingers have no abduction compliance, so a blocked push loads the arm almost
     # directly: a 3 mm lead keeps a flap stall under the arm torque guard.
+    seed: int = 0
+    pose_sigma_xy_m: float = POSE_SIGMA_XY_M
+    pose_sigma_yaw_rad: float = POSE_SIGMA_YAW_RAD
     push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
 
 
@@ -385,6 +394,10 @@ class AtcCoordinator:
         self.last_classify_ms = 0.0
         self.last_report: ValidationReport | None = None
         self._queue: list[int] = []
+        self._estimator = LatchEstimator(
+            self.config.seed, self.config.pose_sigma_xy_m, self.config.pose_sigma_yaw_rad
+        )
+        self._cycles: dict[int, int] = {}
         self._bays = {b: _Bay(b, BayRig(model, data, b)) for b in bays}
         for b in BACKGROUND_BAYS:
             with contextlib.suppress(KeyError):  # scene built without the background bays
@@ -392,6 +405,7 @@ class AtcCoordinator:
         for bay in self._bays.values():
             bay.rig.home_keyframe()  # the only kinematic arm placement: once, at scene build
         for bay in self._bays.values():
+            self._cycles[bay.bay_id] = 0
             self.start_cycle(bay.bay_id)
 
     @classmethod
@@ -466,6 +480,12 @@ class AtcCoordinator:
     def outcome(self, bay_id: int) -> str:
         return self._bays[bay_id].outcome
 
+    def estimate(self, bay_id: int) -> LatchEstimate:
+        return self._bays[bay_id].rig.estimate
+
+    def cycle_count(self, bay_id: int) -> int:
+        return self._cycles[bay_id]
+
     # ------------------------------------------------------------------ cycle control
 
     def start_cycle(
@@ -479,6 +499,12 @@ class AtcCoordinator:
         """
         bay = self._bays[bay_id]
         rig = bay.rig
+        # A new pallet is a new pose estimate (cycle 0 at build). Sampled here rather than at
+        # the lift-clear reset so the approach waypoints below are built on the same estimate.
+        rig.set_estimate(
+            self._estimator.sample(rig.true_world_latch(), bay_id, self._cycles[bay_id])
+        )
+        self._cycles[bay_id] += 1
         wfl = rig.world_from_latch()
         start = compose_pose(wfl, self.routine.pose_at(0.0))
         here = rig.wrist_pose()
