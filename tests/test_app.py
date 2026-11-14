@@ -238,6 +238,36 @@ def test_calibrate_from_replay_writes_ranges(tmp_path: Path, capsys) -> None:
 
 
 @needs_leap
+def test_episode_io_warms_renderers_up_front(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The slow first render happens at setup, not inside the first recorded episode."""
+    from teleop.app import TeleopApp
+    from teleop.commands import record
+
+    renders: list[str] = []
+
+    class FakeRenderer:
+        def __init__(self, _model: object, height: int, width: int) -> None:
+            self.shape = (height, width, 3)
+            self.camera = ""
+
+        def update_scene(self, _data: object, camera: str) -> None:
+            self.camera = camera
+
+        def render(self) -> np.ndarray:
+            renders.append(self.camera)
+            return np.zeros(self.shape, dtype=np.uint8)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(record.mj, "Renderer", FakeRenderer)
+    cfg = _cfg(cameras=[CameraConfig("front", 32, 32), CameraConfig("top", 16, 16)])
+    io = record.EpisodeIO(TeleopApp(cfg))
+    assert sorted(renders) == ["front", "top"]
+    io.close()
+
+
+@needs_leap
 @pytest.mark.lerobot
 @pytest.mark.usefixtures("offscreen_render_ok")
 def test_record_two_short_episodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

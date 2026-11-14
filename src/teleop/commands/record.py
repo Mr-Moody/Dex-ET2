@@ -60,6 +60,9 @@ class EpisodeIO:
         self.renderers: dict[str, Any] = {
             c.name: mj.Renderer(model, c.height, c.width) for c in app.cfg.cameras
         }
+        # The first render per camera is slow (GL context and shader warm-up; ~0.5 s here,
+        # over 1 s on software EGL). Do it now so it doesn't stall the first episode's loop.
+        self.images()
 
     def cube_z(self) -> float | None:
         """Height (m) of the task's ``cube`` body, or None if the task has none."""
