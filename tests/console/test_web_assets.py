@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 import urllib.request
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -51,3 +55,33 @@ def test_server_serves_assets(server: ConsoleServer, path: str, ctype: str) -> N
     with urllib.request.urlopen(f"{server.url.rstrip('/')}{path}", timeout=5) as r:
         assert r.status == 200
         assert ctype in r.headers.get("Content-Type", "")
+
+
+_FRAME_URLS_HARNESS = """
+const revoked = [];
+const revoke = (u) => revoked.push(u);
+const s = { img: {}, url: null, pending: null };
+showFrame(s, "u1", revoke); s.img.onload();          // u1 shown
+showFrame(s, "u2", revoke); const lateU2 = s.img.onload;
+showFrame(s, "u3", revoke);                          // u2 superseded before it loaded
+s.img.onload();                                      // u3 shown, u1 freed
+lateU2();                                            // a stale callback must be a no-op
+showFrame(s, "u4", revoke); s.img.onerror();         // a broken frame is freed too
+console.log(JSON.stringify({ revoked, url: s.url, pending: s.pending }));
+"""
+
+
+def test_frame_urls_are_always_revoked(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = _read("console.js")
+    m = re.search(r"// <frame-urls>(.*?)// </frame-urls>", js, re.DOTALL)
+    assert m, "console.js must keep the frame URL helper between <frame-urls> markers"
+    script = tmp_path / "harness.js"
+    script.write_text(m.group(1) + _FRAME_URLS_HARNESS, encoding="utf-8")
+    out = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout)
+    assert sorted(result["revoked"]) == ["u1", "u2", "u4"]  # every superseded URL is freed
+    assert result["url"] == "u3" and result["pending"] is None
