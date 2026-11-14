@@ -11,6 +11,12 @@ a bay, ``SPACE`` toggles the clutch, ``F``/``G``/``P`` arm the Bay 1 flap, Bay 2
 pinned-bolt faults, ``R`` resets (see ``teleop.atc.stage``). ``--script`` plays the six-beat
 stage script with a scripted glove; headless it exits 0 only if every beat passed.
 
+Recovery after a matched stall: ``--recovery-backend dmp`` (default, the learned DMP skills),
+``hybrid`` (a gated ACT checkpoint from ``--act-checkpoint``, DMP behind it) or ``act``; ``M``
+cycles it live. ``--record-episodes DIR`` saves every recovery as a LeRobot episode and
+``--headless --generate N`` produces N scripted rescue episodes. These load their modules only
+when used, so the default run needs no torch.
+
 Hooks come from the environment (``.env``): ``SOLANA_RPC_URL``/``SOLANA_KEYPAIR_PATH`` for the
 compliance chain and ``VERDA_API_KEY``/``VERDA_BASE_URL``/``NEMOTRON_MODEL`` for the reasoner.
 Both fall back to local/offline modes.
@@ -21,6 +27,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import importlib
 import logging
 from collections.abc import Generator, Mapping
 from dataclasses import dataclass, field
@@ -32,6 +39,7 @@ import yaml
 from teleop.app import make_source
 from teleop.atc.coordinator import OperatorInput
 from teleop.atc.hud import hud_lines, hud_overlays
+from teleop.atc.recovery import RecoveryBackend
 from teleop.atc.stage import (
     AudioCues,
     ConsoleSource,
@@ -83,10 +91,41 @@ class AtcConfig:
     console_port: int = 8765
     console_fps: int = 30
     open_browser: bool = True
+    recovery_backend: str = "dmp"  # dmp | hybrid | act
+    act_checkpoint: Path | None = None  # models/act/<run>/ with gate.json
+    act_device: str = "cuda"
+    record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
+    generate: int | None = None  # headless: generate N scripted rescue episodes
+    seed: int = 0
 
 
-_PATH_FIELDS = {"replay_file", "calibration"}
+_PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes"}
 DISPLAYS = ("console", "viewer")
+BACKENDS = tuple(b.value for b in RecoveryBackend)
+
+# Lazy hooks into the ACT recovery track: flag -> (module, attribute). Imported only when the
+# flag is used, so the default ``dmp`` run never imports torch or lerobot.
+HOOKS: dict[str, tuple[str, str]] = {
+    "--act-checkpoint": ("teleop.atc.act_recovery", "load_act_factory"),
+    "--record-episodes": ("teleop.atc.episodes", "open_episode_sink"),
+    "--generate": ("teleop.atc.generate", "run_generation"),
+}
+
+
+class HookMissing(Exception):
+    def __init__(self, flag: str, module: str) -> None:
+        super().__init__(f"{flag} is not implemented yet ({module})")
+
+
+def load_hook(flag: str) -> Any:
+    module, attr = HOOKS[flag]
+    try:
+        mod = importlib.import_module(module)
+    except ModuleNotFoundError as exc:
+        if exc.name is not None and (module == exc.name or module.startswith(exc.name + ".")):
+            raise HookMissing(flag, module) from exc
+        raise
+    return getattr(mod, attr)
 
 
 def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
@@ -113,6 +152,10 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
         cfg.studio = StudioConfig(**cast("dict[str, Any]", studio_raw))
     if cfg.display not in DISPLAYS:
         raise ValueError(f"display must be one of {DISPLAYS}, got {cfg.display!r}")
+    if cfg.recovery_backend not in BACKENDS:
+        raise ValueError(
+            f"recovery_backend must be one of {BACKENDS}, got {cfg.recovery_backend!r}"
+        )
     return cfg
 
 
@@ -188,6 +231,12 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
+    ap.add_argument("--recovery-backend", choices=BACKENDS, default=None)
+    ap.add_argument("--act-checkpoint", type=Path, default=None, help="ACT run dir with gate.json")
+    ap.add_argument("--act-device", default=None, help="torch device for ACT (default cuda)")
+    ap.add_argument("--record-episodes", type=Path, default=None, help="LeRobot dataset dir")
+    ap.add_argument("--generate", type=int, default=None, help="headless: N scripted episodes")
+    ap.add_argument("--seed", type=int, default=None)
     add_hotspot_args(ap)
     return ap
 
@@ -225,6 +274,19 @@ def main(argv: list[str]) -> int:
         from dotenv import load_dotenv
 
         load_dotenv(ns.env_file)
+    if cfg.generate is not None and (not cfg.headless or cfg.record_episodes is None):
+        print("teleop atc: --generate needs --headless and --record-episodes")
+        return 2
+    used = {
+        "--act-checkpoint": cfg.act_checkpoint is not None,
+        "--record-episodes": cfg.record_episodes is not None,
+        "--generate": cfg.generate is not None,
+    }
+    try:
+        hooks = {flag: load_hook(flag) for flag, on in used.items() if on}
+    except HookMissing as exc:
+        print(f"teleop atc: {exc}")
+        return 3
     try:
         watchdog = maybe_hotspot(ns)
     except (HotspotConfigError, RuntimeError) as exc:
@@ -250,15 +312,50 @@ def main(argv: list[str]) -> int:
         unoq_label=f"{label} | compliance {sink.mode} | reasoner {reasoner.mode}",
     )
     logger.info("atc: %s", controller.unoq_label)
+    sink_handle: Any = None
     try:
+        _setup_recovery(cfg, controller, hooks.get("--act-checkpoint"))
+        if "--record-episodes" in hooks:
+            scripted = cfg.generate is not None or cfg.source == "synthetic"
+            source = "scripted" if scripted else "glove"
+            sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
+            controller.coordinator.set_observer(sink_handle)
+        if "--generate" in hooks:
+            assert cfg.generate is not None
+            n = int(hooks["--generate"](controller, sink_handle, cfg.generate, cfg.seed))
+            print(f"teleop atc: generated {n} successful episodes -> {cfg.record_episodes}")
+            return 0 if n >= cfg.generate else 1
         return _run(cfg, controller)
     except KeyboardInterrupt:
         return 0
     finally:
+        if sink_handle is not None:
+            controller.coordinator.set_observer(None)
+            sink_handle.close()
+        act = controller.coordinator.act
+        if act is not None:
+            act.close()
         controller.close()
         unoq.close()
         if watchdog is not None:
             watchdog.stop()
+
+
+def _setup_recovery(cfg: AtcConfig, controller: StageController, load_act: Any) -> None:
+    """Set the recovery backend and load the ACT release; any ACT failure falls back to dmp."""
+    from teleop.policy.manifest import ManifestError
+
+    co = controller.coordinator
+    backend = RecoveryBackend(cfg.recovery_backend)
+    if load_act is not None and cfg.act_checkpoint is not None:
+        try:
+            co.set_act(load_act(cfg.act_checkpoint, cfg.act_device, co.model, co.data))
+        except (ManifestError, OSError) as exc:
+            logger.warning("atc: ACT checkpoint not loaded (%s); recovery backend dmp", exc)
+            co.backend_note = f"ACT unavailable ({exc}): back to dmp"
+            backend = RecoveryBackend.DMP
+    co.set_recovery_backend(backend)
+    logger.info("atc: recovery backend %s", co.recovery_backend.value)
 
 
 def _run(cfg: AtcConfig, controller: StageController) -> int:
