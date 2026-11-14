@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,11 +21,14 @@ from teleop.atc.hud import (
 )
 from teleop.atc.stage import (
     KEYMAP,
+    STAGE_SEED,
     AudioCues,
     StageAction,
     merge_console,
+    worst_failure,
 )
 from teleop.atc.types import BaySnapshot, BayState, ConsoleInputState, StallMatch
+from teleop.atc.validator import RolloutConditions, RolloutResult, ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, make_event
 from teleop.health.model import Health, Level
 from teleop.reasoning.protocol import ReasoningContext, ReasoningVerdict
@@ -242,12 +246,21 @@ def unoq() -> Iterator[object]:
 @needs_models
 def test_atc_headless_scripted_6_beat_stage_run_completes(unoq: object) -> None:
     from teleop.atc.stage import BEATS, StageController, StageDirector
+    from teleop.commands.atc import DEFAULT_CONFIG, load_config, resolve_seed
     from teleop.unoq.client import UnoQClient
 
     assert isinstance(unoq, UnoQClient)
     sink, reasoner, speaker = RecordingSink(), RecordingReasoner(), FakeSpeaker()
+    # The show's own settings: what `teleop atc --headless --script` resolves by default.
+    cfg = load_config(DEFAULT_CONFIG, {"script": True})
     controller = StageController.build(
-        unoq, sink, reasoner, audio=AudioCues(speaker), cycle_dwell_s=0.5
+        unoq,
+        sink,
+        reasoner,
+        audio=AudioCues(speaker),
+        cycle_dwell_s=cfg.cycle_dwell_s,
+        include_background_bays=cfg.background_bays,
+        seed=resolve_seed(cfg),
     )
     director = StageDirector(controller)
     for _ in range(12_000):
@@ -264,7 +277,7 @@ def test_atc_headless_scripted_6_beat_stage_run_completes(unoq: object) -> None:
     assert kinds[:4] == ["STALL_ALERT", "RESCUE_LOGGED", "VALIDATION_GATE", "SKILL_DEPLOYED"]
     assert len(co.library) == 1
     view = controller.hud_view()
-    assert view.gate.ok and view.gate.passed == 3 and view.gate.total == 3
+    assert view.gate.ok and (view.gate.passed or 0) >= 18 and view.gate.total == 20
     assert view.gate.fit_ms is not None
     # Beat 5: Bay 2 cleared its rotated/shifted jam autonomously.
     autonomous = [e for e in sink.events if e.kind == "RESCUE_LOGGED" and e.bay_id == 2]
@@ -309,3 +322,106 @@ def test_atc_command_headless_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         ]
     )
     assert rc == 0
+
+
+def _report(*rollouts: tuple[bool, RolloutConditions]) -> ValidationReport:
+    results = tuple(
+        RolloutResult((0.0, 0.0, 0.0), 0.03, 1.0, 0.1, True, ok, ok, cond) for ok, cond in rollouts
+    )
+    return ValidationReport(results, 1.0)
+
+
+def test_worst_failure_ranks_offset_from_nominal_not_absolute_rest_angle() -> None:
+    nominal = 35.0
+    cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0029, 0.0), 1.0, nominal, 1.0)
+    stiff = dataclasses.replace(cond, flap_stiffness_scale=1.24)
+    for c, want in ((stiff, "+24% flap stiffness"), (cond, "2.9 mm y error")):
+        got = worst_failure(_report((False, c)), nominal)
+        assert got is not None and want in got and "rest angle" not in got
+    both = dataclasses.replace(cond, flap_stiffness_scale=1.24)
+    got = worst_failure(_report((False, both)), nominal)
+    assert got is not None and ("stiffness" in got or "y error" in got)
+
+
+def test_worst_failure_none_without_failures() -> None:
+    cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
+    assert worst_failure(_report((True, cond)), 35.0) is None
+    assert worst_failure(_report(), 35.0) is None
+    assert worst_failure(None, 35.0) is None
+
+
+def test_format_gate_shows_randomized_pass_count() -> None:
+    g = GateStatus(
+        fit_ms=12.0,
+        passed=19,
+        total=20,
+        elapsed_s=3.1,
+        ok=True,
+        conditions="randomized pose, friction, flap spring and rest angle",
+    )
+    assert "19/20 PASS (randomized pose, friction, flap spring and rest angle)" in format_gate(g)
+
+
+def test_bay_row_shows_pose_sigma_and_touch_correction() -> None:
+    snap = BaySnapshot(
+        1,
+        BayState.NOMINAL,
+        0.9,
+        0.0,
+        0.0,
+        "ev_latch_v1",
+        pose_sigma_mm=3.0,
+        pose_sigma_yaw_deg=1.5,
+        touch_correction_mm=4.2,
+    )
+    _, value = format_bay_table(HudView(bays=(snap,), queue=()))
+    assert "pose ±3 mm/±1.5°" in value and "touch 4.2 mm" in value
+    bare = BaySnapshot(1, BayState.NOMINAL, 0.9, 0.0, 0.0, "ev_latch_v1", pose_sigma_mm=3.0)
+    _, value = format_bay_table(HudView(bays=(bare,), queue=()))
+    assert "pose ±3 mm" in value and "touch" not in value
+
+
+@needs_models
+def test_cli_seed_reaches_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from teleop.atc.stage import StageController
+    from teleop.commands import atc
+
+    seen: list[tuple[int, float, int]] = []
+    real_build = StageController.build
+
+    def spy(*args: object, **kwargs: object) -> StageController:
+        ctl = real_build(*args, **kwargs)  # type: ignore[arg-type]
+        cfg = ctl.coordinator.config
+        assert ctl.coordinator.validator.pass_min == cfg.gate_pass_min
+        seen.append((cfg.seed, cfg.realism, cfg.gate_pass_min))
+        return ctl
+
+    monkeypatch.setattr(StageController, "build", staticmethod(spy))
+    monkeypatch.chdir(tmp_path)
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "UNOQ_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    base = [
+        "--headless",
+        "--steps",
+        "1",
+        "--unoq-host",
+        "127.0.0.1",
+        "--unoq-tcp-port",
+        "1",
+        "--env-file",
+        str(tmp_path / "missing.env"),
+    ]
+    assert atc.main([*base, "--seed", "5"]) == 0
+    assert atc.main(base) == 0
+    assert atc.main([*base, "--realism", "0.5", "--gate-pass-min", "16"]) == 0
+    assert seen[0][0] == 5 and seen[1][0] == 0
+    assert seen[2][1:] == (0.5, 16)
+
+
+def test_resolve_seed_defaults() -> None:
+    from teleop.commands.atc import AtcConfig, resolve_seed
+
+    assert resolve_seed(AtcConfig()) == 0
+    assert resolve_seed(AtcConfig(script=True)) == STAGE_SEED
+    assert resolve_seed(AtcConfig(script=True, seed=2)) == 2
+    assert resolve_seed(AtcConfig(seed=7)) == 7

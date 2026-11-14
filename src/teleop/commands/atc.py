@@ -1,7 +1,7 @@
 """``teleop atc``: 4-bay fleet supervisor with HUD, keyboard stage controls and audio cues.
 
     teleop atc [--source studio|synthetic|replay] [--unoq-host HOST] [--headless --steps N]
-               [--script] [--hotspot | --no-hotspot] [--config configs/atc.yaml]
+               [--script] [--seed N] [--hotspot | --no-hotspot] [--config configs/atc.yaml]
 
 The default (``uv run teleop atc``) is the booth: it keeps the hotspot up, listens for the Studio
 gloves, uses the UNO Q board (or a local loopback node, hot-swapped either way) and shows a live
@@ -43,11 +43,12 @@ from typing import Any, cast
 import yaml
 
 from teleop.app import make_source
-from teleop.atc.coordinator import OperatorInput
+from teleop.atc.coordinator import DEFAULT_REALISM, OperatorInput
 from teleop.atc.glove_select import SelectingGlove
 from teleop.atc.hud import hud_lines, hud_overlays
 from teleop.atc.recovery import RecoveryBackend
 from teleop.atc.stage import (
+    STAGE_SEED,
     AudioCues,
     ConsoleSource,
     NullSpeaker,
@@ -57,6 +58,7 @@ from teleop.atc.stage import (
     SystemSpeaker,
     UnoQConsolePoller,
 )
+from teleop.atc.validator import GATE_PASS_MIN
 from teleop.commands.sim import add_hotspot_args, maybe_hotspot, setup_logging
 from teleop.config import SimConfig, StudioConfig, WristConfig
 from teleop.health.gloves import GloveCheck
@@ -112,7 +114,10 @@ class AtcConfig:
     act_device: str = "cuda"
     record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
     generate: int | None = None  # headless: generate N scripted rescue episodes
-    seed: int = 0
+    seed: int | None = None  # None: STAGE_SEED with --script, else 0
+    realism: float = DEFAULT_REALISM  # latch-pose error and gate randomization scale (0: off)
+    gate_pass_min: int = GATE_PASS_MIN  # randomized skill gate: deploy at >= N of 20
+    dummy_glove: bool = False  # TODO(rokoko-gloves-swap): temporary dummy UDP/UI operator
 
 
 _PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes"}
@@ -142,6 +147,13 @@ def load_hook(flag: str) -> Any:
             raise HookMissing(flag, module) from exc
         raise
     return getattr(mod, attr)
+
+
+def resolve_seed(cfg: AtcConfig) -> int:
+    """Run seed: an explicit one always wins; else the scripted show uses ``STAGE_SEED``."""
+    if cfg.seed is not None:
+        return cfg.seed
+    return STAGE_SEED if cfg.script else 0
 
 
 def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
@@ -252,6 +264,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-audio", dest="audio", action="store_false", default=None)
     ap.add_argument("--no-background", dest="background_bays", action="store_false", default=None)
     ap.add_argument("--display", choices=DISPLAYS, default=None, help="console (default) or viewer")
+    ap.add_argument("--seed", type=int, default=None, help="run seed (stage script: STAGE_SEED)")
+    ap.add_argument(
+        "--realism", type=float, default=None, help="pose error / gate randomization scale, 0-1"
+    )
+    ap.add_argument("--gate-pass-min", type=int, default=None, help="gate passes needed of 20")
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
@@ -260,7 +277,12 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--act-device", default=None, help="torch device for ACT (default cuda)")
     ap.add_argument("--record-episodes", type=Path, default=None, help="LeRobot dataset dir")
     ap.add_argument("--generate", type=int, default=None, help="headless: N scripted episodes")
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument(
+        "--dummy-glove",
+        action="store_true",
+        default=None,
+        help="TEMP: spawn standalone dummy Studio UDP streamer + UI teleop override",
+    )
     add_hotspot_args(ap)
     ap.add_argument("--no-hotspot", action="store_true", help="do not keep the booth hotspot up")
     return ap
@@ -424,6 +446,9 @@ def _run_booth(
         hardware=hardware,
         cycle_dwell_s=cfg.cycle_dwell_s,
         include_background_bays=cfg.background_bays,
+        seed=resolve_seed(cfg),
+        realism=cfg.realism,
+        gate_pass_min=cfg.gate_pass_min,
         unoq_label=_unoq_label(cfg, unoq) + suffix,
     )
     stack.callback(controller.close)
@@ -443,7 +468,7 @@ def _run_booth(
         stack.callback(_close_episodes, controller, sink_handle)
     if "--generate" in hooks:
         assert cfg.generate is not None
-        n = int(hooks["--generate"](controller, sink_handle, cfg.generate, cfg.seed))
+        n = int(hooks["--generate"](controller, sink_handle, cfg.generate, resolve_seed(cfg)))
         print(f"teleop atc: generated {n} successful episodes -> {cfg.record_episodes}")
         return 0 if n >= cfg.generate else 1
 
@@ -533,7 +558,45 @@ def _run(
     glove: GloveOperator | ScriptedGlove | SelectingGlove | None,
     health: HealthMonitor | None = None,
 ) -> int:
+    import subprocess
+    import sys
+
     director = StageDirector(controller) if cfg.script else None
+    dummy_proc: subprocess.Popen[bytes] | None = None
+    dummy: Any = None
+    # TODO(rokoko-gloves-swap): Temporary dummy UDP streamer + UI override while physical
+    # Rokoko Smartgloves are disconnected. Remove/disable once real Studio UDP is connected.
+    use_console_dummy = (
+        director is None
+        and not cfg.headless
+        and cfg.display == "console"
+        and (cfg.dummy_glove or cfg.source == "synthetic")
+    )
+    if director is None:
+        if cfg.dummy_glove and cfg.source == "studio":
+            script_path = REPO_ROOT / "scripts" / "dummy_glove_process.py"
+            dummy_proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--studio-host",
+                    "127.0.0.1",
+                    "--studio-port",
+                    str(cfg.studio.port),
+                ],
+                stdin=subprocess.DEVNULL,
+            )
+        if cfg.source == "synthetic" and use_console_dummy:
+            glove = None  # the console dummy operator drives the rescue instead
+        if use_console_dummy:
+            from teleop.input.dummy_glove import DummyControlClient, DummyOperatorSupervisor
+
+            udp_cli = DummyControlClient() if dummy_proc is not None else None
+            dummy = DummyOperatorSupervisor(
+                controller,
+                udp_client=udp_cli,
+                process_pid=dummy_proc.pid if dummy_proc is not None else None,
+            )
     co = controller.coordinator
     next_log = 0.0
 
@@ -549,34 +612,43 @@ def _run(
         next_log = co.time_s + cfg.hud_log_period_s
         logger.info("HUD t=%.1fs\n  %s", co.time_s, "\n  ".join(hud_lines(controller.hud_view())))
 
-    with glove.running() if glove is not None else contextlib.nullcontext():
-        if cfg.headless:
-            steps = 0
-            while cfg.steps is None or steps < cfg.steps:
-                controller.tick(operator())
-                steps += 1
-                log_hud()
-                if director is not None and director.done:
-                    break
-            logger.info("atc: %d steps, %.1f s sim time", steps, co.time_s)
-        elif cfg.display == "viewer":
-            _run_viewer(cfg, controller, operator, health=health)
-        else:
-            from teleop.console.run import ConsolePortInUse, run_console
+    try:
+        with glove.running() if glove is not None else contextlib.nullcontext():
+            if cfg.headless:
+                steps = 0
+                while cfg.steps is None or steps < cfg.steps:
+                    controller.tick(operator())
+                    steps += 1
+                    log_hud()
+                    if director is not None and director.done:
+                        break
+                logger.info("atc: %d steps, %.1f s sim time", steps, co.time_s)
+            elif cfg.display == "viewer":
+                _run_viewer(cfg, controller, operator, health=health)
+            else:
+                from teleop.console.run import ConsolePortInUse, run_console
 
-            try:
-                run_console(
-                    controller,
-                    operator,
-                    port=cfg.console_port,
-                    fps=cfg.console_fps,
-                    open_browser=cfg.open_browser,
-                    steps=cfg.steps,
-                    health=health,
-                )
-            except ConsolePortInUse as exc:
-                print(f"teleop atc: console port {exc.port} in use (try --console-port)")
-                return 1
+                try:
+                    run_console(
+                        controller,
+                        operator,
+                        port=cfg.console_port,
+                        fps=cfg.console_fps,
+                        open_browser=cfg.open_browser,
+                        steps=cfg.steps,
+                        health=health,
+                        dummy=dummy,
+                    )
+                except ConsolePortInUse as exc:
+                    print(f"teleop atc: console port {exc.port} in use (try --console-port)")
+                    return 1
+    finally:
+        if dummy is not None:
+            dummy.close()
+        if dummy_proc is not None:
+            dummy_proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                dummy_proc.wait(timeout=3)
 
     if director is None:
         return 0

@@ -13,9 +13,17 @@
       <span class="bar__mark" aria-hidden="true"></span>
       <h1>Fleet operations</h1>
       <span class="bar__line">Battery disassembly line</span>
+      <span class="bar__badge" id="dummy-badge" hidden title="Temporary dummy Rokoko glove streamer is active. Swap out when real gloves connect.">TEMP: Dummy gloves</span>
     </div>
-    <div class="bar__shift" id="shift">4 bays, 1 operator on shift</div>
+    <div class="bar__views" role="toolbar" aria-label="Camera layout">
+      <button type="button" class="vbtn" id="view-grid" title="Show all 4 bays equally in a 2x2 grid">4-Up Equal</button>
+      <button type="button" class="vbtn is-active" id="view-auto" title="Equal grid normally; auto-pin rescue bay">Auto Focus</button>
+      <span class="bar__sep" aria-hidden="true"></span>
+      <span class="bar__pin-label">Pin:</span>
+      <div class="bar__pins" id="pin-bar"></div>
+    </div>
     <div class="bar__live">
+      <span class="bar__shift" id="shift">4 bays, 1 operator on shift</span>
       <span class="live" id="live"><span class="live__dot" aria-hidden="true"></span><span id="live-text">Connecting</span></span>
       <time class="bar__clock" id="clock">--:--:--</time>
     </div>
@@ -31,18 +39,63 @@
           <h2 class="brief__head" id="brief-head">Connecting to the cell controller</h2>
           <p class="brief__hint" id="brief-hint"></p>
         </div>
+        <div class="brief__actions" id="brief-actions"></div>
         <div class="brief__beat" id="beat" hidden>
           <span class="brief__beat-label">Stage script</span>
           <span class="brief__beat-name" id="beat-name"></span>
         </div>
       </section>
       <section class="health" id="health" aria-label="Hardware health" hidden></section>
-      <section class="wall" id="wall" aria-label="Bay cameras"></section>
+
+      <div class="wall-wrap" id="wall-wrap">
+        <div class="dropzone" id="focus-dropzone" aria-hidden="true">
+          <strong>Drop bay pane here to pin into focus</strong>
+          <span>Or drag onto another tile to swap positions</span>
+        </div>
+        <section class="wall" id="wall" aria-label="Bay cameras"></section>
+      </div>
+
       <nav class="keys" id="keys" aria-label="Keyboard controls"></nav>
       <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
     </div>
 
     <aside class="rail" aria-label="Fleet status">
+      <!-- TODO(rokoko-gloves-swap): Temporary dummy glove control panel while physical Rokoko gloves are disconnected -->
+      <section class="panel panel--dummy" id="dummy-panel" hidden>
+        <div class="dummy__head">
+          <h2>Dummy glove <span class="dummy__tag">TEMP</span></h2>
+          <span class="dummy__meta" id="dummy-meta">UDP stand-in</span>
+        </div>
+        <div class="seg" role="group" aria-label="Dummy glove mode">
+          <button type="button" class="seg__btn" data-dummy-mode="manual">Manual UI</button>
+          <button type="button" class="seg__btn" data-dummy-mode="auto">Auto Co-Pilot</button>
+          <button type="button" class="seg__btn" data-dummy-mode="off">Off</button>
+        </div>
+        <label class="dummy__toggle">
+          <input type="checkbox" id="dummy-autofaults">
+          <span>Auto-inject periodic bay jams</span>
+        </label>
+        <div class="dummy__manual" id="dummy-manual">
+          <div class="dummy__pad-row">
+            <div class="xypad" id="wrist-pad" tabindex="0" aria-label="Drag to move wrist X slide and Z height">
+              <div class="xypad__grid"></div>
+              <span class="xypad__axis xypad__axis--x">Bolt +X →</span>
+              <span class="xypad__axis xypad__axis--z">↑ +Z</span>
+              <div class="xypad__dot" id="wrist-dot"></div>
+            </div>
+            <div class="dummy__sliders">
+              <label><span>Thumb flap</span><input type="range" id="sl-thumb" min="0" max="100" value="0"></label>
+              <label><span>Index hook</span><input type="range" id="sl-index" min="0" max="100" value="33"></label>
+              <label><span>Lateral Y</span><input type="range" id="sl-dy" min="-30" max="30" value="0"></label>
+            </div>
+          </div>
+          <div class="dummy__btns">
+            <button type="button" class="actbtn actbtn--accent" id="btn-solve" title="Drive guided latch rescue while clutch is held">Guided Solve</button>
+            <button type="button" class="actbtn" id="btn-zero" title="Zero wrist offset & reset fingers">Zero Pose</button>
+          </div>
+        </div>
+      </section>
+
       <section class="panel">
         <h2>Rescue queue</h2>
         <ol class="queue" id="queue"></ol>
@@ -56,8 +109,8 @@
         <div class="gate" id="gate"></div>
       </section>
       <section class="panel panel--grow">
-        <h2>Activity</h2>
-        <ol class="log" id="log"></ol>
+        <h2>Activity <span class="panel__note" id="activity-count"></span></h2>
+        <ol class="log" id="log" tabindex="0" aria-label="Activity history"></ol>
       </section>
       <section class="panel panel--hooks">
         <div class="hook"><h3>Audit trail</h3><p id="compliance">No events yet</p></div>

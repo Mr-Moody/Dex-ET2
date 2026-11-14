@@ -32,8 +32,8 @@ STRIP_WIDTH_M = 0.08
 
 CCTV_SUFFIX = "cctv"
 CCTV_POS_M = (1.05, -1.0, 1.4)  # in the base frame: high front-right inner corner
-CCTV_TARGET_M = (0.32, 0.0, 0.22)  # between the arm and the latch
-CCTV_FOVY_DEG = 46.0
+CCTV_TARGET_M = (0.30, 0.0, 0.34)  # frames full Panda shoulder/elbow clearance + latch
+CCTV_FOVY_DEG = 50.0
 
 FLOOR_RGBA = (0.11, 0.115, 0.125, 1.0)
 WALL_RGBA = (0.2, 0.21, 0.23, 1.0)

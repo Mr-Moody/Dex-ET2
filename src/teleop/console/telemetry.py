@@ -67,6 +67,7 @@ class TelemetryAdapter:
         self._events: deque[dict[str, Any]] = deque(maxlen=EVENT_LOG_LEN)
         self._states: dict[int, BayState] = {}
         self._gate_key: tuple[Any, ...] | None = None
+        self._touch: dict[int, float | None] = {}
         self._lines: dict[str, str] = {}
         self._feeds: tuple[FeedSpec, ...] | None = None
         self._action_seq = 0
@@ -89,6 +90,14 @@ class TelemetryAdapter:
         text = template.format(k=snap.bay_id, c=snap.confidence, pos=pos)
         self._log(sim_t, wall, snap.bay_id, level, text)
 
+    def _track_touch(self, snap: BaySnapshot, sim_t: float, wall: str) -> None:
+        mm = snap.touch_correction_mm
+        prev = self._touch.get(snap.bay_id)
+        self._touch[snap.bay_id] = mm
+        if mm is not None and mm != prev:
+            text = f"Bay {snap.bay_id} touched latch: pose corrected {mm:.1f} mm"
+            self._log(sim_t, wall, snap.bay_id, "info", text)
+
     def _track_gate(self, view: HudView, sim_t: float, wall: str) -> None:
         g = view.gate
         key = (g.ok, g.passed, g.total, g.elapsed_s)
@@ -99,7 +108,10 @@ class TelemetryAdapter:
         verdict = "passed" if g.ok else "FAILED"
         secs = _finite_or_none(g.elapsed_s)
         elapsed = f"{secs:.2f}" if secs is not None else "?"
-        text = f"Skill gate {g.passed}/{g.total} {verdict} in {elapsed} s"
+        detail = f" ({g.conditions})" if g.conditions else ""
+        text = f"Skill gate {g.passed}/{g.total} {verdict}{detail} in {elapsed} s"
+        if not g.ok and g.worst_failure:
+            text += f", {g.worst_failure}"
         self._log(sim_t, wall, None, "ok" if g.ok else "alert", text)
 
     def _track_actions(self, view: HudView, sim_t: float, wall: str) -> None:
@@ -141,6 +153,9 @@ class TelemetryAdapter:
                 "replayed": False,
                 "x_bolt_cm": round(s.x_bolt_m * 100.0, 2),
                 "fault": faults.get(k),
+                "pose_sigma_mm": _finite_or_none(s.pose_sigma_mm),
+                "pose_sigma_yaw_deg": _finite_or_none(s.pose_sigma_yaw_deg),
+                "touch_correction_mm": _finite_or_none(s.touch_correction_mm),
             }
         if k in self.background:
             raw = float(background_confidence.get(k, 1.0))
@@ -158,6 +173,9 @@ class TelemetryAdapter:
                 "replayed": True,
                 "x_bolt_cm": None,
                 "fault": None,
+                "pose_sigma_mm": None,
+                "pose_sigma_yaw_deg": None,
+                "touch_correction_mm": None,
             }
         return {
             "id": k,
@@ -171,6 +189,9 @@ class TelemetryAdapter:
             "replayed": False,
             "x_bolt_cm": None,
             "fault": None,
+            "pose_sigma_mm": None,
+            "pose_sigma_yaw_deg": None,
+            "touch_correction_mm": None,
         }
 
     def build(
@@ -179,17 +200,27 @@ class TelemetryAdapter:
         sim_t: float,
         feeds: Sequence[FeedSpec],
         background_confidence: Mapping[int, float],
+        *,
+        view_state: Any = None,
+        dummy_status: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One telemetry message. Call at the telemetry rate: each call adds a history sample."""
         wall = self._clock().strftime("%H:%M:%S")
         feeds_t = tuple(feeds)
-        if self._feeds is not None and feeds_t != self._feeds:
+        topo = tuple((f.slot, f.camera, f.bay, f.role) for f in feeds_t)
+        prev_topo = (
+            None
+            if self._feeds is None
+            else tuple((f.slot, f.camera, f.bay, f.role) for f in self._feeds)
+        )
+        if prev_topo is not None and topo != prev_topo:
             self.layout_id += 1
         self._feeds = feeds_t
 
         snaps = {s.bay_id: s for s in view.bays if s.bay_id in self.bays_present}
         for s in snaps.values():
             self._track_state(s, sim_t, wall)
+            self._track_touch(s, sim_t, wall)
         self._track_gate(view, sim_t, wall)
         self._track_actions(view, sim_t, wall)
         self._track_line("compliance", view.compliance, sim_t, wall)
@@ -205,6 +236,8 @@ class TelemetryAdapter:
                 "total": g.total,
                 "elapsed_s": g.elapsed_s,
                 "ok": g.ok,
+                "conditions": g.conditions,
+                "worst_failure": g.worst_failure,
             }
         r = view.rescue
         rescue = (
@@ -212,6 +245,13 @@ class TelemetryAdapter:
             if r.bay_id is None
             else {"bay": r.bay_id, "clutch": r.clutch_engaged, "elapsed_s": r.elapsed_s}
         )
+        mains = [f for f in feeds_t if f.role == "main"]
+        if not mains:
+            mode = "grid"
+        elif r.bay_id is not None and any(f.bay == r.bay_id for f in mains):
+            mode = "rescue"
+        else:
+            mode = "pin"
         return _scrub(
             {
                 "type": "telemetry",
@@ -219,7 +259,9 @@ class TelemetryAdapter:
                 "sim_t": round(sim_t, 3),
                 "wall": wall,
                 "threshold": THRESHOLD,
-                "mode": "rescue" if any(f.role == "main" for f in feeds_t) else "grid",
+                "mode": mode,
+                "view": view_state.to_dict() if hasattr(view_state, "to_dict") else None,
+                "dummy": dict(dummy_status) if dummy_status is not None else None,
                 "feeds": [
                     {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role}
                     for f in feeds_t

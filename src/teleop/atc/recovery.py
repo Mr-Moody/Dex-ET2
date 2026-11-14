@@ -13,7 +13,7 @@ skill timeout.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
@@ -164,8 +164,10 @@ class DmpRecovery:
         tau_margin: float,
         tau_hard_max: float,
         timeout_s: float,
+        on_replay_start: Callable[[], None] | None = None,
     ) -> None:
         self.skill = skill
+        self._on_replay_start = on_replay_start
         self.blend_s, self.hold_s = blend_s, hold_s
         self.tau_margin, self.tau_hard_max, self.timeout_s = tau_margin, tau_hard_max, timeout_s
         wrist = rig.wrist_pose()
@@ -191,12 +193,29 @@ class DmpRecovery:
                 )
                 self.backoff = None
                 self.t = 0.0
+                if self._on_replay_start is not None:
+                    self._on_replay_start()
             return RecoveryCommand(pose)
         assert self.replay is not None
         cmd = self.replay.command(self.t)
         self.last = cmd
         self.t += CONTROL_DT
         return RecoveryCommand(cmd.wrist, cmd.fingers)
+
+    @property
+    def in_replay(self) -> bool:
+        """True once the back-off is done and the replay has issued its first command."""
+        return self.replay is not None and self.last is not None
+
+    @property
+    def touch_offset_m(self) -> float | None:
+        """The skill's demo-calibrated contact offset (``None``: no replay touch)."""
+        return self.skill.touch_offset_m
+
+    def rebase(self, world_from_latch: Pose) -> None:
+        """Re-anchor the running replay on a touch-corrected latch estimate."""
+        if self.replay is not None:
+            self.replay.rebase(world_from_latch, self.t)
 
     def check(self, rig: BayRig, s: BaySignals) -> str | None:
         if self.replay is None or self.last is None:

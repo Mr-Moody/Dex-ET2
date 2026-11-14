@@ -14,9 +14,9 @@ Wrist samples are 7-vectors ``[x, y, z, qx, qy, qz, qw]`` (xyzw quaternions).
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
-import uuid
 from collections.abc import Sequence
 
 import numpy as np
@@ -255,7 +255,8 @@ def fit_rbf_dmp(
         proto = StallSignature.from_vector(prototype)
     fit_ms = (time.perf_counter() - start) * 1000.0
     return SkillPrimitive(
-        skill_id=skill_id or f"{part_sku_id}/{signature_id}/{uuid.uuid4().hex[:8]}",
+        skill_id=skill_id
+        or f"{part_sku_id}/{signature_id}/{_content_hash(weights, y0, y_goal, duration)}",
         part_sku_id=part_sku_id,
         signature_id=signature_id,
         duration_s=duration,
@@ -269,6 +270,18 @@ def fit_rbf_dmp(
         prototype=proto,
         fit_ms=fit_ms,
     )
+
+
+def _content_hash(weights: FloatArray, y0: FloatArray, y_goal: FloatArray, duration: float) -> str:
+    """8-hex content address of a fit: the same demonstration always gets the same skill id.
+
+    Hashes the little-endian float64 bytes of ``weights``, ``y0``, ``y_goal`` and ``duration``
+    (in that order), via SHA-1 truncated to 8 hex characters.
+    """
+    h = hashlib.sha1(usedforsecurity=False)
+    for arr in (weights, y0, y_goal, np.array([duration])):
+        h.update(np.ascontiguousarray(arr, dtype="<f8").tobytes())
+    return h.hexdigest()[:8]
 
 
 def evaluate_latch_frame(skill: SkillPrimitive, s: float) -> tuple[Pose, dict[str, float], float]:
