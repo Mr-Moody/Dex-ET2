@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fleet operations</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="console.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="bar__site">
+      <span class="bar__mark" aria-hidden="true"></span>
+      <h1>Fleet operations</h1>
+      <span class="bar__line">Battery disassembly line</span>
+    </div>
+    <div class="bar__shift" id="shift">4 bays, 1 operator on shift</div>
+    <div class="bar__live">
+      <span class="live" id="live"><span class="live__dot" aria-hidden="true"></span><span id="live-text">Connecting</span></span>
+      <time class="bar__clock" id="clock">--:--:--</time>
+    </div>
+  </header>
+
+  <div class="linkdown" id="linkdown" hidden>Link to the cell controller is down. Reconnecting…</div>
+
+  <main class="desk">
+    <section class="wall" id="wall" aria-label="Bay cameras"></section>
+
+    <aside class="rail" aria-label="Fleet status">
+      <section class="panel">
+        <h2>Rescue queue</h2>
+        <ol class="queue" id="queue"></ol>
+      </section>
+      <section class="panel">
+        <h2>Confidence <span class="panel__note" id="threshold-note"></span></h2>
+        <div class="sparks" id="sparks"></div>
+      </section>
+      <section class="panel">
+        <h2>Learned skill</h2>
+        <div class="gate" id="gate"></div>
+      </section>
+      <section class="panel panel--grow">
+        <h2>Activity</h2>
+        <ol class="log" id="log"></ol>
+      </section>
+      <section class="panel panel--hooks">
+        <div class="hook"><h3>Audit trail</h3><p id="compliance">No events yet</p></div>
+        <div class="hook"><h3>Fleet advisor</h3><p id="reasoning">Idle</p></div>
+      </section>
+      <footer class="rail__foot" id="unoq"></footer>
+    </aside>
+  </main>
+
+  <script src="console.js"></script>
+</body>
+</html>
