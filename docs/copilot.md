@@ -121,34 +121,106 @@ Other models were considered and rejected for `T-210`:
   - All of them subclass `GeminiError`, and none contains the key.
   - A refusal from the model's safety filter raises `GeminiError` too.
 
-### Caveats about the API (the probe settles these)
+### Notes about the API
 
 - **Interactions API.** Google's newest Gemini 4 developer pages document the newer Interactions
   API (`/v1beta/interactions`). This client uses the long-standing `generateContent` endpoint
   that the plan specifies.
-  - Run against Google with an invalid key, the endpoint and header auth answer correctly:
-    `HTTP 400: INVALID_ARGUMENT: API key not valid`.
-  - Whether a real key's Gemini 4 calls accept `generateContent`, `responseJsonSchema` and the
-    upper-case thinking levels is what the probe reports.
+  - The probe confirmed that Gemini 4 Hydrogen and Argon, the 3.8 models and the TTS models all
+    accept `generateContent`, `responseJsonSchema` and the upper-case thinking levels on an AI
+    Studio key.
 - **Timeout scope.** The urllib timeout applies to each socket operation, not to the whole
   request. A hard wall-clock limit for call-outs is `T-212`'s job.
 
 ## Probe results
 
-> **Pending.** No `GEMINI_API_KEY` was set when `T-210` was implemented, so the live probe has not
-> run yet. Add the key, run the two commands below, and paste their Markdown output here.
-> Then update the defaults in `src/teleop/copilot/config.py` if the probe recommends different
-> models.
+Measured on 2026-11-14 from this laptop, with a Gemini API key from AI Studio. Rerun with:
 
 ```bash
 uv run python -m teleop.copilot probe
 uv run python -m teleop.copilot probe --no-images
 ```
 
-The report has three parts:
-1. Which of the candidate models the key can see and call with `generateContent`.
-2. One timed call per role, with each model's JSON answer, the WAV size and the audio length.
-   Times come from `time.monotonic_ns()`.
-3. The `.env` values it recommends.
+### Summary
 
-The targets are a call-out in ≤ 3 s (8 s hard timeout) and speech in ≤ 4 s.
+- **The key and endpoint work.** It can see and call all six candidate models through
+  `generateContent`, with `responseJsonSchema` and the upper-case thinking levels. Every role
+  answered with valid JSON or audio.
+- **Latency varies a lot between calls.** The table counts every call with images on: three probe
+  runs plus a five-round alternating benchmark of the two fast models.
+
+| Role | Model | Calls | Results (ms) | Median |
+|---|---|---|---|---|
+| Call-out | `gemini-4-hydrogen`, thinking `low` | 7 | 3826, timeout (> 8 s), 5418, 5769, 4114, 3377, 2904 | 3970 (6 answered) |
+| Call-out | `gemini-3.8-flash`, thinking `low` | 7 | 6955, 3000, 3715, 4922, 3320, 3341, 2885 | 3341 |
+| Review | `gemini-4-argon`, thinking `high`, 3 frames | 2 | 23977, 84445 | — |
+| Speech | `gemini-3.8-flash-lite-tts`, Kore | 2 | 3914 (3.2 s of audio), 4271 (4.1 s of audio) | — |
+
+- **Neither fast model meets the 3 s call-out target reliably.**
+  - Hydrogen stays the default because it is the preferred model. Its median, 4.0 s, is about
+    0.6 s slower than Flash's, and it timed out once in seven calls.
+  - `COPILOT_FAST_MODEL=gemini-3.8-flash` is a measured, drop-in alternative.
+  - `T-212`'s 1 s template call-out covers either one.
+- **Speech sits right at the 4 s fallback cut-off.** Expect the system voice to take over often
+  unless `T-212` streams the audio or relaxes the limit.
+- **Argon can take most of the 90 s review budget.** One review took 84 s. Keep reviews off the
+  critical path, as planned.
+- With synthetic images, Argon correctly answered `insufficient_evidence`, which is the
+  behaviour wanted.
+
+### Run 1: images on (verbatim)
+
+Images: on (synthetic 64x64 JPEGs). Times are wall-clock ms from `time.monotonic_ns()`.
+
+### Models the key can use
+
+`GET /v1beta/models` returned 64 models in 433 ms; 49 support `generateContent`.
+
+| Model | Listed | generateContent |
+|---|---|---|
+| `gemini-4-hydrogen` | yes | yes |
+| `gemini-4-argon` | yes | yes |
+| `gemini-3.8-flash` | yes | yes |
+| `gemini-3.8-flash-lite-tts` | yes | yes |
+| `gemini-3.8-flash-tts` | yes | yes |
+| `gemini-3.1-flash-tts-preview` | yes | yes |
+
+### Timed calls
+
+| Role | Model | Result | ms | Notes |
+|---|---|---|---|---|
+| call-out | `gemini-4-hydrogen` | ok | 3826 | thinking low; answer {"say": "Bay 1 stalled during armed phase due to a flap fault.", "detail": "Bay 1 confidence dropped to 0.21, below the 0.3 threshold. Bolt is at 1.4 cm of 5.2 cm required. Fault: flap in armed phase.", "severity": "alarm"}; slower than the 3000 ms target |
+| call-out (comparison) | `gemini-3.8-flash` | ok | 6955 | thinking low; answer {"say": "Bay 1 stalled due to low contact confidence during flap hold.", "detail": "Bay 1 confidence dropped to 0.21, below the 0.3 threshold with bolt at 1.4 cm. A flap fault occurred in armed phase.", "severity": "alarm"}; slower than the 3000 ms target |
+| review | `gemini-4-argon` | ok | 23977 | thinking high; answer {"verdict": "insufficient_evidence", "reasons": ["Telemetry only reports the initial stall state for Bay 1: contact confidence is 0.21 (staying below the 0.3 threshold at 0.27 and 0.21), bolt travel is 1.4 cm (below the required 5.2 cm clearance), and a flap fault is armed.", "The three camera frames are synthetic test patterns for a connectivity probe, so the physical positions of the stopper flap and bolt during the clutch hold and after the rescue are unclear.", "No post-rescue telemetry is provided to verify that the stopper flap remained held down or that the bolt slid at least 5.2 cm clear."], "operator_note": "Bay 1 stalled with an armed flap fault, contact confidence at 0.21 (below 0.3), and bolt position at 1.4 cm (below the 5.2 cm target). Because the images are synthetic test patterns and post-rescue telemetry is missing, the rescue status is unclear. Please verify physical latch state before proceeding.", "confidence": 0.95} |
+| speech | `gemini-3.8-flash-lite-tts` | ok | 3914 | voice Kore; WAV 161308 bytes, 3200 ms of audio |
+
+### Recommended `.env` values
+
+```dotenv
+COPILOT_FAST_MODEL=gemini-4-hydrogen
+COPILOT_REVIEW_MODEL=gemini-4-argon
+COPILOT_TTS_MODEL=gemini-3.8-flash-lite-tts
+COPILOT_VOICE=Kore
+```
+
+### Run 2: `--no-images` (timed calls, verbatim)
+
+Listing and recommendations matched run 1.
+
+### Timed calls
+
+| Role | Model | Result | ms | Notes |
+|---|---|---|---|---|
+| call-out | `gemini-4-hydrogen` | ok | 4174 | thinking low; answer {"say": "Bay 1 stalled during the armed phase due to a flap fault.", "detail": "Bay 1 is STALLED with contact confidence at 0.21, below the 0.3 threshold. The bolt is at 1.4 cm, short of the 5.2 cm clear target. Fault: flap in armed phase.", "severity": "alarm"}; slower than the 3000 ms target |
+| call-out (comparison) | `gemini-3.8-flash` | ok | 2170 | thinking low; answer {"say": "Bay 1 stalled due to low contact confidence on the flap.", "detail": "Bay 1 contact confidence dropped to 0.21, below the 0.3 threshold during the flap armed phase. Bolt reached only 1.4 cm of the required 5.2 cm clearance.", "severity": "alarm"} |
+| review | `gemini-4-argon` | ok | 21526 | thinking high; answer {"verdict": "insufficient_evidence", "reasons": ["Visual frames for the stall, clutch hold, and after-rescue states are missing or synthetic test patterns, making visual verification unclear.", "Provided telemetry only shows Bay 1 in a STALLED state with contact confidence at 0.21 (below the 0.3 threshold).", "Bolt position is at 1.4 cm, which has not reached the required 5.2 cm clearance, and an armed flap fault remains present."], "operator_note": "Rescue outcome is unclear due to synthetic/missing frame data and lack of post-rescue telemetry. Telemetry shows Bay 1 stalled with an armed flap fault, confidence at 0.21 (below 0.3), and bolt at 1.4 cm (below 5.2 cm required). Do not bypass safety stops or alter settings; inspect Bay 1 directly.", "confidence": 0.9} |
+| speech | `gemini-3.8-flash-lite-tts` | ok | 3384 | voice Kore; WAV 184348 bytes, 3680 ms of audio |
+
+### Recommended `.env` values
+
+```dotenv
+COPILOT_FAST_MODEL=gemini-4-hydrogen
+COPILOT_REVIEW_MODEL=gemini-4-argon
+COPILOT_TTS_MODEL=gemini-3.8-flash-lite-tts
+COPILOT_VOICE=Kore
+```
