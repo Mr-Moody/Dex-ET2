@@ -17,8 +17,8 @@ Rokoko gloves -> MuJoCo teleop -> LeRobot datasets. Hackathon project.
    name, no hardware in tests, and so on).
 5. Verify before any PR:
    `uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest`
-6. Conventional Commits `type(scope): summary`; trailer
-   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push to `main`.
+6. Conventional Commits `type(scope): summary`. No AI attribution: no `Co-Authored-By: Claude`
+   trailer and no "Generated with Claude Code" line in commits or PRs. Never push to `main`.
 
 ## Hardware
 
