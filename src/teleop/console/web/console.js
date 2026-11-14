@@ -18,16 +18,6 @@ const STATE_TEXT = {
   OOD_ESCALATED: "Refused",
   STANDBY: "Standby",
 };
-const STATE_COLOR = {
-  NOMINAL: "--nominal",
-  STALLED: "--stalled",
-  QUEUED: "--queued",
-  RESCUE: "--rescue",
-  VALIDATING: "--validating",
-  AUTONOMOUS_SKILL: "--auto",
-  OOD_ESCALATED: "--ood",
-  STANDBY: "--standby",
-};
 const VIEW_TEXT = {
   overview: "Mezzanine camera",
   cctv: "Conveyor station",
@@ -36,17 +26,23 @@ const VIEW_TEXT = {
   side_ortho: "Side view",
 };
 const BAY_ZONE = {
-  0: "4 Segmented Conveyors · 4 Stations",
-  1: "Belt 1 · SW Station",
-  2: "Belt 2 · SE Station",
-  3: "Belt 3 · NW Station",
-  4: "Belt 4 · NE Station",
+  1: "Belt 1, south-west station",
+  2: "Belt 2, south-east station",
+  3: "Belt 3, north-west station",
+  4: "Belt 4, north-east station",
 };
 const BELT_TEXT = {
   feeding: "Belt feeding",
   paused: "Belt paused",
-  estop: "Belt E-STOP",
+  estop: "E-STOP · belt halted",
 };
+const AUDIT_KIND_TEXT = {
+  STALL_ALERT: "Stall alert",
+  RESCUE_LOGGED: "Rescue logged",
+  SKILL_DEPLOYED: "Skill deployed",
+  OOD_REFUSAL: "Refusal logged",
+};
+const AUDIT_STATE_TEXT = { anchored: "anchored", pending: "pending", local: "local only" };
 
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -55,7 +51,7 @@ const ui = {
   layoutKey: null,
   layoutId: null,
   slots: new Map(), // slot -> { el, img, url, last }
-  sparks: new Map(), // bay -> { row, canvas, val }
+  sparks: new Map(), // bay -> { row, canvas, val, pose, hover }
   lastEventKey: null,
   lastAuditKey: null,
   telemetry: null,
@@ -314,8 +310,8 @@ function attachDragEvents(el, bayId, role) {
     $("wall-wrap").classList.add("is-dragging-pane");
     $("focus-dropzone").querySelector("strong").textContent =
       role === "main"
-        ? `Drag Bay ${bayId} onto the strip (or click 4-Up Equal) to unpin`
-        : `Drop Bay ${bayId} here to pin into focus`;
+        ? `Drop Bay ${bayId} on the side strip to go back to the grid`
+        : `Drop Bay ${bayId} here to give it the stage`;
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", String(bayId));
@@ -348,7 +344,7 @@ function attachDragEvents(el, bayId, role) {
   });
 }
 
-function feedTile(bayId, camera, role, bayInfo) {
+function feedTile(bayId, camera, role, bayInfo, inRescue) {
   const isOverview = bayId === 0 || camera === "overview";
   const el = document.createElement("div");
   el.className = `feed feed--${role}`;
@@ -358,73 +354,62 @@ function feedTile(bayId, camera, role, bayInfo) {
   const view = isOverview ? "overview" : (camera ? camera.split("/")[1] : "cctv");
   const isPinned = role === "main";
   if (isPinned) el.classList.add("is-pinned");
-  const title = isOverview ? "Plant Overview" : `Bay ${bayId}`;
-  const zone = BAY_ZONE[bayId] || "";
+  const title = isOverview ? "Plant overview" : `Bay ${bayId}`;
+  if (BAY_ZONE[bayId]) el.title = BAY_ZONE[bayId];
   el.innerHTML = `
-    <img alt="" data-cam="${camera || ""}">
     <div class="feed__top">
       <span class="feed__name">${title}</span>
-      ${zone ? `<span class="feed__zone">${zone}</span>` : ""}
-      <span class="feed__view">${VIEW_TEXT[view] || ""}</span>
-      <button type="button" class="feed__zoom" hidden title="Scroll: zoom · Shift+drag: pan · Right-drag: rotate · Click to reset">1.0×</button>
-      <span class="feed__state">${isOverview ? "Live warehouse" : ""}</span>
-      <span class="feed__conf"></span>
+      <span class="feed__state">${isOverview ? "Live" : ""}</span>
+      <button type="button" class="feed__zoom" hidden title="Camera moved (scroll: zoom, Shift+drag: pan, right-drag: orbit). Click to reset.">1.0×</button>
+      <span class="feed__conf"><span class="feed__conf-label">C(t)</span><span class="feed__conf-val"></span></span>
     </div>
-    <div class="feed__tools"></div>
-    <div class="feed__bottom">
-      <span class="feed__rec">REC</span>
-      <time class="feed__time"></time>
-      ${isOverview ? "" : '<span class="feed__belt" hidden></span>'}
-      <span class="feed__armed" hidden></span>
-      <span class="feed__replay">${isOverview ? "EV battery disassembly recycling line" : ""}</span>
-    </div>
-    <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>`;
+    <div class="feed__pic">
+      <img alt="" data-cam="${camera || ""}">
+      <div class="feed__tools"></div>
+      <div class="feed__bottom">
+        ${isOverview ? "" : '<span class="feed__belt" hidden></span>'}
+        <span class="feed__armed" hidden></span>
+        <span class="feed__meta"><span class="feed__replay"></span><span>${VIEW_TEXT[view] || ""}</span><span class="feed__rec"><time class="feed__time"></time></span></span>
+      </div>
+      <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>
+    </div>`;
 
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
   el.querySelector(".feed__zoom").addEventListener("click", stop(() => resetCamZoom(camera)));
 
+  // Tools: camera angle (grid tiles; the stage has its own switch), zoom, fault, stage.
   const tools = el.querySelector(".feed__tools");
+  const tool = (label, tip, run, cls = "") => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `ftool${cls}`;
+    btn.textContent = label;
+    btn.title = tip;
+    btn.addEventListener("click", stop(run));
+    tools.append(btn);
+    return btn;
+  };
   if (role === "tile" && !isOverview) {
     for (const [camKey, label] of CAM_BTNS) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = `ftool${view === camKey ? " is-active" : ""}`;
-      btn.textContent = label;
-      btn.addEventListener("click", stop(() => setBayCamera(bayId, camKey)));
-      tools.append(btn);
+      tool(label, `${label} camera`, () => setBayCamera(bayId, camKey), view === camKey ? " is-active" : "");
     }
   }
   if (role !== "strip" && camera) {
+    let first = true;
     for (const [label, mult, tip] of [["−", 1 / 1.25, "Zoom out"], ["+", 1.25, "Zoom in"]]) {
-      const zb = document.createElement("button");
-      zb.type = "button";
-      zb.className = "ftool";
-      zb.textContent = label;
-      zb.title = `${tip} (or scroll wheel)`;
-      zb.addEventListener("click", stop(() => {
+      tool(label, `${tip} (or scroll wheel)`, () => {
         const cur = camZoom(camera);
         setCamZoom(camera, cur.z * mult, cur.px, cur.py);
-      }));
-      tools.append(zb);
+      }, first ? " ftool--gap" : "");
+      first = false;
     }
   }
-  if (!isOverview && role !== "strip" && bayInfo && !bayInfo.background && bayInfo.state !== "STANDBY") {
-    const jamBtn = document.createElement("button");
-    jamBtn.type = "button";
-    jamBtn.className = "ftool ftool--warn";
-    jamBtn.textContent = "Jam";
-    jamBtn.addEventListener("click", stop(() => sendFault(bayId, "flap")));
-    tools.append(jamBtn);
+  if (!isOverview && role !== "strip" && !inRescue && bayInfo && !bayInfo.background && bayInfo.state !== "STANDBY") {
+    tool("Jam", `Inject a flap jam on Bay ${bayId}`, () => sendFault(bayId, "flap"), " ftool--gap");
   }
-  const pinBtn = document.createElement("button");
-  pinBtn.type = "button";
-  pinBtn.className = `ftool${isPinned ? " is-active" : ""}`;
-  pinBtn.textContent = isPinned ? (isOverview ? "4-Up" : "Unpin") : "Pin";
-  pinBtn.addEventListener(
-    "click",
-    stop(() => (isPinned ? setLayoutMode("grid", null) : setLayoutMode("pin", bayId)))
-  );
-  tools.append(pinBtn);
+  if (!isPinned) {
+    tool("Focus", `Give Bay ${bayId} the stage (or double-click)`, () => setLayoutMode("pin", bayId), " ftool--gap");
+  }
 
   if (!isOverview) {
     el.addEventListener("click", () => selectBay(bayId));
@@ -446,7 +431,7 @@ function standbyTile(bayId) {
   el.innerHTML = `
     <div class="feed__top"><span class="feed__name">Bay ${bayId}</span>
       <span class="feed__state">${STATE_TEXT.STANDBY}</span></div>
-    <div class="feed__nosignal"><strong>No camera</strong><span>This bay is not running in the simulation</span></div>`;
+    <div class="feed__pic"><div class="feed__nosignal"><strong>No camera</strong><span>This bay is not running in the simulation</span></div></div>`;
   return el;
 }
 
@@ -482,21 +467,46 @@ function buildWall(t) {
     const isRescueFocus = !isOverviewFocus && !!(t.rescue && t.rescue.bay === focusBay);
     wall.classList.add(isOverviewFocus ? "is-overview" : (isRescueFocus ? "is-rescue" : "is-pin"));
 
+    // Stage header. Rescue: bay, clutch, timer first (the things to watch), then the camera
+    // switch and the one way back to the grid.
     const head = document.createElement("div");
     head.className = "takeover";
+    const h2 = document.createElement("h2");
     if (isOverviewFocus) {
-      head.innerHTML =
-        "<h2>Plant Overview · Sustainable EV Battery Recycling Warehouse</h2>";
+      h2.textContent = "Plant overview";
     } else {
       const focusInfo = bayMap.get(focusBay);
       const refusedBay = focusInfo && focusInfo.state === "OOD_ESCALATED";
-      const subtitle = isRescueFocus
-        ? refusedBay ? "refused stall" : "operator rescue"
-        : "pinned focus";
-      head.innerHTML = `<h2>Bay ${focusBay} (${BAY_ZONE[focusBay] || ""}) · ${subtitle}</h2>`;
+      const sub = document.createElement("span");
+      sub.textContent = isRescueFocus ? (refusedBay ? "refused stall" : "operator rescue") : "in focus";
+      h2.append(`Bay ${focusBay} `, sub);
+      if (BAY_ZONE[focusBay]) h2.title = BAY_ZONE[focusBay];
+    }
+    head.append(h2);
 
+    if (isRescueFocus) {
+      const clutch = document.createElement("span");
+      clutch.className = "clutch";
+      clutch.id = "clutch";
+      const timer = document.createElement("span");
+      timer.className = "takeover__timer";
+      const value = document.createElement("b");
+      value.id = "rescue-timer";
+      timer.append("Rescue time", value);
+      head.append(clutch, timer);
+    }
+
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "vbtn vbtn--solo";
+    back.textContent = "Back to grid";
+    back.title = "Show all 4 bays (Esc when a bay is pinned)";
+    back.addEventListener("click", () => setLayoutMode("grid", null));
+    if (!isOverviewFocus) {
       const camGroup = document.createElement("div");
-      camGroup.className = "takeover__views";
+      camGroup.className = "seg takeover__views";
+      camGroup.setAttribute("role", "group");
+      camGroup.setAttribute("aria-label", `Bay ${focusBay} camera`);
       const activeCam =
         mains.length > 1
           ? (mains[0].camera.endsWith("/wrist_cam") ? "wrist_split" : "split")
@@ -514,33 +524,16 @@ function buildWall(t) {
         camGroup.append(btn);
       }
       head.append(camGroup);
+    } else {
+      back.classList.add("takeover__views");
     }
-
-    const spacer = document.createElement("span");
-    spacer.className = "takeover__spacer";
-    head.append(spacer);
-
-    if (isRescueFocus) {
-      const timer = document.createElement("span");
-      timer.className = "takeover__timer";
-      timer.id = "rescue-timer";
-      const clutch = document.createElement("span");
-      clutch.className = "clutch";
-      clutch.id = "clutch";
-      head.append(timer, clutch);
-    }
-    const unpin = document.createElement("button");
-    unpin.type = "button";
-    unpin.className = "vbtn";
-    unpin.textContent = "4-Up Equal";
-    unpin.addEventListener("click", () => setLayoutMode("grid", null));
-    head.append(unpin);
+    head.append(back);
     wall.append(head);
 
     const stage = document.createElement("div");
     stage.className = `focus-stage ${mains.length > 1 ? "is-split" : "is-single"}`;
     for (const f of mains) {
-      const el = feedTile(f.bay, f.camera, "main", bayMap.get(f.bay));
+      const el = feedTile(f.bay, f.camera, "main", bayMap.get(f.bay), isRescueFocus);
       stage.append(el);
       registerSlot(f.slot, el);
     }
@@ -605,12 +598,12 @@ function updateWall(t) {
     el.classList.toggle("is-selected", t.selected_bay === b.id && t.mode !== "rescue");
     const state = el.querySelector(".feed__state");
     if (state) state.textContent = STATE_TEXT[b.state] || b.label;
-    const conf = el.querySelector(".feed__conf");
+    const conf = el.querySelector(".feed__conf-val");
     if (conf) conf.textContent = b.state === "STANDBY" ? "" : b.confidence.toFixed(2);
     const time = el.querySelector(".feed__time");
     if (time) time.textContent = t.wall;
     const replay = el.querySelector(".feed__replay");
-    if (replay) replay.textContent = b.replayed ? "Replayed routine cycle" : "";
+    if (replay) replay.textContent = b.replayed ? "Replayed cycle" : "";
     const armed = el.querySelector(".feed__armed");
     if (armed) {
       const f = b.fault;
@@ -641,20 +634,35 @@ function updateWall(t) {
 // ------------------------------------------------------------------ rail
 
 function updateQueue(t) {
+  // The bay being rescued now, then the bays waiting, first in first out.
+  const rows = [];
+  if (t.rescue) rows.push({ bay: t.rescue.bay, pos: "", note: "In rescue now", active: true });
+  t.queue.forEach((bay, i) => rows.push({ bay, pos: String(i + 1), note: i === 0 ? "Next" : "Waiting" }));
+  const key = rows.map((r) => `${r.bay}:${r.pos}:${r.note}`).join("|") || "empty";
+  if (key === ui.queueKey) return;
+  ui.queueKey = key;
   const q = $("queue");
   q.replaceChildren();
-  if (!t.queue.length) {
+  if (!rows.length) {
     const li = document.createElement("li");
     li.className = "is-empty";
     li.textContent = "No bays waiting";
     q.append(li);
     return;
   }
-  t.queue.forEach((bay, i) => {
+  for (const r of rows) {
     const li = document.createElement("li");
-    li.innerHTML = `Bay ${bay} <span>${i === 0 ? "next" : `#${i + 1}`}</span>`;
+    if (r.active) li.className = "is-active";
+    const span = (cls, text) => {
+      const el = document.createElement("span");
+      el.className = cls;
+      el.textContent = text;
+      return el;
+    };
+    if (r.pos) li.append(span("queue__pos", r.pos));
+    li.append(`Bay ${r.bay}`, span("queue__note", r.note));
     q.append(li);
-  });
+  }
 }
 
 function ensureSparks() {
@@ -663,56 +671,116 @@ function ensureSparks() {
   for (const bay of BAYS) {
     const row = document.createElement("div");
     row.className = "spark";
-    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas></canvas><span class="spark__val"></span><span class="spark__pose"></span>`;
+    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas role="img"></canvas><span class="spark__val"></span><span class="spark__pose"></span>`;
     box.append(row);
-    ui.sparks.set(bay, {
+    const s = {
       row,
       canvas: row.querySelector("canvas"),
       val: row.querySelector(".spark__val"),
       pose: row.querySelector(".spark__pose"),
+      hover: null, // 0..1 across the canvas while the pointer is over it
+    };
+    s.canvas.addEventListener("pointermove", (e) => {
+      const rect = s.canvas.getBoundingClientRect();
+      s.hover = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(rect.width, 1)));
+      if (ui.telemetry) updateSparks(ui.telemetry);
     });
+    s.canvas.addEventListener("pointerleave", () => {
+      s.hover = null;
+      if (ui.telemetry) updateSparks(ui.telemetry);
+    });
+    ui.sparks.set(bay, s);
   }
 }
 
-function drawSpark(canvas, history, threshold, color) {
+const SPARK_SAMPLES = 150;
+
+// C(t) trace: neutral line, red where it runs under the stall threshold (the dashed rule), a
+// dot on the latest sample. Returns the value under the pointer while hovering, else null.
+function drawSpark(canvas, history, threshold, hover) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
-  if (!w || !h) return;
+  if (!w || !h) return null;
   if (canvas.width !== Math.round(w * dpr)) canvas.width = Math.round(w * dpr);
   if (canvas.height !== Math.round(h * dpr)) canvas.height = Math.round(h * dpr);
   const g = canvas.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
-  const y = (v) => h - 2 - Math.max(0, Math.min(1, v)) * (h - 4);
+  const pad = 4;
+  const y = (v) => h - pad - Math.max(0, Math.min(1, v)) * (h - 2 * pad);
+  const yT = y(threshold);
+  const bad = css("--stalled");
   g.strokeStyle = css("--faint");
-  g.setLineDash([3, 3]);
+  g.lineWidth = 1;
+  g.setLineDash([4, 3]);
   g.beginPath();
-  g.moveTo(0, y(threshold));
-  g.lineTo(w, y(threshold));
+  g.moveTo(0, Math.round(yT) + 0.5);
+  g.lineTo(w, Math.round(yT) + 0.5);
   g.stroke();
   g.setLineDash([]);
-  if (history.length < 2) return;
-  const n = 150;
-  const step = w / (n - 1);
-  const x0 = w - (history.length - 1) * step;
-  g.strokeStyle = color;
-  g.lineWidth = 1.5;
+  if (history.length < 2) return null;
+  const xEnd = w - pad - 1;
+  const step = xEnd / (SPARK_SAMPLES - 1);
+  const x = (i) => xEnd - (history.length - 1 - i) * step;
+  const trace = (color, top, height) => {
+    g.save();
+    g.beginPath();
+    g.rect(0, top, w, height);
+    g.clip();
+    g.strokeStyle = color;
+    g.lineWidth = 2;
+    g.lineJoin = "round";
+    g.beginPath();
+    history.forEach((v, i) => (i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v))));
+    g.stroke();
+    g.restore();
+  };
+  trace(css("--text"), 0, yT);
+  trace(bad, yT, h - yT);
+  const dot = (i) => {
+    const v = history[i];
+    g.fillStyle = css("--panel");
+    g.beginPath();
+    g.arc(x(i), y(v), 5, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = v < threshold ? bad : css("--text");
+    g.beginPath();
+    g.arc(x(i), y(v), 3.5, 0, Math.PI * 2);
+    g.fill();
+  };
+  if (hover === null) {
+    dot(history.length - 1);
+    return null;
+  }
+  const first = x(0);
+  const i = Math.max(0, Math.min(history.length - 1, Math.round((hover * w - first) / step)));
+  g.strokeStyle = css("--muted");
+  g.lineWidth = 1;
   g.beginPath();
-  history.forEach((v, i) => (i ? g.lineTo(x0 + i * step, y(v)) : g.moveTo(x0 + i * step, y(v))));
+  g.moveTo(Math.round(x(i)) + 0.5, 0);
+  g.lineTo(Math.round(x(i)) + 0.5, h);
   g.stroke();
+  dot(i);
+  return history[i];
 }
 
 function updateSparks(t) {
   ensureSparks();
-  $("threshold-note").textContent = `stall below ${t.threshold.toFixed(1)}`;
+  $("threshold-note").textContent = `dashed line: stall below ${t.threshold.toFixed(1)}`;
   for (const b of t.bays) {
     const s = ui.sparks.get(b.id);
     if (!s) continue;
     const standby = b.state === "STANDBY";
+    const hovered = standby ? null : drawSpark(s.canvas, b.history, t.threshold, s.hover);
+    const shown = hovered ?? b.confidence;
     s.row.classList.toggle("is-standby", standby);
-    s.row.classList.toggle("is-low", !standby && b.confidence < t.threshold);
-    s.val.textContent = standby ? "–" : b.confidence.toFixed(2);
+    s.row.classList.toggle("is-low", !standby && shown < t.threshold);
+    s.val.textContent = standby ? "–" : shown.toFixed(2);
+    s.canvas.setAttribute(
+      "aria-label",
+      standby ? `Bay ${b.id} on standby` : `Bay ${b.id} confidence ${b.confidence.toFixed(2)}, ${STATE_TEXT[b.state] || b.label}`
+    );
     const parts = [];
     if (b.pose_sigma_mm != null) {
       const yaw = b.pose_sigma_yaw_deg != null ? `/±${b.pose_sigma_yaw_deg.toFixed(1)}°` : "";
@@ -720,32 +788,39 @@ function updateSparks(t) {
     }
     if (b.touch_correction_mm != null) parts.push(`touch-corrected ${b.touch_correction_mm.toFixed(1)} mm`);
     s.pose.textContent = parts.join(", ");
-    drawSpark(s.canvas, b.history, t.threshold, css(STATE_COLOR[b.state] || "--nominal"));
   }
 }
 
 function updateGate(t) {
   const box = $("gate");
   const g = t.gate;
+  const span = (cls, text) => {
+    const el = document.createElement("span");
+    el.className = cls;
+    el.textContent = text;
+    return el;
+  };
   if (!g || g.ok === null || g.ok === undefined) {
-    box.innerHTML = `<span class="is-empty">${
-      g && g.fit_ms != null ? `Skill fitted in ${g.fit_ms.toFixed(0)} ms, checking in simulation` : "No skill learned yet"
-    }</span>`;
+    delete box.dataset.ok;
+    box.replaceChildren(
+      span("is-empty", g && g.fit_ms != null
+        ? `Skill fitted in ${g.fit_ms.toFixed(0)} ms, checking it in simulation`
+        : "No skill learned yet")
+    );
     return;
   }
-  const big = `<span class="gate__big ${g.ok ? "is-ok" : "is-bad"}">${g.passed}/${g.total}</span>`;
-  const verdict = g.ok ? "Simulation checks passed, shared with the fleet" : "Simulation checks failed, not shared";
-  const conds = g.conditions ? `Skill gate ${g.passed}/${g.total} ${g.ok ? "PASS" : "FAIL"} (${g.conditions})` : null;
+  box.dataset.ok = String(!!g.ok);
   const timing = [
     !g.ok && g.worst_failure ? g.worst_failure : null,
     g.fit_ms != null ? `fitted in ${g.fit_ms.toFixed(0)} ms` : null,
     g.elapsed_s != null ? `checked in ${g.elapsed_s.toFixed(2)} s` : null,
   ].filter(Boolean).join(", ");
-  box.innerHTML = `${big}<span>${verdict}</span><span class="gate__line">${timing}</span>${
-    conds ? `<span class="gate__conds"></span>` : ""
-  }`;
-  const condsEl = box.querySelector(".gate__conds");
-  if (condsEl) condsEl.textContent = conds;
+  box.replaceChildren(
+    span("gate__big", `${g.passed}/${g.total}`),
+    span("gate__verdict", g.ok ? "Passed, shared with the fleet" : "Failed, not shared"),
+    span("gate__line", timing)
+  );
+  if (g.conditions) box.append(span("gate__conds", g.conditions));
 }
 
 function updateLog(t) {
@@ -847,6 +922,18 @@ function situation(t) {
       actions: acts,
     };
   }
+  const refusedBay = first("OOD_ESCALATED");
+  if (refusedBay) {
+    // Refused but not yet handed to the operator: the banner must not read as "all well".
+    const r = refusedBay.id;
+    return {
+      tone: "ood", tag: `Refused · Bay ${r}`,
+      head: `Bay ${r} refused the fleet skill`,
+      hint: `This stall is unlike the learned jam, so no skill was replayed. Select Bay ${r} (${kbd(r)}) to take over, or reset the cells (${kbd("R")}).`,
+      keys: [48 + r],
+      actions: [{ label: `Select Bay ${r}`, accent: true, run: () => selectBay(r) }],
+    };
+  }
   const val = first("VALIDATING");
   if (val) {
     return {
@@ -920,8 +1007,8 @@ function situation(t) {
   return {
     tone: "idle",
     tag: t.gate && t.gate.ok ? "Fleet skill active" : "Nominal",
-    head: "Autonomous disassembly running across active bays",
-    hint: "Drag any bay pane to focus or swap positions, switch camera angles, or inject a fault anytime.",
+    head: "All active bays are running on their own",
+    hint: "Nothing needs you. Double-click a bay to focus it, or inject a fault to start a rescue.",
     keys: [],
     actions: faultBtns,
   };
@@ -946,7 +1033,9 @@ function updateBrief(t) {
       btn.className = `actbtn${act.accent ? " actbtn--accent" : ""}`;
       btn.textContent = act.label;
       btn.addEventListener("click", act.run);
-      actBox.append(btn);
+      // Primary action first, so it sits in the same place whatever else is offered.
+      if (act.accent) actBox.prepend(btn);
+      else actBox.append(btn);
     }
     brief.classList.remove("is-new");
     void brief.offsetWidth;
@@ -1030,29 +1119,26 @@ function updateActions(t) {
 function syncViewBar() {
   const t = ui.telemetry;
   const vmode = (t && t.view && t.view.mode) || ui.view.mode;
-  const pinned = t && t.view ? t.view.pinned_bay : ui.view.pinnedBay;
   const ovBtn = $("view-overview");
   if (ovBtn) ovBtn.classList.toggle("is-active", vmode === "overview");
   $("view-grid").classList.toggle("is-active", vmode === "grid");
   $("view-auto").classList.toggle("is-active", vmode === "auto");
-  for (const btn of $("pin-bar").querySelectorAll(".vbtn--pin")) {
-    btn.classList.toggle("is-active", vmode === "pin" && pinned === Number(btn.dataset.bay));
-  }
 }
 
 function updateDummy(t) {
   const d = t.dummy;
-  $("dummy-badge").hidden = !d;
   $("dummy-panel").hidden = !d;
   if (!d) return;
-  $("dummy-meta").textContent =
-    d.transport === "studio_udp" ? `Studio UDP${d.pid ? ` · PID ${d.pid}` : ""}` : "Stand-in";
+  const DUMMY_MODE_TEXT = { manual: "manual", auto: "auto co-pilot", off: "off" };
+  $("dummy-meta").textContent = `(temporary, ${DUMMY_MODE_TEXT[d.mode] || d.mode})`;
+  $("dummy-panel").title =
+    d.transport === "studio_udp" ? `Studio UDP stand-in${d.pid ? `, PID ${d.pid}` : ""}` : "Stand-in";
   for (const btn of $("dummy-panel").querySelectorAll("[data-dummy-mode]")) {
     btn.classList.toggle("is-active", btn.dataset.dummyMode === d.mode);
   }
   $("dummy-autofaults").checked = !!d.auto_faults;
   $("dummy-manual").hidden = d.mode === "off";
-  $("btn-solve").textContent = d.solving ? "Solving…" : "Guided Solve";
+  $("btn-solve").textContent = d.solving ? "Solving…" : "Guided solve";
   if (!ui.padActive) {
     const xPct = ((d.dx_cm + 3.0) / 10.0) * 100;
     const zPct = ((4.0 - d.dz_cm) / 7.0) * 100;
@@ -1087,8 +1173,6 @@ function render(t) {
   }
   ui.layoutId = t.layout_id % 256;
   $("clock").textContent = t.wall;
-  const active = t.bays.filter((b) => b.state !== "STANDBY").length;
-  $("shift").textContent = `${active} bays, 1 operator on shift`;
   syncViewBar();
   updateWall(t);
   updateQueue(t);
@@ -1099,43 +1183,38 @@ function render(t) {
   updateDummy(t);
   updateActions(t);
   updateCompliance(t);
-  $("reasoning").textContent = t.reasoning;
-  $("unoq").textContent = t.unoq;
+  // One advisory line, shown only while the advisor has something to say.
+  const advice = (t.reasoning || "").trim();
+  $("panel-advisor").hidden = !advice || /\bidle\b/i.test(advice);
+  if ($("reasoning").textContent !== advice) $("reasoning").textContent = advice;
+  $("live").title = t.unoq || "";
 }
 
 function buildAuditItem(comp) {
+  const kind = comp.kind || "AUDIT_EVENT";
   const item = document.createElement("div");
   item.className = "audit__item";
-
-  const meta = document.createElement("div");
-  meta.className = "audit__row audit__row--meta";
+  item.dataset.kind = kind;
 
   const kindEl = document.createElement("span");
   kindEl.className = "audit__kind";
-  kindEl.textContent = comp.kind || "AUDIT_EVENT";
-  kindEl.dataset.kind = comp.kind || "AUDIT_EVENT";
+  kindEl.textContent = AUDIT_KIND_TEXT[kind] || kind.replace(/_/g, " ").toLowerCase();
+  kindEl.title = kind;
 
   const bayEl = document.createElement("span");
   bayEl.className = "audit__bay";
   bayEl.textContent = comp.bay_id ? `Bay ${comp.bay_id}` : "Fleet";
 
-  const stateEl = document.createElement("span");
   const st = comp.state || "local";
-  stateEl.className = "audit__pill";
+  const stateEl = document.createElement("span");
+  stateEl.className = "audit__state";
   stateEl.dataset.state = st;
-  stateEl.textContent = st.toUpperCase();
-
-  meta.append(kindEl, bayEl, stateEl);
-
-  const hashRow = document.createElement("div");
-  hashRow.className = "audit__row audit__row--hash";
-
-  const label = document.createElement("span");
-  label.className = "audit__label";
-  label.textContent = "Hash";
+  stateEl.textContent = AUDIT_STATE_TEXT[st] || st;
 
   const hashEl = document.createElement("a");
   hashEl.className = "audit__hash-link";
+  const hashText = document.createElement("span");
+  hashText.className = "audit__hash";
   hashEl.target = "_blank";
   hashEl.rel = "noopener";
 
@@ -1152,11 +1231,13 @@ function buildAuditItem(comp) {
 
   if (url) {
     hashEl.href = url;
-    hashEl.textContent = `${shortHex} ↗`;
-    hashEl.title = `View on-chain transaction on Solana Explorer:\nTx: ${txSig || url}\nDigest: ${digest || "N/A"}`;
+    hashText.textContent = shortHex;
+    hashEl.append(hashText, " Solana Explorer ↗");
+    hashEl.title = `Open the on-chain transaction in Solana Explorer\nTx: ${txSig || url}\nDigest: ${digest || "N/A"}`;
   } else {
-    hashEl.textContent = shortHex;
-    hashEl.title = `Local SHA-256 hash chain (not anchored on-chain yet):\n${digest || ""}\n(Click to copy)`;
+    hashText.textContent = shortHex;
+    hashEl.append(hashText);
+    hashEl.title = `Local SHA-256 hash chain, not anchored on-chain yet\n${digest || ""}\n(Click to copy)`;
     hashEl.addEventListener("click", () => {
       if (digest && navigator.clipboard) {
         navigator.clipboard.writeText(digest).then(() => {
@@ -1166,8 +1247,7 @@ function buildAuditItem(comp) {
     });
   }
 
-  hashRow.append(label, hashEl);
-  item.append(meta, hashRow);
+  item.append(kindEl, bayEl, stateEl, hashEl);
   return item;
 }
 
@@ -1190,7 +1270,7 @@ function updateCompliance(t) {
 
   if (!history.length) {
     if (badge) {
-      badge.textContent = "IDLE";
+      badge.textContent = "";
       badge.dataset.state = "idle";
     }
     if (list) {
@@ -1207,7 +1287,7 @@ function updateCompliance(t) {
   const latest = history[history.length - 1];
   const latestState = latest.state || "local";
   if (badge) {
-    badge.textContent = latestState.toUpperCase();
+    badge.textContent = `latest ${AUDIT_STATE_TEXT[latestState] || latestState}`;
     badge.dataset.state = latestState;
   }
 
@@ -1277,6 +1357,7 @@ function setLink(up) {
   $("live").classList.toggle("is-up", up);
   $("live-text").textContent = up ? "Live" : "Offline";
   $("linkdown").hidden = up;
+  document.body.classList.toggle("is-down", !up); // everything on screen is now last-known state
 }
 
 function sendClient(payload) {
@@ -1359,17 +1440,6 @@ function initViewBar() {
   }
   $("view-grid").addEventListener("click", () => setLayoutMode("grid", null));
   $("view-auto").addEventListener("click", () => setLayoutMode("auto", null));
-  const pinBar = $("pin-bar");
-  for (const bay of BAYS) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "vbtn vbtn--pin";
-    b.dataset.bay = String(bay);
-    b.textContent = String(bay);
-    b.title = `Pin Bay ${bay} (click again to unpin)`;
-    b.addEventListener("click", () => togglePinBay(bay));
-    pinBar.append(b);
-  }
   const dz = $("focus-dropzone");
   dz.addEventListener("dragover", (e) => {
     if (!ui.dragBay) return;
@@ -1458,6 +1528,21 @@ window.addEventListener("keydown", (event) => {
   if (code === 32) event.preventDefault();
   pressKey(code, keyName(code));
 });
+
+// Space, the digits, M and R are control keys, so no button or drawer may hold keyboard focus
+// after a mouse click, and a Space release must never activate a focused control.
+// Enter still activates whatever has focus.
+document.addEventListener("mousedown", (event) => {
+  if (event.target instanceof Element && event.target.closest("button, summary")) event.preventDefault();
+});
+window.addEventListener(
+  "keyup",
+  (event) => {
+    if (event.key !== " ") return;
+    if (event.target instanceof Element && event.target.closest("button, summary, a")) event.preventDefault();
+  },
+  true
+);
 
 window.addEventListener("resize", () => ui.telemetry && updateSparks(ui.telemetry));
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fleet operations · EV Battery Recycling Plant</title>
+  <title>Fleet operations</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="console.css">
 </head>
@@ -12,32 +12,27 @@
     <div class="bar__site">
       <span class="bar__mark" aria-hidden="true"></span>
       <h1>Fleet operations</h1>
-      <span class="bar__eco">Circular EV Plant</span>
-      <span class="bar__line">Battery disassembly warehouse · 4 segmented conveyors</span>
-      <span class="bar__badge" id="dummy-badge" hidden title="Temporary dummy Rokoko glove streamer is active. Swap out when real gloves connect.">TEMP: Dummy gloves</span>
     </div>
-    <div class="bar__views" role="toolbar" aria-label="Camera layout">
-      <button type="button" class="vbtn" id="view-overview" title="Wide mezzanine camera across the sustainable warehouse, 4 segmented conveyor belts, and all 4 separated arms">Plant Overview</button>
-      <button type="button" class="vbtn" id="view-grid" title="Show all 4 bays equally in a 2x2 grid">4-Up Equal</button>
-      <button type="button" class="vbtn is-active" id="view-auto" title="Equal grid normally; auto-pin rescue bay">Auto Focus</button>
-      <span class="bar__sep" aria-hidden="true"></span>
-      <span class="bar__pin-label">Pin:</span>
-      <div class="bar__pins" id="pin-bar"></div>
+    <div class="seg bar__views" role="toolbar" aria-label="Camera layout">
+      <button type="button" class="vbtn is-active" id="view-auto" title="Equal grid normally; a bay under rescue takes the stage on its own">Auto focus</button>
+      <button type="button" class="vbtn" id="view-grid" title="All 4 bays in an equal 2x2 grid">Grid</button>
+      <button type="button" class="vbtn" id="view-overview" title="Mezzanine camera across the warehouse: 4 segmented conveyors and all 4 arms">Plant overview</button>
     </div>
     <div class="bar__live">
-      <span class="bar__shift" id="shift">4 stations · 4 conveyors · 1 operator</span>
       <span class="live" id="live"><span class="live__dot" aria-hidden="true"></span><span id="live-text">Connecting</span></span>
       <time class="bar__clock" id="clock">--:--:--</time>
     </div>
   </header>
 
-  <div class="linkdown" id="linkdown" hidden>Link to the cell controller is down. Reconnecting…</div>
+  <div class="linkdown" id="linkdown" role="alert" hidden>
+    <strong>Link down.</strong> No telemetry from the cell controller, reconnecting. The glove and the hardware console still work.
+  </div>
 
   <main class="desk">
     <div class="stagecol">
       <section class="brief" id="brief" data-tone="connecting" aria-live="polite">
+        <span class="brief__tag" id="brief-tag">Status</span>
         <div class="brief__body">
-          <span class="brief__tag" id="brief-tag">Status</span>
           <h2 class="brief__head" id="brief-head">Connecting to the cell controller</h2>
           <p class="brief__hint" id="brief-hint"></p>
         </div>
@@ -51,8 +46,8 @@
 
       <div class="wall-wrap" id="wall-wrap">
         <div class="dropzone" id="focus-dropzone" aria-hidden="true">
-          <strong>Drop bay pane here to pin into focus</strong>
-          <span>Or drag onto another tile to swap positions</span>
+          <strong>Drop the bay here to give it the stage</strong>
+          <span>Or drop it on another tile to swap positions</span>
         </div>
         <section class="wall" id="wall" aria-label="Bay cameras"></section>
       </div>
@@ -62,81 +57,73 @@
     </div>
 
     <aside class="rail" aria-label="Fleet status">
-      <!-- TODO(rokoko-gloves-swap): Temporary dummy glove control panel while physical Rokoko gloves are disconnected -->
-      <section class="panel panel--dummy" id="dummy-panel" hidden>
-        <div class="dummy__head">
-          <h2>Dummy glove <span class="dummy__tag">TEMP</span></h2>
-          <span class="dummy__meta" id="dummy-meta">UDP stand-in</span>
-        </div>
-        <div class="seg" role="group" aria-label="Dummy glove mode">
-          <button type="button" class="seg__btn" data-dummy-mode="manual">Manual UI</button>
-          <button type="button" class="seg__btn" data-dummy-mode="auto">Auto Co-Pilot</button>
-          <button type="button" class="seg__btn" data-dummy-mode="off">Off</button>
-        </div>
-        <label class="dummy__toggle">
-          <input type="checkbox" id="dummy-autofaults">
-          <span>Auto-inject periodic bay jams</span>
-        </label>
-        <div class="dummy__manual" id="dummy-manual">
-          <div class="dummy__pad-row">
-            <div class="xypad" id="wrist-pad" tabindex="0" aria-label="Drag to move wrist X slide and Z height">
-              <div class="xypad__grid"></div>
-              <span class="xypad__axis xypad__axis--x">Bolt +X →</span>
-              <span class="xypad__axis xypad__axis--z">↑ +Z</span>
-              <div class="xypad__dot" id="wrist-dot"></div>
-            </div>
-            <div class="dummy__sliders">
-              <label><span>Thumb flap</span><input type="range" id="sl-thumb" min="0" max="100" value="0"></label>
-              <label><span>Index hook</span><input type="range" id="sl-index" min="0" max="100" value="33"></label>
-              <label><span>Lateral Y</span><input type="range" id="sl-dy" min="-30" max="30" value="0"></label>
-            </div>
-          </div>
-          <div class="dummy__btns">
-            <button type="button" class="actbtn actbtn--accent" id="btn-solve" title="Drive guided latch rescue while clutch is held">Guided Solve</button>
-            <button type="button" class="actbtn" id="btn-zero" title="Zero wrist offset & reset fingers">Zero Pose</button>
-          </div>
-        </div>
-      </section>
-
       <section class="panel panel--queue" id="panel-queue">
         <h2>Rescue queue</h2>
         <ol class="queue" id="queue"></ol>
       </section>
 
-      <section class="panel panel--audit" id="panel-audit">
-        <div class="audit__head">
-          <h2>Compliance Audit Trail <span class="panel__note" id="audit-count"></span></h2>
-          <span class="audit__badge" id="audit-badge" data-state="idle">IDLE</span>
-        </div>
+      <section class="panel">
+        <h2>Confidence C(t) <span class="panel__note" id="threshold-note"></span></h2>
+        <div class="sparks" id="sparks"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Skill gate</h2>
+        <div class="gate" id="gate"></div>
+      </section>
+
+      <section class="panel panel--audit panel--grow" id="panel-audit">
+        <h2>Compliance audit trail <span class="panel__note" id="audit-count"></span>
+          <span class="audit__badge" id="audit-badge" data-state="idle"></span></h2>
         <div class="audit__list" id="audit-list" tabindex="0" aria-label="Compliance audit history">
           <p class="audit__empty" id="compliance">No compliance events recorded yet</p>
         </div>
       </section>
 
-      <section class="panel panel--advisor" id="panel-advisor">
-        <div class="advisor__head">
-          <h2>Fleet Advisor <span class="advisor__tag">AI CO-PILOT</span></h2>
-        </div>
-        <div class="advisor__box">
-          <p id="reasoning">Idle</p>
-        </div>
-      </section>
+      <p class="advisor" id="panel-advisor" hidden>
+        <span class="advisor__who">Advisor</span>
+        <span id="reasoning"></span>
+      </p>
 
-      <section class="panel">
-        <h2>Bay Telemetry <span class="panel__note" id="threshold-note"></span></h2>
-        <div class="sparks" id="sparks"></div>
-      </section>
-
-      <section class="panel">
-        <h2>Skill Gate</h2>
-        <div class="gate" id="gate"></div>
-      </section>
-
-      <section class="panel panel--grow">
-        <h2>Activity <span class="panel__note" id="activity-count"></span></h2>
+      <details class="drawer" id="activity-drawer">
+        <summary>Activity log <span class="panel__note" id="activity-count"></span></summary>
         <ol class="log" id="log" tabindex="0" aria-label="Activity history"></ol>
-      </section>
-      <footer class="rail__foot" id="unoq"></footer>
+      </details>
+
+      <!-- TODO(rokoko-gloves-swap): Temporary dummy glove controls while the physical Rokoko gloves are disconnected -->
+      <details class="drawer drawer--dev" id="dummy-panel" hidden>
+        <summary>Dev tools: dummy glove <span class="panel__note" id="dummy-meta"></span></summary>
+        <div class="dummy">
+          <div class="seg" role="group" aria-label="Dummy glove mode">
+            <button type="button" class="vbtn" data-dummy-mode="manual">Manual</button>
+            <button type="button" class="vbtn" data-dummy-mode="auto">Auto co-pilot</button>
+            <button type="button" class="vbtn" data-dummy-mode="off">Off</button>
+          </div>
+          <label class="dummy__toggle">
+            <input type="checkbox" id="dummy-autofaults">
+            <span>Inject a bay jam every so often</span>
+          </label>
+          <div class="dummy__manual" id="dummy-manual">
+            <div class="dummy__pad-row">
+              <div class="xypad" id="wrist-pad" tabindex="0" aria-label="Drag to move wrist X slide and Z height">
+                <div class="xypad__grid"></div>
+                <span class="xypad__axis xypad__axis--x">Bolt +X</span>
+                <span class="xypad__axis xypad__axis--z">+Z</span>
+                <div class="xypad__dot" id="wrist-dot"></div>
+              </div>
+              <div class="dummy__sliders">
+                <label><span>Thumb flap</span><input type="range" id="sl-thumb" min="0" max="100" value="0"></label>
+                <label><span>Index hook</span><input type="range" id="sl-index" min="0" max="100" value="33"></label>
+                <label><span>Lateral Y</span><input type="range" id="sl-dy" min="-30" max="30" value="0"></label>
+              </div>
+            </div>
+            <div class="dummy__btns">
+              <button type="button" class="actbtn actbtn--accent" id="btn-solve" title="Drive the guided latch rescue while the clutch is held">Guided solve</button>
+              <button type="button" class="actbtn" id="btn-zero" title="Zero the wrist offset and reset the fingers">Zero pose</button>
+            </div>
+          </div>
+        </div>
+      </details>
     </aside>
   </main>
 

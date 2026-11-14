@@ -1,4 +1,6 @@
 // Hardware health strip: one pill per check (hotspot, gloves, panel) above the camera wall.
+// While every check passes, the strip collapses to a single "Hardware OK" indicator (the CSS
+// keys off data-all on the strip; the pills stay built so a failure shows without a rebuild).
 // Listens for the "telemetry" event console.js dispatches; hidden while telemetry has no `health`.
 "use strict";
 
@@ -90,6 +92,11 @@
       strip.replaceChildren(...list.map((h) => pills.get(h.name).el));
     }
     strip.hidden = list.length === 0;
+    const all = list.every((h) => h.level === "ok") ? "ok" : "issues";
+    if (strip.dataset.all !== all) strip.dataset.all = all;
+    const okTitle =
+      all === "ok" ? list.map((h) => `${LABELS[h.name] || h.name}: ${h.summary}`).join("\n") : "";
+    if (strip.title !== okTitle) strip.title = okTitle;
     for (const h of list) {
       update(pills.get(h.name), h);
       if (h.level === "fail" && last[h.name] !== undefined && last[h.name] !== "fail") {
