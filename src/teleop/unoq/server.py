@@ -11,21 +11,24 @@ import dataclasses
 import logging
 import socket
 import threading
+import time
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 import numpy as np
 
-from teleop.atc.types import ConsoleInputState, SkillPrimitive
+from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive
 from teleop.types import Pose
 from teleop.unoq import protocol as P
 from teleop.unoq.classifier import MahalanobisStallClassifier
 from teleop.unoq.dmp import HAND_ACTUATORS, fit_rbf_dmp, pose_to_vec7
 from teleop.unoq.filter import JointsOneEuroFilter, PoseOneEuroFilter
+from teleop.unoq.mcu_bridge import McuConsoleBridge
 
 logger = logging.getLogger(__name__)
 
 NODE_NAME = "unoq-qrb2210"
+CONSOLE_SYNC_S = 0.05  # MCU bridge -> console_state copy period
 POLL_S = 0.2  # how often blocking socket loops check for stop()
 
 
@@ -75,6 +78,8 @@ class UnoQServer:
         self.joint_filter = JointsOneEuroFilter()
         self.skills: dict[str, SkillPrimitive] = {}
         self._console = ConsoleInputState()
+        self._bridge: McuConsoleBridge | None = None  # set once, before serving
+        self._last_heard_ns: int | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -88,6 +93,7 @@ class UnoQServer:
             P.OP_FIT_DMP: self._fit_dmp,
             P.OP_REGISTER_SKILL: self._register_skill,
             P.OP_CONSOLE_STATE: self._console_state,
+            P.OP_SET_BAY_STATE: self._set_bay_state,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -145,6 +151,27 @@ class UnoQServer:
         with self._lock:
             self._console = state
 
+    def attach_console(self, bridge: McuConsoleBridge) -> None:
+        """Mirror the MCU console into ``console_state`` and forward ``set_bay_state`` to it.
+
+        The caller owns the bridge's reader (``bridge.start()``); this only copies its state
+        every 50 ms on a daemon thread.
+        """
+        self._bridge = bridge
+        th = threading.Thread(target=self._console_sync, args=(bridge,), name="unoq-console")
+        th.daemon = True
+        th.start()
+        self._threads.append(th)
+
+    def _console_sync(self, bridge: McuConsoleBridge) -> None:
+        while not self._stop.is_set():
+            heard = bridge.last_heard_ns
+            state = bridge.state()
+            with self._lock:
+                self._console = state
+                self._last_heard_ns = heard
+            self._stop.wait(CONSOLE_SYNC_S)
+
     # ------------------------------------------------------------------ dispatch
 
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -154,9 +181,11 @@ class UnoQServer:
         if handler is None:
             return P.error(f"unknown op {op!r}")
         try:
+            if op == P.OP_SET_BAY_STATE:
+                return handler(dict(request))  # MCU write may block: never under the lock
             with self._lock:
                 return handler(dict(request))
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OSError) as exc:
             return P.error(f"{op}: {type(exc).__name__}: {exc}")
 
     def _ping(self, _: dict[str, Any]) -> dict[str, Any]:
@@ -219,7 +248,16 @@ class UnoQServer:
         return P.ok(skill_id=skill.skill_id, signature_samples=n)
 
     def _console_state(self, _: dict[str, Any]) -> dict[str, Any]:
-        return P.ok(console=console_to_dict(self._console))
+        heard = self._last_heard_ns
+        age = None if heard is None else max(0, (time.monotonic_ns() - heard) // 1_000_000)
+        return P.ok(console=console_to_dict(self._console), mcu_heartbeat_age_ms=age)
+
+    def _set_bay_state(self, req: dict[str, Any]) -> dict[str, Any]:
+        bay_id = int(req["bay_id"])
+        state = BayState[str(req["state"])]  # KeyError -> error reply
+        if self._bridge is not None:
+            self._bridge.set_bay_state(bay_id, state)
+        return P.ok()
 
     # ------------------------------------------------------------------ sockets
 

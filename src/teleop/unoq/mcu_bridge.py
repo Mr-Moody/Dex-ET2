@@ -277,6 +277,12 @@ class McuConsoleBridge:
     # -- state
 
     @property
+    def last_heard_ns(self) -> int | None:
+        """Monotonic ns (this bridge's clock) of the last valid MCU line, None before any."""
+        with self._lock:
+            return self._last_rx_ns
+
+    @property
     def link_ok(self) -> bool:
         with self._lock:
             last = self._last_rx_ns
@@ -315,8 +321,8 @@ class McuConsoleBridge:
         if self._led.get(bay_id) == token:
             return
         line = format_bay_state(bay_id, state)
-        self._led[bay_id] = token
         self._send(line)
+        self._led[bay_id] = token  # only after a successful write, so a failed one is retried
 
     def resend_bay_states(self) -> None:
         """Push every known LED state again, e.g. after the MCU reboots."""
