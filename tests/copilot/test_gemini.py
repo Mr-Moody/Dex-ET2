@@ -114,6 +114,7 @@ def test_config_defaults_with_an_empty_env() -> None:
     assert cfg.local_url is None and cfg.local_model == "gemma4:e4b"
     assert cfg.console_url == "ws://127.0.0.1:8765/ws"
     assert cfg.max_reviews_per_hour == 20
+    assert cfg.fast_thinking == "low" and cfg.review_thinking == "low"
     assert not cfg.no_images and not cfg.mute
 
 
@@ -143,6 +144,19 @@ def test_config_reads_every_variable() -> None:
     assert cfg.local_url == "http://127.0.0.1:11434/v1" and cfg.local_model == "gemma4:12b"
     assert cfg.console_url == "ws://127.0.0.1:9000/ws"
     assert cfg.max_reviews_per_hour == 5 and cfg.no_images and cfg.mute
+
+
+def test_config_thinking_levels_from_env() -> None:
+    cfg = CopilotConfig.from_env(
+        {"COPILOT_FAST_THINKING": "MEDIUM", "COPILOT_REVIEW_THINKING": " high "}
+    )
+    assert (cfg.fast_thinking, cfg.review_thinking) == ("medium", "high")
+
+
+@pytest.mark.parametrize("raw", ["minimal", "none", "fast"])
+def test_config_rejects_unknown_thinking_levels(raw: str) -> None:
+    with pytest.raises(ValueError, match="COPILOT_REVIEW_THINKING must be one of low"):
+        CopilotConfig.from_env({"COPILOT_REVIEW_THINKING": raw})
 
 
 def test_config_blank_values_mean_unset() -> None:
@@ -562,11 +576,7 @@ def test_probe_report_and_recommendations() -> None:
     assert "COPILOT_TTS_MODEL=gemini-3.8-flash-lite-tts" in report
     assert KEY not in report
     thinking = [s.json["generationConfig"].get("thinkingConfig") for s in fake.sent[1:4]]
-    assert thinking == [
-        {"thinkingLevel": "LOW"},
-        {"thinkingLevel": "LOW"},
-        {"thinkingLevel": "HIGH"},
-    ]
+    assert thinking == [{"thinkingLevel": "LOW"}] * 3  # lowest effort on every text model
     review_parts = fake.sent[3].json["contents"][0]["parts"]
     assert sum("inlineData" in p for p in review_parts) == 3
 
@@ -633,6 +643,8 @@ def test_main_applies_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             "gemini-4-hydrogen",
             "--voice",
             "Charon",
+            "--review-thinking",
+            "medium",
         ],
         client_factory=factory,
         out=out,
@@ -641,6 +653,7 @@ def test_main_applies_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     (cfg,) = seen
     assert cfg.no_images and cfg.fast_model == "gemini-3.8-flash"
     assert cfg.review_model == "gemini-4-hydrogen" and cfg.voice == "Charon"
+    assert cfg.fast_thinking == "low" and cfg.review_thinking == "medium"
     assert KEY not in out.getvalue()
 
 
