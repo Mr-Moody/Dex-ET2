@@ -9,10 +9,12 @@ glyphs beyond it).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from teleop.atc.types import BaySnapshot, BayState
+from teleop.health.model import Health
 
 ConveyorMode = Literal["feeding", "paused", "estop"]
 
@@ -51,13 +53,15 @@ class RescueStatus:
 
 @dataclass(frozen=True, slots=True)
 class GateStatus:
-    """Latest UNO Q DMP fit and 3-rollout sim gate result."""
+    """Latest UNO Q DMP fit and randomized sim gate result."""
 
     fit_ms: float | None = None
     passed: int | None = None
     total: int | None = None
     elapsed_s: float | None = None
     ok: bool | None = None
+    conditions: str | None = None  # what the gate randomized, shown after the verdict
+    worst_failure: str | None = None  # most extreme condition among failed rollouts
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,9 +124,15 @@ def _match_text(snap: BaySnapshot) -> str:
 
 def format_bay_row(snap: BaySnapshot) -> tuple[str, str]:
     skill = f"  {snap.active_skill_id}" if snap.active_skill_id else ""
+    pose = f"  pose ±{snap.pose_sigma_mm:.0f} mm" if snap.pose_sigma_mm is not None else ""
+    if pose and snap.pose_sigma_yaw_deg is not None:
+        pose += f"/±{snap.pose_sigma_yaw_deg:.1f}°"
+    touch = (
+        f"  touch {snap.touch_correction_mm:.1f} mm" if snap.touch_correction_mm is not None else ""
+    )
     value = (
         f"{_state_text(snap):<14} C {confidence_bar(snap.confidence)}  "
-        f"x {snap.x_bolt_m * 100:4.1f} cm{_match_text(snap)}{skill}"
+        f"x {snap.x_bolt_m * 100:4.1f} cm{pose}{touch}{_match_text(snap)}{skill}"
     )
     return f"BAY {snap.bay_id}", value
 
@@ -155,13 +165,22 @@ def format_gate(gate: GateStatus) -> str:
         return f"UNO Q DMP fit: {fit} | Sim Gate: --"
     verdict = "PASS" if gate.ok else "FAIL"
     elapsed = f" ({gate.elapsed_s:.2f} s)" if gate.elapsed_s is not None else ""
-    return f"UNO Q DMP fit: {fit} | Sim Gate: {gate.passed}/{gate.total} {verdict}{elapsed}"
+    if gate.conditions:
+        label = f"Skill gate {gate.passed}/{gate.total} {verdict} ({gate.conditions})"
+    else:
+        label = f"Sim Gate: {gate.passed}/{gate.total} {verdict}"
+    return f"UNO Q DMP fit: {fit} | {label}{elapsed}"
+
+
+def format_health(health: Sequence[Health]) -> str:
+    """``HOTSPOT ok | GLOVES fail | PANEL warn``"""
+    return " | ".join(f"{h.name.upper()} {h.level.value}" for h in health)
 
 
 # --------------------------------------------------------------------------- whole HUD
 
 
-def hud_lines(view: HudView) -> list[str]:
+def hud_lines(view: HudView, health: Sequence[Health] | None = None) -> list[str]:
     """The HUD as plain text lines (headless logging, tests)."""
     labels, values = format_bay_table(view)
     lines = [
@@ -175,10 +194,14 @@ def hud_lines(view: HudView) -> list[str]:
         lines.append(f"KEY {last.key}: {last.text}")
     if view.unoq:
         lines.append(view.unoq)
+    if health:
+        lines.append(format_health(health))
     return lines
 
 
-def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
+def hud_overlays(
+    view: HudView, health: Sequence[Health] | None = None
+) -> list[tuple[int, int, str, str]]:
     """``viewer.set_texts`` overlays: one panel per screen corner, big font for the bay table."""
     import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
@@ -186,7 +209,10 @@ def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
     font, grid = mj.mjtFont, mj.mjtGridPos
     labels, values = format_bay_table(view)
     status = "\n".join([format_rescue(view.rescue), format_gate(view.gate)])
-    hooks = "\n".join([view.compliance, view.reasoning])
+    hook_rows = [view.compliance, view.reasoning]
+    if health:
+        hook_rows.append(format_health(health))
+    hooks = "\n".join(hook_rows)
     last_key = f"{view.actions[-1].key}: {view.actions[-1].text}" if view.actions else ""
     stage = "\n".join(
         x for x in (f"BEAT {view.beat}" if view.beat else "", last_key, view.unoq) if x
@@ -211,6 +237,7 @@ __all__ = [
     "format_bay_row",
     "format_bay_table",
     "format_gate",
+    "format_health",
     "format_rescue",
     "hud_lines",
     "hud_overlays",

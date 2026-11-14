@@ -15,7 +15,9 @@ import math
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import IO, Any, cast
 
 from teleop.config import StudioConfig
@@ -249,12 +251,33 @@ class StudioParser:
         )
 
 
+@dataclass(frozen=True)
+class StudioLiveness:
+    """Snapshot of Studio datagram arrival, for health display (monotonic ns timestamps)."""
+
+    bound: bool
+    port: int | None
+    bind_error: str | None
+    last_datagram_ns: int | None
+    last_right_frame_ns: int | None
+    datagram_hz: float
+
+
+_HZ_WINDOW_NS = 1_000_000_000
+
+
 class StudioSource(ThreadedSource):
     """Binds a UDP socket, parses Studio datagrams and feeds the latest-value buffer."""
 
-    def __init__(self, cfg: StudioConfig) -> None:
+    def __init__(self, cfg: StudioConfig, *, tolerate_bind_error: bool = False) -> None:
         super().__init__("studio")
         self._cfg = cfg
+        self._tolerate_bind_error = tolerate_bind_error
+        self._live_lock = threading.Lock()
+        self._bind_error: str | None = None
+        self._last_datagram_ns: int | None = None
+        self._last_right_ns: int | None = None
+        self._arrivals: deque[int] = deque()
         self._parser = StudioParser(cfg.actor)
         self._sock: socket.socket | None = None
         self._tee: IO[str] | None = None
@@ -270,12 +293,46 @@ class StudioSource(ThreadedSource):
             if self._cfg.tee_raw is not None:  # only after a successful bind (open truncates)
                 self._cfg.tee_raw.parent.mkdir(parents=True, exist_ok=True)
                 tee = self._cfg.tee_raw.open("w", encoding="utf-8", newline="\n")
-        except OSError:
+        except OSError as exc:
             sock.close()
-            raise
+            if not self._tolerate_bind_error:
+                raise
+            with self._live_lock:
+                self._bind_error = f"{self._cfg.host}:{self._cfg.port}: {exc}"
+            logger.warning("studio bind failed: %s", self._bind_error)
+            return
+        with self._live_lock:
+            self._bind_error = None
         self._sock = sock
         self._tee = tee
         super().start()
+
+    def liveness(self) -> StudioLiveness:
+        """Thread-safe, non-blocking snapshot of datagram arrival."""
+        now = time.monotonic_ns()
+        with self._live_lock:
+            self._prune_arrivals(now)
+            hz = float(len(self._arrivals))
+            sock = self._sock
+            port: int | None = None
+            if sock is not None:
+                try:
+                    port = int(sock.getsockname()[1])
+                except OSError:
+                    port = None
+            return StudioLiveness(
+                bound=sock is not None,
+                port=port,
+                bind_error=self._bind_error,
+                last_datagram_ns=self._last_datagram_ns,
+                last_right_frame_ns=self._last_right_ns,
+                datagram_hz=hz,
+            )
+
+    def _prune_arrivals(self, now: int) -> None:
+        """Drop arrivals older than the rate window; caller holds ``_live_lock``."""
+        while self._arrivals and now - self._arrivals[0] > _HZ_WINDOW_NS:
+            self._arrivals.popleft()
 
     def bound_port(self) -> int:
         if self._sock is None:
@@ -303,6 +360,10 @@ class StudioSource(ThreadedSource):
             except ConnectionResetError:  # Windows ICMP reset noise
                 continue
             now = time.monotonic_ns()
+            with self._live_lock:
+                self._last_datagram_ns = now
+                self._arrivals.append(now)
+                self._prune_arrivals(now)
             tee = self._tee
             if tee is not None:
                 rec = {
@@ -320,3 +381,6 @@ class StudioSource(ThreadedSource):
                         tee.close()
             for frame in self._parser.parse(data, now):
                 self._buffer.put(frame)
+                if frame.side == "right":
+                    with self._live_lock:
+                        self._last_right_ns = now

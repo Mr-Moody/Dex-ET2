@@ -1,7 +1,12 @@
 """``teleop atc``: 4-bay fleet supervisor with HUD, keyboard stage controls and audio cues.
 
     teleop atc [--source studio|synthetic|replay] [--unoq-host HOST] [--headless --steps N]
-               [--script] [--hotspot] [--config configs/atc.yaml]
+               [--script] [--seed N] [--hotspot | --no-hotspot] [--config configs/atc.yaml]
+
+The default (``uv run teleop atc``) is the booth: it keeps the hotspot up, listens for the Studio
+gloves, uses the UNO Q board (or a local loopback node, hot-swapped either way) and shows a live
+health strip with Reconnect buttons. A rescue uses the gloves when they are healthy at clutch
+engage, else the scripted rescue. ``--headless`` skips the hotspot and the health checks.
 
 Opens the fleet ops console in the browser unless ``--headless``: a CCTV feed per bay plus
 fleet telemetry, served on ``--console-port`` (``--no-browser`` only prints the URL).
@@ -29,7 +34,8 @@ import contextlib
 import dataclasses
 import importlib
 import logging
-from collections.abc import Generator, Mapping
+import threading
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -37,10 +43,12 @@ from typing import Any, cast
 import yaml
 
 from teleop.app import make_source
-from teleop.atc.coordinator import OperatorInput
+from teleop.atc.coordinator import DEFAULT_REALISM, OperatorInput
+from teleop.atc.glove_select import SelectingGlove
 from teleop.atc.hud import hud_lines, hud_overlays
 from teleop.atc.recovery import RecoveryBackend
 from teleop.atc.stage import (
+    STAGE_SEED,
     AudioCues,
     ConsoleSource,
     NullSpeaker,
@@ -50,8 +58,15 @@ from teleop.atc.stage import (
     SystemSpeaker,
     UnoQConsolePoller,
 )
+from teleop.atc.validator import GATE_PASS_MIN
 from teleop.commands.sim import add_hotspot_args, maybe_hotspot, setup_logging
 from teleop.config import SimConfig, StudioConfig, WristConfig
+from teleop.health.gloves import GloveCheck
+from teleop.health.hotspot import HotspotCheck, build_hotspot_check
+from teleop.health.model import Level
+from teleop.health.monitor import HealthMonitor
+from teleop.health.panel import PanelCheck
+from teleop.input.studio import StudioSource
 from teleop.net.hotspot import HotspotConfigError
 from teleop.protocols import InputSource, Retargeter, WristSource
 from teleop.registry import RETARGETERS, WRISTS, resolve
@@ -60,7 +75,9 @@ from teleop.sim.hands import REPO_ROOT, load_hand
 from teleop.sim.loop import FixedRateLoop
 from teleop.unoq.client import UnoQClient
 from teleop.unoq.dmp import HAND_ACTUATORS
+from teleop.unoq.mcu_bridge import McuConsoleBridge
 from teleop.unoq.protocol import DEFAULT_TCP_PORT, DEFAULT_UDP_PORT
+from teleop.unoq.switch import SwitchableUnoQ
 
 logger = logging.getLogger("teleop.atc")
 
@@ -71,7 +88,7 @@ HUD_OVERLAY_HZ = 10.0  # viewer text refresh; each set_texts waits for a rendere
 
 @dataclass
 class AtcConfig:
-    source: str = "synthetic"
+    source: str = "studio"
     replay_file: Path | None = None
     studio: StudioConfig = field(default_factory=StudioConfig)
     wrist_mode: str = "auto"
@@ -80,6 +97,7 @@ class AtcConfig:
     unoq_udp_port: int = DEFAULT_UDP_PORT
     unoq_tcp_port: int = DEFAULT_TCP_PORT
     serial_port: str | None = None
+    hotspot: bool = True  # keep the booth hotspot up (Windows; never with --headless)
     background_bays: bool = True
     cycle_dwell_s: float = 1.0
     audio: bool = True
@@ -96,7 +114,9 @@ class AtcConfig:
     act_device: str = "cuda"
     record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
     generate: int | None = None  # headless: generate N scripted rescue episodes
-    seed: int = 0
+    seed: int | None = None  # None: STAGE_SEED with --script, else 0
+    realism: float = DEFAULT_REALISM  # latch-pose error and gate randomization scale (0: off)
+    gate_pass_min: int = GATE_PASS_MIN  # randomized skill gate: deploy at >= N of 20
     dummy_glove: bool = False  # TODO(rokoko-gloves-swap): temporary dummy UDP/UI operator
 
 
@@ -127,6 +147,13 @@ def load_hook(flag: str) -> Any:
             raise HookMissing(flag, module) from exc
         raise
     return getattr(mod, attr)
+
+
+def resolve_seed(cfg: AtcConfig) -> int:
+    """Run seed: an explicit one always wins; else the scripted show uses ``STAGE_SEED``."""
+    if cfg.seed is not None:
+        return cfg.seed
+    return STAGE_SEED if cfg.script else 0
 
 
 def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
@@ -172,7 +199,10 @@ class GloveOperator:
         self.retargeter = retargeter
 
     @classmethod
-    def build(cls, cfg: AtcConfig, model: Any) -> GloveOperator:
+    def build(
+        cls, cfg: AtcConfig, model: Any, *, tolerate_bind_error: bool = False
+    ) -> GloveOperator:
+        """``tolerate_bind_error``: a busy Studio port shows on the Gloves light, not a crash."""
         hand = load_hand("inspire")
         ranges: dict[str, tuple[float, float]] = {}
         for name in HAND_ACTUATORS:  # both active bays share one hand model: read Bay 1's
@@ -188,8 +218,13 @@ class GloveOperator:
         retarget_cls: Any = resolve(RETARGETERS, "direct")
         wrist_cls: Any = resolve(WRISTS, cfg.wrist_mode)
         sim_cfg = SimConfig(source=cfg.source, replay_file=cfg.replay_file, studio=cfg.studio)
+        source: InputSource = (
+            StudioSource(cfg.studio, tolerate_bind_error=True)
+            if tolerate_bind_error and cfg.source == "studio"
+            else make_source(sim_cfg)
+        )
         return cls(
-            make_source(sim_cfg),
+            source,
             cast("WristSource", wrist_cls(WristConfig(mode=cfg.wrist_mode))),
             cast("Retargeter", retarget_cls(hand, {"right": ranges}, calib)),
         )
@@ -229,6 +264,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-audio", dest="audio", action="store_false", default=None)
     ap.add_argument("--no-background", dest="background_bays", action="store_false", default=None)
     ap.add_argument("--display", choices=DISPLAYS, default=None, help="console (default) or viewer")
+    ap.add_argument("--seed", type=int, default=None, help="run seed (stage script: STAGE_SEED)")
+    ap.add_argument(
+        "--realism", type=float, default=None, help="pose error / gate randomization scale, 0-1"
+    )
+    ap.add_argument("--gate-pass-min", type=int, default=None, help="gate passes needed of 20")
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
@@ -237,7 +277,6 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--act-device", default=None, help="torch device for ACT (default cuda)")
     ap.add_argument("--record-episodes", type=Path, default=None, help="LeRobot dataset dir")
     ap.add_argument("--generate", type=int, default=None, help="headless: N scripted episodes")
-    ap.add_argument("--seed", type=int, default=None)
     ap.add_argument(
         "--dummy-glove",
         action="store_true",
@@ -245,12 +284,13 @@ def _parser() -> argparse.ArgumentParser:
         help="TEMP: spawn standalone dummy Studio UDP streamer + UI teleop override",
     )
     add_hotspot_args(ap)
+    ap.add_argument("--no-hotspot", action="store_true", help="do not keep the booth hotspot up")
     return ap
 
 
-def _hardware_consoles(cfg: AtcConfig, unoq: UnoQClient) -> list[ConsoleSource]:
+def _hardware_consoles(cfg: AtcConfig, unoq: SwitchableUnoQ) -> list[ConsoleSource]:
     if cfg.serial_port:
-        from teleop.unoq.mcu_bridge import McuConsoleBridge, open_console
+        from teleop.unoq.mcu_bridge import open_console
 
         transport, kind = open_console(cfg.serial_port)
         bridge = McuConsoleBridge(transport)
@@ -268,10 +308,65 @@ def _hardware_consoles(cfg: AtcConfig, unoq: UnoQClient) -> list[ConsoleSource]:
     return [UnoQConsolePoller(poll_client)]
 
 
+def _unoq_label(cfg: AtcConfig, unoq: SwitchableUnoQ) -> str:
+    return "UNO Q local loopback" if unoq.is_mock else f"UNO Q {cfg.unoq_host}"
+
+
+def _console_rebuilder(
+    cfg: AtcConfig, controller: StageController, unoq: SwitchableUnoQ
+) -> Callable[[], None]:
+    """Reinstall the board console poller for the current link (may block on connect).
+
+    Shared by the swap listener and the panel check, which can run on different threads; the
+    lock keeps two rebuilds from installing over each other (and leaking a poller).
+    """
+    lock = threading.Lock()
+
+    def rebuild() -> None:
+        with lock:
+            controller.replace_hardware(_hardware_consoles(cfg, unoq))
+
+    return rebuild
+
+
+def _button_poller(controller: StageController) -> Callable[[], UnoQConsolePoller | None]:
+    """The installed board console poller (None when none is): what the laptop hears."""
+    return lambda: next((c for c in controller.hardware if isinstance(c, UnoQConsolePoller)), None)
+
+
+def _swap_listener(
+    cfg: AtcConfig,
+    controller: StageController,
+    suffix: str,
+    rebuild: Callable[[], None] | None = None,
+) -> Callable[[SwitchableUnoQ], None]:
+    """``SwitchableUnoQ.on_swap``: restart the board console poller and refresh the header.
+
+    Runs on the swapping thread. A laptop serial console does not depend on the board link, so
+    it stays installed (the panel check's Reconnect reopens it).
+    """
+
+    def on_swap(unoq: SwitchableUnoQ) -> None:
+        if not cfg.serial_port:
+            if rebuild is not None:
+                rebuild()
+            else:
+                controller.replace_hardware(_hardware_consoles(cfg, unoq))
+        controller.unoq_label = _unoq_label(cfg, unoq) + suffix
+        logger.info("atc: %s", controller.unoq_label)
+
+    return on_swap
+
+
 def main(argv: list[str]) -> int:
     ns = _parser().parse_args(argv)
     setup_logging()
-    overrides = {k: v for k, v in vars(ns).items() if k not in ("config", "hotspot", "env_file")}
+    if ns.hotspot and ns.no_hotspot:
+        print("teleop atc: --hotspot and --no-hotspot are mutually exclusive")
+        return 2
+    skip = ("config", "hotspot", "no_hotspot", "env_file")
+    overrides = {k: v for k, v in vars(ns).items() if k not in skip}
+    overrides["hotspot"] = True if ns.hotspot else (False if ns.no_hotspot else None)
     try:
         cfg = load_config(ns.config, overrides)
     except (OSError, ValueError, TypeError) as exc:
@@ -294,58 +389,148 @@ def main(argv: list[str]) -> int:
     except HookMissing as exc:
         print(f"teleop atc: {exc}")
         return 3
-    try:
-        watchdog = maybe_hotspot(ns)
-    except (HotspotConfigError, RuntimeError) as exc:
-        print(f"teleop atc: {exc}")
-        return 1
+    with contextlib.ExitStack() as stack:
+        try:
+            hotspot_check = _start_hotspot(cfg, ns, stack)
+        except (HotspotConfigError, RuntimeError) as exc:
+            print(f"teleop atc: {exc}")
+            return 1
+        try:
+            return _run_booth(cfg, hooks, hotspot_check, stack)
+        except KeyboardInterrupt:
+            return 0
 
+
+def _start_hotspot(
+    cfg: AtcConfig, ns: argparse.Namespace, stack: contextlib.ExitStack
+) -> HotspotCheck | None:
+    """The hotspot health check (None when headless); its watchdog stops with ``stack``.
+
+    A missing password only turns the light off, unless ``--hotspot`` was given explicitly (then
+    it raises ``HotspotConfigError``, today's exit 1). Headless runs build no health checks and
+    keep the hotspot down unless ``--hotspot`` asks for today's plain watchdog.
+    """
+    if cfg.headless:
+        check, watchdog = None, maybe_hotspot(ns)
+    else:
+        check, watchdog = build_hotspot_check(cfg.hotspot, ns.env_file, strict=ns.hotspot)
+    if watchdog is not None:
+        stack.callback(watchdog.stop)
+    return check
+
+
+def _run_booth(
+    cfg: AtcConfig,
+    hooks: Mapping[str, Any],
+    hotspot_check: HotspotCheck | None,
+    stack: contextlib.ExitStack,
+) -> int:
+    """Build the stage, the operator and (unless headless) the health checks, then run."""
     from teleop.compliance.solana import SolanaComplianceSink
     from teleop.reasoning.nemotron import VerdaNemotronReasoner
 
-    unoq = UnoQClient.connect_or_mock(cfg.unoq_host, cfg.unoq_udp_port, cfg.unoq_tcp_port)
-    label = "UNO Q local loopback" if unoq.is_mock else f"UNO Q {cfg.unoq_host}"
+    unoq = SwitchableUnoQ(
+        UnoQClient.connect_or_mock(cfg.unoq_host, cfg.unoq_udp_port, cfg.unoq_tcp_port)
+    )
+    stack.callback(unoq.close)
     sink = SolanaComplianceSink.from_env()
     reasoner = VerdaNemotronReasoner.from_env()
     speak = cfg.audio and not cfg.headless
+    hardware = _hardware_consoles(cfg, unoq)
+    suffix = f" | compliance {sink.mode} | reasoner {reasoner.mode}"
     controller = StageController.build(
-        unoq,
+        cast("UnoQClient", unoq),  # same request surface; the coordinator only forwards calls
         sink,
         reasoner,
         audio=AudioCues(SystemSpeaker() if speak else NullSpeaker(), enabled=speak),
-        hardware=_hardware_consoles(cfg, unoq),
+        hardware=hardware,
         cycle_dwell_s=cfg.cycle_dwell_s,
         include_background_bays=cfg.background_bays,
-        unoq_label=f"{label} | compliance {sink.mode} | reasoner {reasoner.mode}",
+        seed=resolve_seed(cfg),
+        realism=cfg.realism,
+        gate_pass_min=cfg.gate_pass_min,
+        unoq_label=_unoq_label(cfg, unoq) + suffix,
     )
+    stack.callback(controller.close)
     logger.info("atc: %s", controller.unoq_label)
+    stack.callback(_close_act, controller)
+    _setup_recovery(cfg, controller, hooks.get("--act-checkpoint"))
     sink_handle: Any = None
-    try:
-        _setup_recovery(cfg, controller, hooks.get("--act-checkpoint"))
-        if "--record-episodes" in hooks:
-            scripted = cfg.generate is not None or cfg.source == "synthetic"
-            source = "scripted" if scripted else "glove"
-            sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
-            controller.coordinator.set_observer(sink_handle)
-        if "--generate" in hooks:
-            assert cfg.generate is not None
-            n = int(hooks["--generate"](controller, sink_handle, cfg.generate, cfg.seed))
-            print(f"teleop atc: generated {n} successful episodes -> {cfg.record_episodes}")
-            return 0 if n >= cfg.generate else 1
-        return _run(cfg, controller)
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        if sink_handle is not None:
-            controller.coordinator.set_observer(None)
-            sink_handle.close()
-        act = controller.coordinator.act
-        if act is not None:
-            act.close()
-        controller.close()
-        unoq.close()
-        if watchdog is not None:
-            watchdog.stop()
+    if "--record-episodes" in hooks:
+        scripted = cfg.generate is not None or cfg.source == "synthetic"
+        # TODO(T-191): with gloves, SelectingGlove may play the scripted rescue instead
+        # (gloves unhealthy at clutch engage), so this startup-wide label can be wrong per
+        # episode. Once the episode sink takes a callable label, pass
+        # ``lambda: selecting.rescue_input or "glove"`` for a SelectingGlove operator.
+        source = "scripted" if scripted else "glove"
+        sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
+        controller.coordinator.set_observer(sink_handle)
+        stack.callback(_close_episodes, controller, sink_handle)
+    if "--generate" in hooks:
+        assert cfg.generate is not None
+        n = int(hooks["--generate"](controller, sink_handle, cfg.generate, resolve_seed(cfg)))
+        print(f"teleop atc: generated {n} successful episodes -> {cfg.record_episodes}")
+        return 0 if n >= cfg.generate else 1
+
+    glove, studio = _build_glove(cfg, controller)
+    health: HealthMonitor | None = None
+    if hotspot_check is not None:  # not headless
+        glove_check = GloveCheck(studio, cfg.studio.port)
+        if isinstance(glove, GloveOperator) and studio is not None:
+            glove = SelectingGlove(
+                controller,
+                glove,
+                ScriptedGlove(controller),
+                lambda: glove_check.status().level is Level.OK,
+            )
+        bridge = next((c for c in hardware if isinstance(c, McuConsoleBridge)), None)
+        board_console = not cfg.serial_port  # buttons arrive over a second board connection
+        rebuild = _console_rebuilder(cfg, controller, unoq) if board_console else None
+        panel = PanelCheck(
+            unoq,
+            cfg.unoq_host,
+            cfg.unoq_udp_port,
+            cfg.unoq_tcp_port,
+            serial_port=cfg.serial_port,
+            local_bridge=bridge,
+            buttons=_button_poller(controller) if board_console else None,
+            rebuild_consoles=rebuild,
+        )
+        unoq.on_swap.append(_swap_listener(cfg, controller, suffix, rebuild))
+        stack.callback(unoq.on_swap.clear)
+        panel.start()
+        stack.callback(panel.stop)
+        health = HealthMonitor([hotspot_check, glove_check, panel])
+        health.start()
+        stack.callback(health.stop)
+    return _run(cfg, controller, glove, health)
+
+
+def _build_glove(
+    cfg: AtcConfig, controller: StageController
+) -> tuple[GloveOperator | ScriptedGlove | None, StudioSource | None]:
+    """The operator input (None under ``--script``) and its Studio listener, if any."""
+    if cfg.script:
+        return None, None
+    if cfg.source == "synthetic":
+        # Without real gloves, a scripted rescue plays while the clutch is held.
+        return ScriptedGlove(controller), None
+    glove = GloveOperator.build(
+        cfg, controller.coordinator.model, tolerate_bind_error=not cfg.headless
+    )
+    studio = glove.source if isinstance(glove.source, StudioSource) else None
+    return glove, studio
+
+
+def _close_act(controller: StageController) -> None:
+    act = controller.coordinator.act
+    if act is not None:
+        act.close()
+
+
+def _close_episodes(controller: StageController, sink_handle: Any) -> None:
+    controller.coordinator.set_observer(None)
+    sink_handle.close()
 
 
 def _setup_recovery(cfg: AtcConfig, controller: StageController, load_act: Any) -> None:
@@ -367,12 +552,16 @@ def _setup_recovery(cfg: AtcConfig, controller: StageController, load_act: Any) 
     logger.info("atc: recovery backend %s", co.recovery_backend.value)
 
 
-def _run(cfg: AtcConfig, controller: StageController) -> int:
+def _run(
+    cfg: AtcConfig,
+    controller: StageController,
+    glove: GloveOperator | ScriptedGlove | SelectingGlove | None,
+    health: HealthMonitor | None = None,
+) -> int:
     import subprocess
     import sys
 
     director = StageDirector(controller) if cfg.script else None
-    glove: GloveOperator | ScriptedGlove | None = None
     dummy_proc: subprocess.Popen[bytes] | None = None
     dummy: Any = None
     # TODO(rokoko-gloves-swap): Temporary dummy UDP streamer + UI override while physical
@@ -397,10 +586,8 @@ def _run(cfg: AtcConfig, controller: StageController) -> int:
                 ],
                 stdin=subprocess.DEVNULL,
             )
-        if cfg.source == "synthetic":
-            glove = None if use_console_dummy else ScriptedGlove(controller)
-        else:
-            glove = GloveOperator.build(cfg, controller.coordinator.model)
+        if cfg.source == "synthetic" and use_console_dummy:
+            glove = None  # the console dummy operator drives the rescue instead
         if use_console_dummy:
             from teleop.input.dummy_glove import DummyControlClient, DummyOperatorSupervisor
 
@@ -437,7 +624,7 @@ def _run(cfg: AtcConfig, controller: StageController) -> int:
                         break
                 logger.info("atc: %d steps, %.1f s sim time", steps, co.time_s)
             elif cfg.display == "viewer":
-                _run_viewer(cfg, controller, operator)
+                _run_viewer(cfg, controller, operator, health=health)
             else:
                 from teleop.console.run import ConsolePortInUse, run_console
 
@@ -449,6 +636,7 @@ def _run(cfg: AtcConfig, controller: StageController) -> int:
                         fps=cfg.console_fps,
                         open_browser=cfg.open_browser,
                         steps=cfg.steps,
+                        health=health,
                         dummy=dummy,
                     )
                 except ConsolePortInUse as exc:
@@ -475,6 +663,7 @@ def _run_viewer(
     controller: StageController,
     operator: Any,
     launch: Any = None,
+    health: HealthMonitor | None = None,
 ) -> None:
     """Drive the passive viewer at ``CONTROL_HZ``.
 
@@ -513,7 +702,10 @@ def _run_viewer(
                 overlay = None
                 if co.time_s >= next_overlay_s:
                     next_overlay_s = co.time_s + 1.0 / HUD_OVERLAY_HZ
-                    overlay = hud_overlays(controller.hud_view())
+                    view = controller.hud_view()
+                    overlay = (
+                        hud_overlays(view, health.snapshot()) if health else hud_overlays(view)
+                    )
             if overlay is not None and overlay != last_overlay:
                 viewer.set_texts(overlay)  # outside the lock (see docstring)
                 last_overlay = overlay

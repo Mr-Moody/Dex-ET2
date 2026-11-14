@@ -91,6 +91,37 @@ def scene(t: float, hold_rescue: bool) -> HudView:
     )
 
 
+def fake_health(now: float) -> list[dict[str, object]]:
+    """Hotspot ok, gloves failing (reconnectable; busy for 3 s of each 10 s), panel warn."""
+    busy = now % 10.0 < 3.0
+    return [
+        {
+            "name": "hotspot",
+            "level": "ok",
+            "summary": "Up, 2 clients",
+            "detail": "SSID booth",
+            "can_reconnect": False,
+            "busy": False,
+        },
+        {
+            "name": "gloves",
+            "level": "fail",
+            "summary": "No data",
+            "detail": "no datagram for 2.4 s",
+            "can_reconnect": True,
+            "busy": busy,
+        },
+        {
+            "name": "panel",
+            "level": "warn",
+            "summary": "Loopback",
+            "detail": "board unreachable",
+            "can_reconnect": True,
+            "busy": False,
+        },
+    ]
+
+
 def placeholder_jpeg(feed: FeedSpec, t: float) -> bytes:
     img = Image.new("RGB", (feed.width, feed.height), (29, 44, 38))
     draw = ImageDraw.Draw(img)
@@ -138,6 +169,7 @@ def run(port: int, hold_rescue: bool, bays: Sequence[int]) -> None:
             if now >= next_tel:
                 bg = {3: 0.96 + 0.03 * math.sin(now), 4: 0.95 + 0.03 * math.cos(now * 1.3)}
                 msg = adapter.build(view, now, feeds, bg, view_state=vstate[0])
+                msg["health"] = fake_health(now)
                 server.publish_telemetry(msg)
                 next_tel += 1.0 / TELEMETRY_HZ
             if now >= next_frame:

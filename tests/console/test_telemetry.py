@@ -93,7 +93,15 @@ def test_rescue_fields() -> None:
 def test_gate_fields() -> None:
     view = _view(gate=GateStatus(12.0, 3, 3, 0.41, True))
     msg = _adapter().build(view, 2.0, GRID, {})
-    assert msg["gate"] == {"fit_ms": 12.0, "passed": 3, "total": 3, "elapsed_s": 0.41, "ok": True}
+    assert msg["gate"] == {
+        "fit_ms": 12.0,
+        "passed": 3,
+        "total": 3,
+        "elapsed_s": 0.41,
+        "ok": True,
+        "conditions": None,
+        "worst_failure": None,
+    }
 
 
 def test_stall_transition_logs_alert() -> None:
@@ -226,3 +234,40 @@ def test_armed_faults_and_bolt_travel_per_bay() -> None:
     assert _bay(msg, 1)["x_bolt_cm"] == 3.51 and _bay(msg, 1)["fault"] is None
     assert _bay(msg, 2)["fault"] == {"kind": "pin", "phase": "armed"}
     assert _bay(msg, 3)["x_bolt_cm"] is None  # background replay has no live bolt
+
+
+def test_telemetry_bay_carries_pose_estimate_fields() -> None:
+    snap = BaySnapshot(
+        1,
+        BayState.NOMINAL,
+        0.9,
+        0.0,
+        0.0,
+        SKU,
+        pose_sigma_mm=3.0,
+        pose_sigma_yaw_deg=1.5,
+        touch_correction_mm=4.2,
+    )
+    entry = _adapter()._bay_entry(1, {1: snap}, {}, {}, {})
+    assert entry["pose_sigma_yaw_deg"] == 1.5
+    assert entry["pose_sigma_mm"] == 3.0 and entry["touch_correction_mm"] == 4.2
+
+
+def test_touch_and_gate_lines_reach_the_event_log() -> None:
+    a = _adapter()
+    a.build(_view(_snap(1)), 1.0, GRID, {})
+    touched = BaySnapshot(1, BayState.NOMINAL, 0.9, 0.0, 0.0, SKU, touch_correction_mm=3.1)
+    a.build(_view(touched), 2.0, GRID, {})
+    gate = GateStatus(
+        passed=17,
+        total=20,
+        ok=False,
+        elapsed_s=2.0,
+        conditions="randomized pose, friction, flap spring and rest angle",
+        worst_failure="failed at +23% friction, 2.8 mm y error",
+    )
+    msg = a.build(_view(touched, gate=gate), 3.0, GRID, {})
+    texts = [e["text"] for e in msg["events"]]  # type: ignore[index]
+    assert "Bay 1 touched latch: pose corrected 3.1 mm" in texts
+    assert any("17/20" in t and "failed at +23% friction, 2.8 mm y error" in t for t in texts)
+    assert msg["gate"]["conditions"] == "randomized pose, friction, flap spring and rest angle"  # type: ignore[index]

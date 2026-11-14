@@ -212,3 +212,88 @@ def test_software_mcu_mirrors_led_states():
 def test_console_state_wire_roundtrip():
     s = ConsoleInputState(selected_bay=2, clutch=True, estop=False, fault_rig_latched=True)
     assert console_state_from_dict(console_state_to_dict(s)) == s
+
+
+class _ClosableMcu(SoftwareMcu):
+    """A serial port that refuses writes and reads once closed, like pyserial."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def readline(self) -> bytes:
+        if self.closed:
+            raise OSError("port closed")
+        return super().readline()
+
+    def write(self, data: bytes, /) -> int:
+        if self.closed:
+            raise OSError("port closed")
+        return super().write(data)
+
+
+def test_reopen_switches_transport_and_resends_leds() -> None:
+    old, new = _ClosableMcu(), _ClosableMcu()
+    bridge = McuConsoleBridge(old)
+    bridge.set_bay_state(1, BayState.STALLED)
+    bridge.reopen(new)
+    assert old.closed and not new.closed
+    assert new.led_states == {1: "STALLED"}
+    bridge.pump()
+    assert bridge.last_heard_ns is not None  # reads come from the new transport
+
+
+def test_reopen_during_led_writes_never_raises() -> None:
+    import threading
+
+    bridge = McuConsoleBridge(_ClosableMcu())
+    bridge.start()
+    errors: list[BaseException] = []
+    done = threading.Event()
+
+    def writer() -> None:
+        states = (BayState.STALLED, BayState.NOMINAL)
+        i = 0
+        while not done.is_set():
+            try:
+                bridge.set_bay_state(1, states[i % 2])
+            except BaseException as exc:
+                errors.append(exc)
+            i += 1
+
+    th = threading.Thread(target=writer)
+    th.start()
+    try:
+        for _ in range(50):
+            bridge.reopen(_ClosableMcu())
+    finally:
+        done.set()
+        th.join()
+        bridge.close()
+    assert errors == []
+
+
+def test_resend_never_leaves_a_stale_led() -> None:
+    import threading
+
+    mcu = SoftwareMcu()
+    bridge = McuConsoleBridge(mcu)
+    states = (BayState.STALLED, BayState.NOMINAL)
+    done = threading.Event()
+
+    def resender() -> None:
+        while not done.is_set():
+            bridge.resend_bay_states()
+
+    th = threading.Thread(target=resender)
+    th.start()
+    try:
+        for i in range(2000):
+            bridge.set_bay_state(1, states[i % 2])
+    finally:
+        done.set()
+        th.join()
+    assert mcu.led_states[1] == format_bay_state(1, states[1999 % 2]).rsplit(":", 1)[1]

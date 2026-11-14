@@ -24,6 +24,7 @@ class ReasoningContext:
     is_ood: bool
     rollout_passed: int | None = None
     rollout_total: int | None = None
+    rollout_threshold: int | None = None  # gate pass bar; None means all must pass
 
 
 @dataclass(frozen=True, slots=True)

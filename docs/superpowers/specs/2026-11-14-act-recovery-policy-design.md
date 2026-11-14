@@ -18,7 +18,7 @@ trained on a remote GPU cluster (Verda) and runs on the laptop.
 The DMP stays. The fleet learns on two timescales:
 
 - **Hotfix (minutes, unchanged):** the first rescue of a new failure becomes a DMP, gated by the
-  3 rollouts and shared with the whole fleet.
+  randomized 20-rollout gate (at least 18 of 20, T-179) and shared with the whole fleet.
 - **Release (hours):** every rescue is also saved as an ACT training episode. Periodically ACT
   is retrained on the cluster on everything collected. Once a checkpoint passes the gate for a
   failure type, it takes over from that failure's DMP.
@@ -170,6 +170,12 @@ real latch whose pose comes from perception.
 Not included, on purpose: `bolt_x`, `flap_hinge`, latch fault flags, C(t). They are sim-only or
 derived. `bolt_x` is still recorded in the sidecar for labels and QC.
 
+**The latch frame is the estimate.** Since T-179 the controller never sees the true latch pose:
+`BayRig.world_from_latch()` is a noisy, touch-corrected estimate (a simulated fiducial sensor,
+scaled by `realism` in `configs/atc.yaml`), and `true_world_latch()` is for display, labels and
+eval only. Observations and actions use `world_from_latch()`, exactly as the DMP replay does, so
+the policy trains and runs on the same perception error a real latch would have.
+
 **Cameras** (`observation.images.*`):
 
 - `wrist`: a new camera mounted on the Inspire hand base, looking along the fingers. This is
@@ -211,6 +217,8 @@ one line per episode:
  "latch_pose": {...}, "success": true, "bolt_x_final": 0.054,
  "max_tau_hand_inf": 2.1, "max_arm_ratio": 0.42, "aborted_reason": null}
 ```
+
+`latch_pose` is the true pose (`true_world_latch()`), a sim-only label like `bolt_x`.
 
 Failed and aborted attempts are recorded too (`success: false`). They are excluded from
 training by default and kept for analysis and later failure-aware training.
@@ -301,11 +309,13 @@ can weight or exclude sources.
 `teleop eval --checkpoint models/act/<run> [--faults flap,pin] [--rollouts 10]`:
 
 - Generalises `SkillValidator` to take any `RecoveryController`, not just a `SkillPrimitive`.
-- Per fault type (`flap`, `pin`), runs headless single-bay rollouts from the post-retract hover, across the DMP
-  gate's latch perturbations plus random ones. Each rollout uses the same pass rules as today:
-  bolt cleared, hand torque below `tau_hard_max`, arm ratio below the margin.
-- Default pass bar: at least 9 of 10 rollouts per fault type. This is stricter than the DMP's 3
-  of 3 because the policy covers more variation.
+- Per fault type (`flap`, `pin`), runs headless single-bay rollouts from the post-retract hover,
+  under the same randomized conditions as the DMP gate (`SkillValidator.draw_conditions`: latch
+  pose jitter, estimate error, flap stiffness and rest angle, friction, all scaled by
+  `realism`). Each rollout uses the same pass rules as today: bolt cleared, hand torque below
+  `tau_hard_max`, arm ratio below the margin.
+- Default pass bar: at least 9 of 10 rollouts per fault type, the same 90% as the DMP's 18 of
+  20. Offline rollouts are cheap, so `--rollouts 20 --bar 18` matches the DMP gate exactly.
 - Reports success rate, time-to-clear and peak torques next to the DMP for the same fault type,
   and the inference latency measured on this machine.
 - Groups rollouts and training episodes by `fault` label. For each fault that passes, it

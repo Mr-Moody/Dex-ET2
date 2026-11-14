@@ -3,7 +3,8 @@
 One port serves the page (``GET /`` and the flat files in ``web/``) and the ``/ws`` stream.
 Server -> client: telemetry JSON (text) and camera frames (binary: byte 0 = feed slot,
 byte 1 = ``layout_id % 256``, then one JPEG). Client -> server: ``{"type": "key", "code": n}``
-(GLFW key codes), handed to ``on_key``.
+(GLFW key codes), handed to ``on_key``; ``{"type": "reconnect", "target": t}`` for ``t`` in
+``RECONNECT_TARGETS``, handed to ``on_reconnect`` (which must not block).
 
 Publishing is thread-safe and never blocks the caller. The server keeps the latest telemetry
 and the latest frame per slot: a new client (or a page reload) gets them immediately, and a
@@ -35,6 +36,7 @@ WEB_DIR = Path(__file__).parent / "web"
 WS_PATH = "/ws"
 ALLOWED_SUFFIXES = frozenset({".html", ".css", ".js", ".svg", ".png", ".woff2"})
 KEY_MIN, KEY_MAX = 32, 348  # printable GLFW keys .. GLFW_KEY_LAST
+RECONNECT_TARGETS = frozenset({"hotspot", "gloves", "panel"})
 START_TIMEOUT_S = 5.0
 
 _CONTENT_TYPES = {
@@ -83,12 +85,14 @@ class ConsoleServer:
         host: str = "127.0.0.1",
         port: int = 8765,
         on_key: Callable[[int], None] | None = None,
+        on_reconnect: Callable[[str], None] | None = None,
         on_client_message: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.web_dir = web_dir.resolve()
         self.host = host
         self._requested_port = port
         self.on_key = on_key
+        self.on_reconnect = on_reconnect
         self.on_client_message = on_client_message
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -225,6 +229,9 @@ class ConsoleServer:
             return
         msg = cast("dict[str, Any]", raw)
         mtype = msg.get("type")
+        if mtype == "reconnect":
+            self._on_reconnect_message(msg)
+            return
         if mtype == "key":
             code = msg.get("code")
             if not isinstance(code, int) or isinstance(code, bool):
@@ -242,6 +249,16 @@ class ConsoleServer:
                 self.on_client_message(msg)
             except Exception:
                 logger.exception("console: on_client_message failed")
+
+    def _on_reconnect_message(self, msg: dict[str, Any]) -> None:
+        target = msg.get("target")
+        if not isinstance(target, str) or target not in RECONNECT_TARGETS:
+            return
+        if self.on_reconnect is not None:
+            try:
+                self.on_reconnect(target)  # non-blocking by contract; runs on the asyncio thread
+            except Exception:
+                logger.exception("console: on_reconnect failed")
 
     # ------------------------------------------------------------------ static files
 

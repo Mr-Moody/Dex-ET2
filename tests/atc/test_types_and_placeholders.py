@@ -286,3 +286,22 @@ def test_nemotron_placeholder_explains_ood_refusal_and_validation():
     gate = r.latest_verdict(1)
     assert gate is not None and "3/3" in gate.headline
     assert r.model == "placeholder:offline"
+
+
+def test_placeholder_gate_verdict_uses_the_gate_threshold(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VERDA_API_KEY", raising=False)
+    r = VerdaNemotronPlaceholder.from_env()
+    for passed, word in ((18, "PASS"), (17, "FAIL")):
+        r.submit(
+            _ctx(
+                event_kind="VALIDATION_GATE",
+                bay_id=1,
+                is_ood=False,
+                matched_signature_id="Jam_Sig_1",
+                rollout_passed=passed,
+                rollout_total=20,
+                rollout_threshold=18,
+            )
+        )
+        gate = r.latest_verdict(1)
+        assert gate is not None and f"{passed}/20 {word}" in gate.headline

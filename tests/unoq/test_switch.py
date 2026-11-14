@@ -1,0 +1,304 @@
+"""Hot-swappable UNO Q client: skill replay, failover to loopback, console poller LED forwarding."""
+
+from __future__ import annotations
+
+import socket
+import time
+from collections.abc import Iterator
+from typing import cast
+
+import pytest
+
+from teleop.atc.coordinator import AtcCoordinator
+from teleop.atc.stage import StageController, UnoQConsolePoller
+from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive, StallSignature
+from teleop.unoq.client import UnoQClient, UnoQError
+from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu
+from teleop.unoq.server import UnoQServer
+from teleop.unoq.switch import SwitchableUnoQ, start_loopback
+
+SKU = "ev_latch_v1"
+Z = StallSignature(0.035, 4.0, 8.0, 2.0)
+
+
+def _skill(skill_id: str = "ev_latch_v1/Jam_Sig_1/1") -> SkillPrimitive:
+    d = 7  # 6 wrist dims + one actuator
+    return SkillPrimitive(
+        skill_id=skill_id,
+        part_sku_id=SKU,
+        signature_id="Jam_Sig_1",
+        duration_s=1.0,
+        alpha_s=4.0,
+        actuator_names=("a",),
+        goal_orientation=(0.0, 0.0, 0.0, 1.0),
+        y0=(0.0,) * d,
+        y_goal=(1.0,) * d,
+        weights=((0.0,) * d,),
+        tau_demo=(0.1,),
+        prototype=Z,
+    )
+
+
+def _server() -> UnoQServer:
+    return UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0).start()
+
+
+def _client(server: UnoQServer) -> UnoQClient:
+    return UnoQClient("127.0.0.1", server.udp_port, server.tcp_port).connect()
+
+
+@pytest.fixture
+def board() -> Iterator[UnoQServer]:
+    server = _server()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+def test_swap_replays_skills(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    with _server() as other:
+        try:
+            assert unoq.register_skill(_skill()) == 1
+            unoq.swap(_client(other))
+            assert unoq.current.tcp_port == other.tcp_port
+            match, skill_id = unoq.classify_stall(SKU, Z)
+            assert match.signature_id == "Jam_Sig_1"
+            assert skill_id == "ev_latch_v1/Jam_Sig_1/1"
+            assert "ev_latch_v1/Jam_Sig_1/1" in other.skills
+        finally:
+            unoq.close()
+
+
+def test_swap_closes_old_client_and_notifies(board: UnoQServer) -> None:
+    old = _client(board)
+    unoq = SwitchableUnoQ(old)
+    seen: list[int] = []
+    unoq.on_swap.append(lambda sw: seen.append(sw.current.tcp_port))
+    with _server() as other:
+        try:
+            unoq.swap(_client(other))
+            assert seen == [other.tcp_port]
+            assert old.is_mock is False
+            with pytest.raises(Exception, match="not connected"):
+                old.ping()
+        finally:
+            unoq.close()
+
+
+def test_failover_retries_on_loopback(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    try:
+        unoq.register_skill(_skill())
+        assert unoq.is_mock is False
+        board.stop()
+        match, skill_id = unoq.classify_stall(SKU, Z)
+        assert unoq.is_mock is True
+        assert match.signature_id == "Jam_Sig_1"  # skills were replayed onto the loopback node
+        assert skill_id == "ev_latch_v1/Jam_Sig_1/1"
+    finally:
+        unoq.close()
+
+
+def test_error_reply_on_board_propagates_without_swap(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    try:
+        with pytest.raises(UnoQError, match="classify_stall"):
+            unoq.classify_stall(SKU, (1.0, 2.0))  # bad stall vector: the node replies ok=false
+        assert unoq.is_mock is False
+        assert unoq.current.tcp_port == board.tcp_port
+    finally:
+        unoq.close()
+
+
+class _TruncatingBoard(UnoQServer):
+    """A board that dies mid-reply: half a JSON line, then the connection closes."""
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        with conn, conn.makefile("rb") as reader:
+            if reader.readline():
+                conn.sendall(b'{"ok": true, "matched_sig')
+
+
+def test_truncated_board_reply_fails_over_to_loopback() -> None:
+    with _TruncatingBoard(host="127.0.0.1", udp_port=0, tcp_port=0).start() as broken:
+        unoq = SwitchableUnoQ(_client(broken))
+        try:
+            match, _ = unoq.classify_stall(SKU, Z)  # retried on the loopback node
+            assert unoq.is_mock is True
+            assert match.is_ood is True  # the fresh loopback node knows no skills
+        finally:
+            unoq.close()
+
+
+def test_replaying_skills_twice_adds_no_duplicate_samples(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    with _server() as other:
+        try:
+            assert unoq.register_skill(_skill()) == 1
+            unoq.swap(_client(other))
+            unoq.swap(_client(board))  # back to a board that still holds the skill
+            unoq.swap(_client(other))
+            assert board.classifier.sample_count(SKU, "Jam_Sig_1") == 1
+            assert other.classifier.sample_count(SKU, "Jam_Sig_1") == 1
+        finally:
+            unoq.close()
+
+
+def test_swap_to_loopback_is_idempotent(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    try:
+        unoq.swap_to_loopback()
+        first = unoq.current
+        unoq.swap_to_loopback()
+        assert unoq.current is first
+        assert unoq.is_mock and unoq.host == "127.0.0.1"
+    finally:
+        unoq.close()
+
+
+def test_poller_forwards_bay_state_on_change_only() -> None:
+    mcu = SoftwareMcu()
+    bridge = McuConsoleBridge(mcu)
+    with _server() as server:
+        server.attach_console(bridge)
+        poller = UnoQConsolePoller(_client(server), period_s=3600.0)  # driven by poll_once()
+        try:
+            poller.set_bay_state(1, BayState.STALLED)
+            poller.set_bay_state(1, BayState.STALLED)
+            poller.poll_once()
+            poller.set_bay_state(1, BayState.STALLED)
+            poller.poll_once()
+            assert mcu.received.count("CMD:BAY_STATE:1:STALLED") == 1
+            poller.set_bay_state(1, BayState.NOMINAL)
+            poller.poll_once()
+            assert mcu.received[-1] == "CMD:BAY_STATE:1:NOMINAL"
+        finally:
+            poller.close()
+
+
+def test_poller_records_heartbeat_age() -> None:
+    mcu = SoftwareMcu()
+    bridge = McuConsoleBridge(mcu)
+    bridge.pump()  # one heartbeat heard
+    with _server() as server:
+        server.attach_console(bridge)
+        poller = UnoQConsolePoller(_client(server), period_s=3600.0)
+        try:
+            assert poller.heartbeat_age_ms is None
+            for _ in range(100):  # the server copies the bridge state every 50 ms
+                poller.poll_once()
+                if poller.heartbeat_age_ms is not None:
+                    break
+                time.sleep(0.01)
+            assert poller.heartbeat_age_ms is not None
+        finally:
+            poller.close()
+
+
+def test_poller_reports_last_successful_poll() -> None:
+    clock_ns = [5_000]
+    with _server() as server:
+        poller = UnoQConsolePoller(_client(server), period_s=3600.0, clock=lambda: clock_ns[0])
+        try:
+            assert poller.last_ok_ns is None
+            poller.poll_once()
+            assert poller.last_ok_ns == 5_000
+            server.stop()
+            clock_ns[0] = 9_000
+            poller.poll_once()  # fails: the last success stays put
+            assert poller.last_ok_ns == 5_000
+        finally:
+            poller.close()
+
+
+def test_poller_drops_bay_state_failures() -> None:
+    with _server() as server:
+        client = _client(server)
+        poller = UnoQConsolePoller(client, period_s=3600.0)
+        server.stop()
+        poller.set_bay_state(1, BayState.STALLED)
+        poller.poll_once()  # no exception
+        poller.close()
+
+
+class _Console:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def state(self) -> ConsoleInputState:
+        return ConsoleInputState()
+
+    def take_fault_rig_edge(self) -> bool:
+        return False
+
+    def set_bay_state(self, bay_id: int, state: BayState) -> None:
+        pass
+
+    def reset_rig(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _Coordinator:
+    def snapshots(self) -> tuple[()]:
+        return ()
+
+
+def test_replace_hardware_closes_old_consoles() -> None:
+    from teleop.atc.stage import EventTap, ReasonerTap
+
+    old, new = _Console(), _Console()
+    controller = StageController(
+        cast(AtcCoordinator, _Coordinator()),
+        cast(EventTap, None),
+        cast(ReasonerTap, None),
+        hardware=[old],
+    )
+    controller.replace_hardware([new])
+    assert old.closed and not new.closed
+    assert controller.consoles == [controller.keyboard, new]
+
+
+def test_loop_request_waits_for_panel_swap_to_loopback(board: UnoQServer) -> None:
+    """Both detectors fire: the panel is mid swap_to_loopback when the loop's request fails."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def gated_loopback() -> UnoQClient:
+        started.set()
+        release.wait(5.0)
+        return start_loopback()
+
+    unoq = SwitchableUnoQ(_client(board), loopback=gated_loopback)
+    errors: list[BaseException] = []
+    try:
+        panel = threading.Thread(target=unoq.swap_to_loopback)
+        panel.start()
+        assert started.wait(5.0)  # the panel holds the swap lock
+        board.stop()
+
+        def loop_request() -> None:
+            try:
+                unoq.classify_stall(SKU, Z)
+            except BaseException as exc:
+                errors.append(exc)
+
+        loop = threading.Thread(target=loop_request)
+        loop.start()
+        for _ in range(500):  # until the loop thread queues behind the panel's swap (or failed)
+            if unoq._loopback_intents == 2 or not loop.is_alive():  # pyright: ignore[reportPrivateUsage]
+                break
+            time.sleep(0.01)
+        release.set()
+        loop.join(5.0)
+        panel.join(5.0)
+        assert errors == []
+        assert unoq.is_mock is True
+    finally:
+        release.set()
+        unoq.close()

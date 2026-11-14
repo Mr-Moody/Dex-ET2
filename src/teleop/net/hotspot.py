@@ -161,18 +161,39 @@ class HotspotWatchdog:
         self._clock = clock
         self._thread: threading.Thread | None = None
         self.events: list[tuple[int, str]] = []
+        self.last_status: dict[str, object] | None = None
+        self.last_error: str | None = None  # outcome of the latest poll's bring-up
+        self.status_error: str | None = None  # set when the latest status read failed
+        self._poll_lock = threading.Lock()
+
+    @property
+    def hotspot(self) -> Hotspot:
+        return self._hotspot
 
     def _emit(self, event: str) -> None:
         self.events.append((self._clock(), event))
         self._on_event(event)
 
     def poll_once(self) -> None:
-        try:
-            for event in self._hotspot.ensure_up():
-                self._emit(event)
-        except Exception as exc:
-            log.warning("hotspot watchdog poll failed: %s", exc)
-            self._emit(f"error: {exc}")
+        with self._poll_lock:
+            error: str | None = None
+            try:
+                for event in self._hotspot.ensure_up():
+                    self._emit(event)
+                    if event.startswith("error:"):
+                        error = event
+            except Exception as exc:
+                log.warning("hotspot watchdog poll failed: %s", exc)
+                error = f"error: {exc}"
+                self._emit(error)
+            self.last_error = error
+            try:
+                self.last_status = self._hotspot.status()
+                self.status_error = None
+            except Exception as exc:
+                log.warning("hotspot status read failed: %s", exc)
+                self.last_status = None
+                self.status_error = f"status read failed: {exc}"
 
     def run(self) -> None:
         """Blocking poll loop; returns after :meth:`stop`."""

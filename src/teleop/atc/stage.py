@@ -41,10 +41,17 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from teleop.atc.coordinator import ROUTINE, AtcCoordinator, OperatorInput
+from teleop.atc.coordinator import (
+    DEFAULT_REALISM,
+    ROUTINE,
+    AtcCoordinator,
+    CoordinatorConfig,
+    OperatorInput,
+)
 from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
 from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
+from teleop.atc.validator import GATE_PASS_MIN, ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, ComplianceSink
 from teleop.reasoning.protocol import FleetReasoner, ReasoningContext, ReasoningVerdict
 from teleop.sim.bays import ACTIVE_BAYS, BACKGROUND_BAYS
@@ -143,7 +150,9 @@ class UnoQConsolePoller:
 
     Uses its own client connection so polling never interleaves with the coordinator's
     classify/fit requests. The clutch is dropped when no poll has succeeded for
-    ``timeout_s`` (same dead-man rule as the serial bridge).
+    ``timeout_s`` (same dead-man rule as the serial bridge). Bay states for the board LEDs are
+    queued by :meth:`set_bay_state` (only on change) and sent from the polling thread, so the
+    control loop never waits on the network.
     """
 
     def __init__(
@@ -160,23 +169,50 @@ class UnoQConsolePoller:
         self._lock = threading.Lock()
         self._state = ConsoleInputState()
         self._last_ok_ns: int | None = None
+        self._heartbeat_age_ms: int | None = None
         self._edge = False
+        self._bay_states: dict[int, BayState] = {}  # last state requested per bay
+        self._pending: dict[int, BayState] = {}  # changed, not yet sent
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="unoq-console", daemon=True)
         self._thread.start()
 
     def _loop(self) -> None:
         while not self._stop.wait(self._period_s):
+            self.poll_once()
+
+    def poll_once(self) -> None:
+        """Send queued bay states, then poll the console once (the thread's body)."""
+        with self._lock:
+            pending, self._pending = self._pending, {}
+        for bay_id, bay_state in pending.items():
             try:
-                s = self._client.console_state()
+                self._client.set_bay_state(bay_id, bay_state)
             except Exception as exc:
-                logger.debug("unoq console poll failed: %s", exc)
-                continue
-            with self._lock:
-                if s.fault_rig_latched and not self._state.fault_rig_latched:
-                    self._edge = True
-                self._state = s
-                self._last_ok_ns = self._clock()
+                logger.debug("unoq bay state %d dropped: %s", bay_id, exc)
+        try:
+            s, age = self._client.console_status()
+        except Exception as exc:
+            logger.debug("unoq console poll failed: %s", exc)
+            return
+        with self._lock:
+            if s.fault_rig_latched and not self._state.fault_rig_latched:
+                self._edge = True
+            self._state = s
+            self._heartbeat_age_ms = age
+            self._last_ok_ns = self._clock()
+
+    @property
+    def heartbeat_age_ms(self) -> int | None:
+        """MCU heartbeat age the board reported on the last successful poll (None: never)."""
+        with self._lock:
+            return self._heartbeat_age_ms
+
+    @property
+    def last_ok_ns(self) -> int | None:
+        """Clock time of the last successful poll (None: never); the panel check reads it."""
+        with self._lock:
+            return self._last_ok_ns
 
     def state(self) -> ConsoleInputState:
         with self._lock:
@@ -190,7 +226,11 @@ class UnoQConsolePoller:
         return edge
 
     def set_bay_state(self, bay_id: int, state: BayState) -> None:
-        pass  # the UNO Q drives its LED matrix from its own MCU bridge
+        with self._lock:
+            if self._bay_states.get(bay_id) == state:
+                return
+            self._bay_states[bay_id] = state
+            self._pending[bay_id] = state
 
     def reset_rig(self) -> None:
         pass
@@ -390,6 +430,56 @@ class ReasonerTap:
 # --------------------------------------------------------------------------- controller
 
 
+GATE_CONDITIONS = "randomized pose, friction, flap spring and rest angle"
+
+# Half-range of each randomized condition, to rank which failing rollout condition was the most
+# extreme: friction +-25%, flap stiffness +-20%, springref +-3 deg, y error 3 mm, yaw 1.5 deg.
+_COND_SCALE = (0.25, 0.20, 3.0, 3.0, 1.5)
+
+
+def worst_failure(
+    report: ValidationReport | None, nominal_springref_deg: float = 0.0
+) -> str | None:
+    """Plain-words most extreme condition across the failed rollouts, or ``None`` if none failed.
+
+    Deterministic: ranks each condition by its value over the randomized half-range and takes
+    the largest (first one wins a tie), e.g. ``"failed at +23% friction, 2.8 mm y error"``. The
+    flap rest angle is ranked by its offset from ``nominal_springref_deg`` (the model's rest angle).
+    """
+    if report is None:
+        return None
+    best: tuple[float, str] | None = None
+    for r in report.results:
+        if r.passed:
+            continue
+        c = r.conditions
+        parts = (
+            (c.friction_scale - 1.0) * 100.0,
+            (c.flap_stiffness_scale - 1.0) * 100.0,
+            c.flap_springref_deg - nominal_springref_deg,
+            abs(c.est_error[1]) * 1e3,
+            abs(math.degrees(c.est_error[2])),
+        )
+        sev = (
+            abs(parts[0]) / 100.0 / _COND_SCALE[0],
+            abs(parts[1]) / 100.0 / _COND_SCALE[1],
+            abs(parts[2]) / _COND_SCALE[2],
+            parts[3] / _COND_SCALE[3],
+            parts[4] / _COND_SCALE[4],
+        )
+        i = max(range(5), key=lambda k: sev[k])
+        text = (
+            f"{parts[0]:+.0f}% friction",
+            f"{parts[1]:+.0f}% flap stiffness",
+            f"{parts[2]:+.1f} deg flap rest angle",
+            f"{parts[3]:.1f} mm y error",
+            f"{parts[4]:.1f} deg yaw error",
+        )[i]
+        if best is None or sev[i] > best[0]:
+            best = (sev[i], text)
+    return None if best is None else f"failed at {best[1]}"
+
+
 class StageController:
     """One stage tick: keys -> console -> pallet cycling -> coordinator -> LEDs, HUD, cues."""
 
@@ -442,10 +532,21 @@ class StageController:
         cycle_dwell_s: float = 1.0,
         include_background_bays: bool = False,
         unoq_label: str = "",
+        seed: int = 0,
+        realism: float = DEFAULT_REALISM,
+        gate_pass_min: int = GATE_PASS_MIN,
     ) -> StageController:
+        """``seed`` seeds the pose estimator and the skill gate (``CoordinatorConfig.seed``).
+
+        ``realism`` scales the estimate error and the gate randomization (``CoordinatorConfig``).
+        """
         events, reasoning = EventTap(sink), ReasonerTap(reasoner)
         coordinator = AtcCoordinator.build(
-            unoq, events, reasoning, include_background_bays=include_background_bays
+            unoq,
+            events,
+            reasoning,
+            include_background_bays=include_background_bays,
+            config=CoordinatorConfig(seed=seed, realism=realism, gate_pass_min=gate_pass_min),
         )
         return cls(
             coordinator,
@@ -461,6 +562,22 @@ class StageController:
     @property
     def consoles(self) -> list[ConsoleSource]:
         return [self.keyboard, *self.hardware]
+
+    def replace_hardware(self, consoles: Sequence[ConsoleSource]) -> None:
+        """Install new hardware consoles and close the old ones (e.g. after a UNO Q swap).
+
+        Called from the swap thread: the list assignment is atomic and the tick snapshots
+        ``consoles`` once for its edge, merge and LED passes. A closed console tolerates a
+        late call (the poller drops it).
+        """
+        old, self.hardware = self.hardware, list(consoles)
+        for console in old:
+            if any(console is c for c in self.hardware):
+                continue
+            try:
+                console.close()
+            except Exception:
+                logger.exception("console close failed")
 
     # ------------------------------------------------------------------ keys
 
@@ -487,6 +604,10 @@ class StageController:
         self._action_seq += 1
         self.actions.append(ActionNote(self._action_seq, key, text, level))
         logger.info("key %s: %s", key, text)
+
+    def note(self, text: str, level: str = "warn") -> None:
+        """Add a system line to the action log (no key behind it)."""
+        self._note("sys", text, level)
 
     @property
     def rescue_elapsed_s(self) -> float:
@@ -604,13 +725,14 @@ class StageController:
     def tick(self, operator: OperatorInput | None = None) -> tuple[BaySnapshot, ...]:
         self._handle_keys()
         self.keyboard.pump()
-        for console in self.consoles:
+        consoles = self.consoles  # one snapshot per tick: replace_hardware may run concurrently
+        for console in consoles:
             if console.take_fault_rig_edge():
                 self.arm(1, flap_jammed=True)
-        self.console = merge_console(c.state() for c in self.consoles)
+        self.console = merge_console(c.state() for c in consoles)
         self._cycle_pallets()
         snaps = self.coordinator.tick(self.console, operator)
-        self._after_tick(snaps)
+        self._after_tick(snaps, consoles)
         return snaps
 
     def _cycle_pallets(self) -> None:
@@ -647,7 +769,9 @@ class StageController:
                 self.active_faults.pop(bay, None)
             co.start_cycle(bay, flap_jammed=jam, bolt_pinned=pin)
 
-    def _after_tick(self, snaps: tuple[BaySnapshot, ...]) -> None:
+    def _after_tick(
+        self, snaps: tuple[BaySnapshot, ...], consoles: Sequence[ConsoleSource]
+    ) -> None:
         co = self.coordinator
         holders = co.rescue_slot_holders()
         holder = holders[0] if holders else None
@@ -655,7 +779,7 @@ class StageController:
             self._rescue_bay = holder
             self._rescue_t0 = co.time_s
         for snap in snaps:
-            for console in self.consoles:
+            for console in consoles:
                 console.set_bay_state(snap.bay_id, snap.state)
         for event in self.events.drain():
             self._on_event(event)
@@ -672,6 +796,10 @@ class StageController:
                 total=int(meta.get("rollouts_total", 0)),
                 elapsed_s=float(meta.get("elapsed_s", math.nan)),
                 ok=bool(meta.get("passed")),
+                conditions=GATE_CONDITIONS,
+                worst_failure=worst_failure(
+                    self.coordinator.last_report, self.coordinator.validator.nominal_springref_deg
+                ),
             )
         if self.audio is not None:
             self.audio.on_event(event)
@@ -711,6 +839,7 @@ class StageController:
         return tuple(out[bay] for bay in sorted(out))
 
     def close(self) -> None:
+        self.coordinator.close()
         for console in self.consoles:
             try:
                 console.close()
@@ -726,6 +855,8 @@ class StageController:
 # metres, finger press fraction): the wrist drops so the index sits low behind the bolt hook,
 # the thumb swings under the palm and presses the raised stopper flap flat at its free end,
 # then the wrist pushes the bolt clear. Same demonstration the T-140 tests use.
+# Kept as tuned on main: a retune for the randomized gate (x 0, y -9 mm, a 2.2 s push) never
+# cleared the bolt on an exact latch placement (realism 0), on Windows or Linux.
 RESCUE_PRESS = {"thumb_yaw": 0.6}
 RESCUE_WAYPOINTS: tuple[tuple[float, tuple[float, float, float], float], ...] = (
     (0.0, (0.0, 0.0, 0.0), 0.0),
@@ -805,6 +936,12 @@ class ScriptedGlove:
 
 
 # --------------------------------------------------------------------------- 6-beat director
+
+# Run seed for the scripted stage show. The spec allows fixed confirmed seeds for the stage.
+# Pinned against the show's own config (cycle dwell 1.0 s, background bays on, DEFAULT_REALISM,
+# as `teleop atc --script` runs): at 0.25 seeds 0-7 all pass on Windows and Linux (CI). Seed 7
+# also passed at realism 0.5 on both, with the gate at 19/20 (a margin if realism is raised).
+STAGE_SEED = 7
 
 BEATS: tuple[str, ...] = (
     "1 Routine autonomy",
@@ -917,8 +1054,11 @@ class StageDirector:
             if not beat.ok:
                 return
 
-            beat = self._begin(3)  # UNO Q fit + 3-rollout gate, skill deployed
-            yield from self._wait(lambda: co.state(1) == BayState.NOMINAL)
+            beat = self._begin(3)  # UNO Q fit + 20-rollout gate, skill deployed
+            yield from self._wait(
+                lambda: co.state(1) == BayState.NOMINAL,
+                self.beat_timeout_s + co.config.gate_deadline_s,  # gate applies at its deadline
+            )
             self._end(beat, bool(ctl.gate.ok) and len(co.library) >= 1)
             if not beat.ok:
                 return
@@ -949,6 +1089,7 @@ class StageDirector:
 __all__ = [
     "BEATS",
     "KEYMAP",
+    "STAGE_SEED",
     "ScriptedGlove",
     "key_name",
     "AudioCues",
@@ -964,4 +1105,5 @@ __all__ = [
     "UnoQConsolePoller",
     "merge_console",
     "scripted_rescue",
+    "worst_failure",
 ]

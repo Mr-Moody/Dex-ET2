@@ -28,7 +28,8 @@ gate and console tracks run in parallel worktrees with no overlapping files.
 - The policy observation is the 29-value `STATE_NAMES` vector plus the `wrist` and `top` cameras. The action is the 12-value `ACTION_NAMES` vector in the latch frame. Both are defined once, in `teleop.policy.schema`.
 - Dataset rate is 30 fps (every second 60 Hz tick). Images are 128 × 128 RGB unless the schema constant changes.
 - Live budget: p95 inference ≤ 30 ms for a batch of 2. No action chunk within 250 ms counts as a failure. 10 consecutive over-budget calls make ACT unhealthy.
-- Gate bar: at least 9 of 10 rollouts per fault type.
+- Gate bar: at least 9 of 10 rollouts per fault type (the DMP gate is 18 of 20 since T-179).
+- The latch frame for observations, actions and control is `BayRig.world_from_latch()`, the T-179 pose estimate. `true_world_latch()` is allowed only for labels, display and eval, like `bolt_x`. `realism` in `configs/atc.yaml` scales the estimate error and the gate randomization (0: off).
 - Verify before every PR: `uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest`
 - Conventional Commits with an allowed scope (`atc`, `record`, `train`, `sim`, `docs`, `tasks`, …). No `Co-Authored-By` or "Generated with" lines.
 
@@ -217,6 +218,7 @@ Behaviour:
 
 **Interfaces:**
 - Consumes: `StageController` (`arm`, `on_key`, `tick`, `rescue_bay`), `ScriptedGlove`/`scripted_rescue` (`teleop.atc.stage`), `BayRig.set_world_latch`, Task 2's `EpisodeSink`.
+- Note (T-179): `set_world_latch` moves the true latch and resets the estimate to that exact pose. The coordinator samples a fresh noisy estimate when the bay's next cycle starts, so move the latch only between cycles and never call `set_estimate` from the generator.
 - Produces:
   - `@dataclass(frozen=True) GeneratorConfig(perturb_xy_m: float = 0.10, perturb_yaw_deg: float = 40.0, timing_jitter: float = 0.2, pose_noise_m: float = 0.002, faults: tuple[str, ...] = ("bay1_flap", "bay2_flap", "bay2_pin"), max_sim_s_per_episode: float = 30.0)`
   - `run_generation(controller, sink, n, seed, config: GeneratorConfig = GeneratorConfig()) -> int`: the Task 1 hook signature plus an optional config.
@@ -373,12 +375,12 @@ Mark any CLI subcommand you could not confirm against the docs.
 **Interfaces:**
 - Consumes: `RecoveryController`, `DmpRecovery`, `GateManifest`, `FaultResult`, `EpisodeMeta` (Task 1); `ActRecoveryFactory`, `InferenceWorker`, `load_act_policy`, `ReplayPolicy` (Task 6); `BayCameraRenderer` (Task 2); `fit_rbf_dmp` (`teleop.unoq.dmp`).
 - Produces:
-  - `SkillValidator.validate_controller(make: Callable[[BayRig], RecoveryController], *, fault: Literal["flap", "pin"] = "flap", perturbations: Sequence[tuple[float, float, float]] | None = None) -> ValidationReport`. Every rollout starts in today's stall state. Each controller does its own pre-move: the DMP 1 cm back-off, or the ACT 3 cm retract and settle. `validate(skill)` keeps its exact behaviour and becomes `validate_controller(DmpRecovery…)`. Existing validator tests stay green unchanged.
-  - `random_perturbations(n: int, rng: np.random.Generator, xy_m: float = 0.08, yaw_deg: float = 30.0) -> list[tuple[float, float, float]]`
+  - `SkillValidator.validate_controller(make: Callable[[BayRig], RecoveryController], *, fault: Literal["flap", "pin"] = "flap", conditions: Sequence[RolloutConditions] | None = None) -> ValidationReport`. Every rollout starts in today's stall state under its `RolloutConditions` (T-179: latch jitter, estimate error, flap stiffness and rest angle, friction; restored after each rollout). Each controller does its own pre-move: the DMP 1 cm back-off, or the ACT 3 cm retract and settle. `validate(skill)` keeps its T-179 behaviour (20 rollouts from `draw_conditions(skill_id)`, at least `pass_min`) and becomes `validate_controller(DmpRecovery…)`. Existing validator tests stay green unchanged.
+  - Rollout conditions for eval come from `draw_conditions` (seeded, `realism`-scaled), not a separate perturbation sampler.
   - `teleop eval --checkpoint DIR --dataset DIR [--faults flap,pin] [--rollouts 10] [--bar 9] [--device cuda] [--seed 0]`. It writes `DIR/gate.json` and prints one row per fault (rollouts passed for ACT and for the DMP, mean time-to-clear, max hand torque, p95 ms). It returns 0 if at least one fault passed, else 1.
   - Module-level `_load_policy = load_act_policy`, so tests can monkeypatch it.
 
-Rollouts per fault: the 3 `PERTURBATIONS_DEG`, then `rollouts − 3` random ones (seeded).
+Rollouts per fault: `draw_conditions` with `n_rollouts = --rollouts` (it cycles the 3 `PERTURBATIONS_DEG` and adds the seeded T-179 randomization), the same conditions for ACT and the DMP.
 
 The DMP comparison fits `fit_rbf_dmp` to the first successful `glove` (else `scripted`) episode of that fault in `--dataset`, using its state's wrist pose and hand values, and runs the same rollouts.
 

@@ -577,6 +577,8 @@ body {
 .spark canvas { width: 100%; height: 30px; display: block; }
 .spark__val { text-align: right; font-size: 16px; }
 .spark.is-low .spark__val { color: var(--stalled); }
+.spark__pose { grid-column: 2 / -1; color: var(--muted); font-size: 12px; }
+.spark__pose:empty { display: none; }
 .spark.is-standby { opacity: 0.45; }
 
 .gate { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; align-items: baseline; }
@@ -584,6 +586,7 @@ body {
 .gate__big.is-ok { color: var(--nominal); }
 .gate__big.is-bad { color: var(--stalled); }
 .gate__line { color: var(--muted); font-size: 14px; }
+.gate__conds { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
 .gate .is-empty { color: var(--muted); grid-column: 1 / -1; }
 
 .log {
@@ -778,3 +781,54 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; }
 }
+
+/* health strip */
+
+.stagecol:has(> .health:not([hidden])) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px var(--gap) 0;
+}
+.hpill {
+  --lvl: var(--standby);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-left: 4px solid var(--lvl);
+  font-size: 13px;
+  min-width: 0;
+}
+.hpill[data-level="ok"] { --lvl: var(--nominal); }
+.hpill[data-level="warn"] { --lvl: var(--queued); }
+.hpill[data-level="fail"] { --lvl: var(--stalled); }
+.hpill__dot { width: 9px; height: 9px; border-radius: 50%; background: var(--lvl); flex: none; }
+.hpill__name { font-weight: 600; }
+.hpill__sum { color: var(--muted); }
+.hpill__detail { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 36ch; }
+.hpill__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--hair);
+  cursor: pointer;
+}
+.hpill__btn:hover:not(:disabled) { border-color: var(--safety); }
+.hpill__btn:disabled { color: var(--muted); cursor: default; }
+.hpill__spin {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--hair);
+  border-top-color: var(--safety);
+  border-radius: 50%;
+  animation: hpill-spin 800ms linear infinite;
+}
+@keyframes hpill-spin { to { transform: rotate(360deg); } }
