@@ -1,7 +1,7 @@
 ---
 id: T-202
 title: Hotspot health check over the watchdog
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/hotspot-health
 depends_on: [T-200]

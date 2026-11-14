@@ -1,7 +1,7 @@
 ---
 id: T-200
 title: Health model and monitor with off-thread reconnect
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/health-monitor
 depends_on: []

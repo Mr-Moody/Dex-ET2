@@ -1,7 +1,7 @@
 ---
 id: T-205
 title: Choose glove or scripted rescue at clutch engage
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/glove-select
 depends_on: [T-201]

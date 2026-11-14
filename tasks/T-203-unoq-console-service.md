@@ -1,7 +1,7 @@
 ---
 id: T-203
 title: Edge service serves the MCU console and bay states; App Lab auto-run app
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/unoq-console-service
 depends_on: []

@@ -1,7 +1,7 @@
 ---
 id: T-204
 title: Hot-swappable UNO Q client and control panel health check
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/unoq-hot-swap
 depends_on: [T-200, T-203]

@@ -1,7 +1,7 @@
 ---
 id: T-207
 title: 'One-command booth launch: wiring, defaults and README'
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/one-command-booth
 depends_on: [T-201, T-202, T-204, T-205, T-206]

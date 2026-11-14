@@ -1,7 +1,7 @@
 ---
 id: T-206
 title: Console hardware health strip with reconnect buttons
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/console-health-strip
 depends_on: [T-200]

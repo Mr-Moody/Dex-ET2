@@ -1,7 +1,7 @@
 ---
 id: T-201
 title: Studio glove liveness and glove health check
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/glove-health
 depends_on: [T-200]
