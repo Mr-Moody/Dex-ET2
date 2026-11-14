@@ -9,6 +9,7 @@ were rendered for the previous layout.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -32,6 +33,21 @@ _TRANSITIONS: dict[BayState, tuple[str, str]] = {
     BayState.OOD_ESCALATED: ("alert", "Bay {k}: unseen jam, skill transfer refused"),
     BayState.NOMINAL: ("ok", "Bay {k} back to nominal"),
 }
+
+
+def _finite_or_none(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _scrub(obj: Any) -> Any:
+    """Replace non-finite floats with ``None``: the browser's ``JSON.parse`` rejects NaN."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _scrub(v) for k, v in obj.items()}  # pyright: ignore[reportUnknownVariableType]
+    if isinstance(obj, list):
+        return [_scrub(v) for v in obj]  # pyright: ignore[reportUnknownVariableType]
+    return obj
 
 
 class TelemetryAdapter:
@@ -79,7 +95,8 @@ class TelemetryAdapter:
             return
         self._gate_key = key
         verdict = "passed" if g.ok else "FAILED"
-        elapsed = f"{g.elapsed_s:.2f}" if g.elapsed_s is not None else "?"
+        secs = _finite_or_none(g.elapsed_s)
+        elapsed = f"{secs:.2f}" if secs is not None else "?"
         text = f"Skill gate {g.passed}/{g.total} {verdict} in {elapsed} s"
         self._log(sim_t, wall, None, "ok" if g.ok else "alert", text)
 
@@ -110,7 +127,8 @@ class TelemetryAdapter:
                 "replayed": False,
             }
         if k in self.background:
-            c = round(float(background_confidence.get(k, 1.0)), 3)
+            raw = float(background_confidence.get(k, 1.0))
+            c = round(min(max(raw, 0.0), 1.0), 3) if math.isfinite(raw) else 0.0
             hist.append(c)
             return {
                 "id": k,
@@ -172,26 +190,29 @@ class TelemetryAdapter:
             if r.bay_id is None
             else {"bay": r.bay_id, "clutch": r.clutch_engaged, "elapsed_s": r.elapsed_s}
         )
-        return {
-            "type": "telemetry",
-            "layout_id": self.layout_id,
-            "sim_t": round(sim_t, 3),
-            "wall": wall,
-            "threshold": THRESHOLD,
-            "mode": "rescue" if any(f.role == "main" for f in feeds_t) else "grid",
-            "feeds": [
-                {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role} for f in feeds_t
-            ],
-            "bays": [
-                self._bay_entry(k, snaps, background_confidence) for k in range(1, N_BAYS + 1)
-            ],
-            "queue": list(view.queue),
-            "selected_bay": view.selected_bay,
-            "rescue": rescue,
-            "gate": gate,
-            "events": list(self._events),
-            "compliance": view.compliance,
-            "reasoning": view.reasoning,
-            "beat": view.beat,
-            "unoq": view.unoq,
-        }
+        return _scrub(
+            {
+                "type": "telemetry",
+                "layout_id": self.layout_id,
+                "sim_t": round(sim_t, 3),
+                "wall": wall,
+                "threshold": THRESHOLD,
+                "mode": "rescue" if any(f.role == "main" for f in feeds_t) else "grid",
+                "feeds": [
+                    {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role}
+                    for f in feeds_t
+                ],
+                "bays": [
+                    self._bay_entry(k, snaps, background_confidence) for k in range(1, N_BAYS + 1)
+                ],
+                "queue": list(view.queue),
+                "selected_bay": view.selected_bay,
+                "rescue": rescue,
+                "gate": gate,
+                "events": list(self._events),
+                "compliance": view.compliance,
+                "reasoning": view.reasoning,
+                "beat": view.beat,
+                "unoq": view.unoq,
+            }
+        )

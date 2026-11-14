@@ -83,15 +83,23 @@ function standbyTile(bayId) {
   return el;
 }
 
+function releaseSlot(s) {
+  if (s.img) s.img.onload = s.img.onerror = null;
+  if (s.url) URL.revokeObjectURL(s.url);
+  if (s.pending) URL.revokeObjectURL(s.pending);
+  s.url = s.pending = null;
+}
+
 function registerSlot(slot, el) {
   const prev = ui.slots.get(slot);
-  if (prev && prev.url) URL.revokeObjectURL(prev.url);
-  ui.slots.set(slot, { el, img: el.querySelector("img"), url: null, last: performance.now() });
+  if (prev) releaseSlot(prev);
+  const img = el.querySelector("img");
+  ui.slots.set(slot, { el, img, url: null, pending: null, last: performance.now() });
 }
 
 function buildWall(t) {
   const wall = $("wall");
-  for (const s of ui.slots.values()) if (s.url) URL.revokeObjectURL(s.url);
+  for (const s of ui.slots.values()) releaseSlot(s);
   ui.slots.clear();
   wall.replaceChildren();
   const bySlot = new Map(t.feeds.map((f) => [f.slot, f]));
@@ -307,6 +315,33 @@ function render(t) {
 
 // ------------------------------------------------------------------ frames
 
+// <frame-urls>
+// Each slot keeps the URL on screen (s.url) and at most one still loading (s.pending). A frame
+// superseded before it loads, a frame that fails to decode and the frame it replaces are all
+// revoked, so bursts of frames never leak blob memory.
+function showFrame(s, url, revoke) {
+  if (s.pending) revoke(s.pending);
+  s.pending = url;
+  const settle = (ok) => {
+    if (s.pending !== url) return; // a stale callback from a superseded frame
+    s.pending = null;
+    if (ok) {
+      if (s.url) revoke(s.url);
+      s.url = url;
+    } else {
+      revoke(url);
+    }
+  };
+  s.img.onload = () => settle(true);
+  s.img.onerror = () => settle(false);
+  s.img.src = url;
+}
+// </frame-urls>
+
+function revokeUrl(url) {
+  URL.revokeObjectURL(url);
+}
+
 function onFrame(buf) {
   const bytes = new Uint8Array(buf);
   if (bytes.length < 3) return;
@@ -315,11 +350,8 @@ function onFrame(buf) {
   const s = ui.slots.get(slot);
   if (!s || !s.img) return;
   const url = URL.createObjectURL(new Blob([buf.slice(2)], { type: "image/jpeg" }));
-  const old = s.url;
-  s.url = url;
   s.last = performance.now();
-  s.img.onload = () => old && URL.revokeObjectURL(old);
-  s.img.src = url;
+  showFrame(s, url, revokeUrl);
   s.el.classList.remove("is-lost");
 }
 
