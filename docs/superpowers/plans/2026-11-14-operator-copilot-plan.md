@@ -8,7 +8,7 @@
 **Goal:** A control-room "intermediary" that watches the fleet ops console and helps the human
 operator. It explains what is happening in short spoken call-outs, and gives a careful second
 opinion before a human rescue is accepted as fleet knowledge. It runs on the operator's
-computer and uses Google models: Gemini Flash for fast call-outs, Gemini 4 Argon for deep
+computer and uses Google models: Gemini 4 Hydrogen for fast call-outs, Gemini 4 Argon for deep
 reviews, Gemini TTS for speech, and Gemma as an optional local fallback.
 
 **Non-goals.** The copilot never controls a robot. It never sends key presses, and it never
@@ -38,7 +38,7 @@ flowchart TD
     SRV -->|"same stream"| FEED["Copilot: FeedClient"]
     FEED --> DET["EventDetector<br/>(telemetry diffs)"]
     FEED --> FR["FrameStore<br/>(latest JPEG per bay/camera)"]
-    DET --> CALL["Call-outs<br/>Gemini Flash"]
+    DET --> CALL["Call-outs<br/>Gemini 4 Hydrogen"]
     DET --> REV["Deep review<br/>Gemini 4 Argon"]
     FR --> CALL
     FR --> REV
@@ -84,7 +84,7 @@ relied on.**
 
 | Role | Default model ID | Env var | Notes |
 |---|---|---|---|
-| Live call-outs | `gemini-3.8-flash` | `COPILOT_FAST_MODEL` | Fast, cheap and multimodal. Target ≤ 3 s per call, hard timeout 8 s. |
+| Live call-outs | `gemini-4-hydrogen` | `COPILOT_FAST_MODEL` | Fast and multimodal; call with thinking level `low` (its default is `high`; `minimal` is HTTP 400). Target ≤ 3 s per call, hard timeout 8 s. `gemini-3.8-flash` is the fallback. |
 | Deep review | `gemini-4-argon` | `COPILOT_REVIEW_MODEL` | Strongest model. Paid tier only, pricier: introductory pricing ends 30 Nov 2026, then doubles. Timeout 90 s. |
 | Speech | `gemini-3.8-flash-lite-tts` | `COPILOT_TTS_MODEL` | Alternative: `gemini-3.1-flash-tts-preview`, the only one with streaming. Forums report 10–20 s first-audio delays on some keys, so measure it. |
 | Voice | (pick in `T-212`) | `COPILOT_VOICE` | One of the documented prebuilt Gemini TTS voices. |
@@ -139,7 +139,7 @@ slowly. Treat local Gemma as a backup, not the main path.
 - **Fast template path:** when a model is slow or offline, speak the deterministic text built from
   telemetry, so the operator always hears something within about 1 s of the event.
 
-### Call-out (Gemini Flash)
+### Call-out (Gemini 4 Hydrogen)
 
 - **Input:** a system prompt describing the cell (latch, 5.2 cm clear, 0.3 stall threshold,
   Mahalanobis 3.0), the event, that bay's telemetry slice, and one JPEG downscaled to ≤ 512 px.
@@ -284,7 +284,7 @@ section.
 - [ ] **Client.** `LocalModelClient` for an OpenAI-compatible local server
   (`COPILOT_LOCAL_URL`, `COPILOT_LOCAL_MODEL`) with the same `generate_json` contract as
   `GeminiClient`.
-- [ ] **Fallback order** for call-outs: Gemini Flash, then local Gemma, then the template. Reviews
+- [ ] **Fallback order** for call-outs: the fast Gemini model, then local Gemma, then the template. Reviews
   never fall back to local; they report "review unavailable".
 - [ ] **Docs:** how to run Gemma 4 E4B or 12B locally, and the expected speed on CPU versus a
   16 GB GPU.
