@@ -21,16 +21,26 @@ from teleop.copilot.gemini import (
     ThinkingLevel,
     Transport,
 )
+from teleop.copilot.local import (
+    REVIEW_UNAVAILABLE,
+    CopilotModels,
+    LocalModelClient,
+    ReviewUnavailableError,
+)
 
 __all__ = [
+    "REVIEW_UNAVAILABLE",
     "CopilotConfig",
+    "CopilotModels",
     "GeminiClient",
     "GeminiError",
     "GeminiHttpError",
     "GeminiMalformedJsonError",
     "GeminiTimeoutError",
     "ImagePart",
+    "LocalModelClient",
     "ModelInfo",
+    "ReviewUnavailableError",
     "TextPart",
     "ThinkingLevel",
     "Transport",

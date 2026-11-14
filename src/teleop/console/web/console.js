@@ -76,9 +76,28 @@ const ui = {
   slTimer: null,
 };
 
-// Keyboard bar. Codes are GLFW key codes (the same ones the MuJoCo viewer receives).
+// <bay-keys>
+// The arrows move the selection one camera panel, like the console joystick (Bay 1 | Bay 2 over
+// Bay 3 | Bay 4); the digit keys select a bay directly. Codes are GLFW key codes (the same ones
+// the MuJoCo viewer receives).
+const ARROW_KEYS = [
+  { key: "ArrowLeft", code: 263, cap: "←", name: "Left arrow" },
+  { key: "ArrowRight", code: 262, cap: "→", name: "Right arrow" },
+  { key: "ArrowUp", code: 265, cap: "↑", name: "Up arrow" },
+  { key: "ArrowDown", code: 264, cap: "↓", name: "Down arrow" },
+];
+const ARROW_CODES = Object.fromEntries(ARROW_KEYS.map((a) => [a.key, a.code]));
+const bayKey = (r) => ({ code: 48 + r, cap: String(r), name: `Key ${r}` });
+// </bay-keys>
+
+// Keyboard bar. Codes are GLFW key codes.
 const KEY_BAR = [
-  { caps: ["1", "2", "3", "4"], codes: [49, 50, 51, 52], text: "Select bay" },
+  {
+    caps: ARROW_KEYS.map((a) => a.cap),
+    codes: ARROW_KEYS.map((a) => a.code),
+    names: ARROW_KEYS.map((a) => a.name),
+    text: "Move panel",
+  },
   { caps: ["Space"], codes: [32], text: "Clutch" },
   { caps: ["E"], codes: [69], text: "E-stop bay" },
   { caps: ["M"], codes: [77], text: "Backend" },
@@ -213,7 +232,10 @@ function refreshZoomBadge(camera) {
       Math.abs(rx) > 0.02 ||
       Math.abs(ry) > 0.02;
     badge.hidden = !modified;
-    if (modified) badge.textContent = `${z.toFixed(1)}× ↺`;
+    if (modified) {
+      badge.textContent = `${z.toFixed(1)}× ↺`;
+      badge.setAttribute("aria-label", `Camera moved, zoom ${z.toFixed(1)}×. Reset camera view`);
+    }
   }
 }
 
@@ -357,6 +379,14 @@ function attachDragEvents(el, bayId, role) {
   });
 }
 
+// <feed-dblclick>
+const FEED_OVERLAYS = "button, .feed__top, .feed__tools, .feed__bottom > *, .feed__lost, .feed__power, .feed__nosignal";
+
+function onBarePicture(target) {
+  return target instanceof Element && !!target.closest(".feed__pic") && !target.closest(FEED_OVERLAYS);
+}
+// </feed-dblclick>
+
 function feedTile(bayId, camera, role, bayInfo, inRescue) {
   const isOverview = bayId === 0 || camera === "overview";
   const el = document.createElement("div");
@@ -389,8 +419,9 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
       ${isOverview ? "" : `<div class="feed__power"><strong>E-STOP · Power cut</strong><span>Select Bay ${bayId} and press the E-stop again to restore</span></div>`}
     </div>`;
 
+  // Clicks on the tile's buttons never reach the tile, so they do not select the bay, and a fast
+  // double click on one is just two presses: it must not reach the tile's dblclick (pin / unpin).
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
-  // A fast double-click on a tile button must not reach the tile's dblclick (pin / unpin).
   const noDbl = (btn) => btn.addEventListener("dblclick", (ev) => ev.stopPropagation());
   const badge = el.querySelector(".feed__zoom");
   badge.addEventListener("click", stop(() => resetCamZoom(camera)));
@@ -404,6 +435,7 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
     btn.className = `ftool${cls}`;
     btn.textContent = label;
     btn.title = tip;
+    btn.setAttribute("aria-label", tip);
     btn.addEventListener("click", stop(run));
     noDbl(btn);
     tools.append(btn);
@@ -431,13 +463,20 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
     tool("Focus", `Give Bay ${bayId} the stage (or double-click)`, () => setLayoutMode("pin", bayId), " ftool--gap");
   }
 
+  // Only a double click on the bare picture pins or unpins the pane. The overlay text (name,
+  // state, C(t), bottom labels, signal/power notices) ignores it; buttons stop it above (noDbl)
+  // and onBarePicture() rejects them as well.
+  const onDblClick = (run) => (e) => {
+    e.stopPropagation();
+    if (onBarePicture(e.target)) run();
+  };
   if (!isOverview) {
     el.addEventListener("click", () => selectBay(bayId));
-    el.addEventListener("dblclick", (e) => { e.stopPropagation(); togglePinBay(bayId); });
+    el.addEventListener("dblclick", onDblClick(() => togglePinBay(bayId)));
     el.addEventListener("keydown", (e) => { if (e.key === "Enter") selectBay(bayId); });
     attachDragEvents(el, bayId, role);
   } else {
-    el.addEventListener("dblclick", (e) => { e.stopPropagation(); setLayoutMode("grid", null); });
+    el.addEventListener("dblclick", onDblClick(() => setLayoutMode("grid", null)));
   }
   attachZoomPan(el, camera, role);
   return el;
@@ -894,6 +933,7 @@ function updateLog(t) {
 // ------------------------------------------------------------------ what is happening now
 
 const kbd = (k) => `<kbd>${k}</kbd>`;
+const bayKbd = (r) => `<kbd title="${bayKey(r).name}"><span aria-hidden="true">${bayKey(r).cap}</span><span class="sr-only">${bayKey(r).name}</span></kbd>`;
 
 function situation(t) {
   const bays = t.bays.filter((b) => b.state !== "STANDBY");
@@ -951,8 +991,8 @@ function situation(t) {
       acts.push({ label: `Select Bay ${r}`, accent: true, run: () => selectBay(r) });
       return {
         tone, tag, head,
-        hint: `Select Bay ${r} (${kbd(r)}) and engage clutch (${kbd("Space")}) to intervene.`,
-        keys: [48 + r],
+        hint: `Select Bay ${r} (${bayKbd(r)}) and engage clutch (${kbd("Space")}) to intervene.`,
+        keys: [bayKey(r).code],
         actions: acts,
       };
     }
@@ -974,8 +1014,8 @@ function situation(t) {
     return {
       tone: "ood", tag: `Refused · Bay ${r}`,
       head: `Bay ${r} refused the fleet skill`,
-      hint: `Unlike the learned jam, so no skill was replayed. Press ${kbd(r)} to take over or ${kbd("R")} to reset the cells.`,
-      keys: [48 + r],
+      hint: `Unlike the learned jam, so no skill was replayed. Press ${bayKbd(r)} to take over or ${kbd("R")} to reset the cells.`,
+      keys: [bayKey(r).code],
       actions: [{ label: `Select Bay ${r}`, accent: true, run: () => selectBay(r) }],
     };
   }
@@ -1100,11 +1140,24 @@ function buildKeyBar() {
       b.className = "key__cap";
       if (cap.length > 1) b.classList.add("key__cap--wide");
       b.dataset.code = String(group.codes[i]);
-      b.textContent = cap;
-      b.title = `${group.text} (${cap})`;
+      const name = group.names ? group.names[i] : cap;
+      const sub = group.subs ? group.subs[i] : "";
+      const capKbd = document.createElement("kbd");
+      capKbd.textContent = cap;
+      capKbd.setAttribute("aria-hidden", "true");
+      b.append(capKbd);
+      if (sub) {
+        const s = document.createElement("span");
+        s.className = "key__sub";
+        s.setAttribute("aria-hidden", "true");
+        s.textContent = sub;
+        b.append(s);
+      }
+      b.setAttribute("aria-label", `${name}: ${group.text}${sub ? ` ${sub}` : ""}`);
+      b.title = `${group.text}${sub ? ` ${sub}` : ""} (${name})`;
       b.tabIndex = -1; // never keeps focus, so a later Space press is not also a click
       b.addEventListener("mousedown", (e) => e.preventDefault());
-      b.addEventListener("click", () => pressKey(group.codes[i], cap));
+      b.addEventListener("click", () => pressKey(group.codes[i], keyName(group.codes[i])));
       item.append(b);
     });
     const label = document.createElement("span");
@@ -1226,6 +1279,69 @@ function updateDummy(t) {
   }
 }
 
+// Glove calibration: the server runs the flat -> fist wizard; the panel only mirrors t.calib.
+const CALIB_LEVEL = { applied: "ok", partial: "warn", cancelled: "info", no_frames: "warn", busy: "info", error: "warn" };
+function updateCalib(t) {
+  const c = t.calib;
+  const panel = $("panel-calib");
+  const go = $("calib-go");
+  if (!c) {
+    panel.dataset.state = "off";
+    $("calib-meta").textContent = "Unavailable";
+    panel.title = "Needs the Studio gloves (not the synthetic or scripted operator)";
+    go.disabled = true;
+    go.classList.remove("is-cancel");
+    go.textContent = "Calibrate gloves";
+    return;
+  }
+  panel.title = "";
+  const running = c.state !== "idle";
+  panel.dataset.state = running ? "running" : "idle";
+  go.disabled = false;
+  go.classList.toggle("is-cancel", running);
+  go.classList.toggle("actbtn--accent", !running);
+  go.textContent = running ? "Cancel" : "Calibrate gloves";
+  const secs = `${Math.ceil(c.remaining_s || 0)} s`;
+  const poseHint = (pose, done, idleText) => {
+    if (running && c.pose === pose) return [c.state === "prep" ? `Get ready · ${secs}` : `Hold · ${secs}`, "active"];
+    if (done) return ["Done", "done"];
+    return [idleText, "pending"];
+  };
+  const tiles = [
+    ["flat", c.flat_done, "Open hand"],
+    ["fist", c.fist_done, "Closed hand"],
+  ];
+  for (const [pose, done, idleText] of tiles) {
+    const [hint, state] = poseHint(pose, done, idleText);
+    $(`calib-${pose}`).dataset.tile = state;
+    if ($(`calib-${pose}-hint`).textContent !== hint) $(`calib-${pose}-hint`).textContent = hint;
+  }
+  let meta;
+  if (running) {
+    meta = `Step ${c.pose === "flat" ? 1 : 2} · ${c.pose === "flat" ? "Flat" : "Fist"}${c.state === "prep" ? " · get ready" : ""}`;
+  } else if (c.result && c.result !== "busy") {
+    meta = c.result_text;
+  } else {
+    meta = `Idle · ${c.origin === "defaults" ? "defaults" : c.origin === "live" ? "live" : "from file"}`;
+  }
+  $("calib-meta").textContent = meta;
+  $("calib-meta").title = [c.path, c.detail].filter(Boolean).join(" · ");
+  if (ui.calibSeq === undefined) {
+    ui.calibSeq = c.seq; // a reload must not replay the last result
+  } else if (c.seq !== ui.calibSeq) {
+    ui.calibSeq = c.seq;
+    if (c.result) toast("Calib", c.detail ? `${c.result_text}: ${c.detail}` : c.result_text, CALIB_LEVEL[c.result] || "info");
+  }
+}
+
+function initCalibControls() {
+  $("calib-go").addEventListener("click", () => {
+    const c = ui.telemetry && ui.telemetry.calib;
+    if (!c) return;
+    sendClient({ type: "calib", action: c.state !== "idle" ? "cancel" : "start" });
+  });
+}
+
 function render(t) {
   ui.telemetry = t;
   if (t.view) {
@@ -1258,6 +1374,7 @@ function render(t) {
   updateBrief(t);
   updateDemoFaults(t);
   updateDummy(t);
+  updateCalib(t);
   updateActions(t);
   updateCompliance(t);
   // One advisory line, shown only while the advisor has something to say.
@@ -1507,7 +1624,9 @@ function pressKey(code, name) {
 }
 
 function keyName(code) {
-  return code === 32 ? "Space" : String.fromCharCode(code);
+  if (code === 32) return "Space";
+  for (const a of ARROW_KEYS) if (a.code === code) return a.cap;
+  return String.fromCharCode(code);
 }
 
 function selectBay(bayId) {
@@ -1517,7 +1636,7 @@ function selectBay(bayId) {
     togglePinBay(bayId);
     return;
   }
-  pressKey(48 + bayId, String(bayId));
+  pressKey(bayKey(bayId).code, keyName(bayKey(bayId).code));
 }
 
 function initViewBar() {
@@ -1610,15 +1729,27 @@ window.addEventListener("keydown", (event) => {
   }
   const k = event.key;
   let code = null;
-  if (k === " ") code = 32;
+  if (k in ARROW_CODES) {
+    // Leave arrows to widgets that use them (sliders, lists, editable text, the wrist pad).
+    if (ownsArrowKeys(event.target)) return;
+    code = ARROW_CODES[k];
+  } else if (k === " ") code = 32;
   else if (k.length === 1 && /[0-9]/.test(k)) code = k.charCodeAt(0);
   else if (k.length === 1 && /[a-z]/i.test(k)) code = k.toUpperCase().charCodeAt(0);
   if (code === null) return;
-  if (code === 32) event.preventDefault();
+  if (code === 32 || k in ARROW_CODES) event.preventDefault(); // no page scroll
   pressKey(code, keyName(code));
 });
 
-// Space, the digits, M and R are control keys, so no button or drawer may hold keyboard focus
+function ownsArrowKeys(target) {
+  if (!(target instanceof Element)) return false;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  return !!target.closest(
+    "#wrist-pad, [role=slider], [role=listbox], [role=menu], [role=menubar], [role=radiogroup], [role=tablist], [role=grid], [role=tree], [role=spinbutton]"
+  );
+}
+
+// Space, the arrows, the digits, M and R are control keys, so no button or drawer may hold keyboard focus
 // after a mouse click, and a Space release must never activate a focused control.
 // Enter still activates whatever has focus.
 document.addEventListener("mousedown", (event) => {
@@ -1637,6 +1768,7 @@ window.addEventListener("resize", () => ui.telemetry && updateSparks(ui.telemetr
 
 initViewBar();
 initDummyControls();
+initCalibControls();
 buildKeyBar();
 setLink(false);
 $("live-text").textContent = "Connecting";

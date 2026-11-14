@@ -4,7 +4,8 @@ One port serves the page (``GET /`` and the flat files in ``web/``) and the ``/w
 Server -> client: telemetry JSON (text) and camera frames (binary: byte 0 = feed slot,
 byte 1 = ``layout_id % 256``, then one JPEG). Client -> server: ``{"type": "key", "code": n}``
 (GLFW key codes), handed to ``on_key``; ``{"type": "reconnect", "target": t}`` for ``t`` in
-``RECONNECT_TARGETS``, handed to ``on_reconnect`` (which must not block).
+``RECONNECT_TARGETS``, handed to ``on_reconnect`` (which must not block); ``view``, ``fault``,
+``dummy`` and ``calib`` messages, handed whole to ``on_client_message``.
 
 Publishing is thread-safe and never blocks the caller. The server keeps the latest telemetry
 and the latest frame per slot: a new client (or a page reload) gets them immediately, and a
@@ -244,7 +245,7 @@ class ConsoleServer:
                 except Exception:
                     logger.exception("console: on_key failed")
             return
-        if mtype in ("view", "fault", "dummy") and self.on_client_message is not None:
+        if mtype in ("view", "fault", "dummy", "calib") and self.on_client_message is not None:
             try:
                 self.on_client_message(msg)
             except Exception:

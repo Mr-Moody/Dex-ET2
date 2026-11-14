@@ -20,6 +20,8 @@ from teleop.atc.hud import (
     hud_overlays,
 )
 from teleop.atc.stage import (
+    BAY_KEYS,
+    CONTROL_KEYS_HINT,
     KEYMAP,
     STAGE_SEED,
     AudioCues,
@@ -184,8 +186,15 @@ def test_hud_formats_bay_states_confidence_and_fifo_queue() -> None:
 
 
 def test_keymap_and_console_merge_mirror_hardware() -> None:
-    assert KEYMAP[ord("1")] is StageAction.SELECT_BAY_1
-    assert KEYMAP[ord("4")] is StageAction.SELECT_BAY_4
+    # Arrows move between the camera panels like the console joystick (GLFW codes); the
+    # digits select a bay directly.
+    assert KEYMAP[263] is StageAction.MOVE_LEFT
+    assert KEYMAP[262] is StageAction.MOVE_RIGHT
+    assert KEYMAP[265] is StageAction.MOVE_UP
+    assert KEYMAP[264] is StageAction.MOVE_DOWN
+    assert all(BAY_KEYS[b] == ord(str(b)) for b in range(1, 5)) and len(BAY_KEYS) == 4
+    assert all(KEYMAP[BAY_KEYS[b]] is StageAction(f"select_bay_{b}") for b in BAY_KEYS)
+    assert "arrow" in CONTROL_KEYS_HINT and "1-4" in CONTROL_KEYS_HINT
     assert KEYMAP[32] is StageAction.CLUTCH
     assert KEYMAP[ord("F")] is StageAction.ARM_BAY1_FLAP
     assert KEYMAP[ord("G")] is StageAction.ARM_BAY2_FLAP

@@ -256,7 +256,8 @@ key's outcome in its bottom-right overlay.
 
 | Key | Action |
 |---|---|
-| `1`–`4` | Select a bay |
+| `←` `→` `↑` `↓` | Move the selection one camera panel (Bay 1 \| Bay 2 over Bay 3 \| Bay 4), like the console joystick |
+| `1`–`4` | Select that bay directly |
 | `SPACE` | Toggle the clutch (rescue) |
 | `F` | Arm the Bay 1 flap jam (causes a contact stall) |
 | `G` | Arm the Bay 2 flap jam |
@@ -271,7 +272,7 @@ hand instead (or the scripted rescue plays, if the Gloves light is not green at 
 A typical manual run:
 
 1. Press `F` and wait for Bay 1 to stall and queue.
-2. Press `1`, then `SPACE`, to rescue it. Press `SPACE` again once the bolt is clear.
+2. Press `←` (Bay 1), then `SPACE`, to rescue it. Press `SPACE` again once the bolt is clear.
 3. Watch the skill fit, the 3/3 gate and Bay 2 clearing itself.
 4. Press `P` to see the refusal.
 

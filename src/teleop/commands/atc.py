@@ -71,8 +71,10 @@ from teleop.net.hotspot import HotspotConfigError
 from teleop.protocols import InputSource, Retargeter, WristSource
 from teleop.registry import RETARGETERS, WRISTS, resolve
 from teleop.retarget.calibration import Calibration
-from teleop.sim.hands import REPO_ROOT, load_hand
+from teleop.retarget.direct import DirectRetargeter
+from teleop.sim.hands import REPO_ROOT, HandSpec, load_hand
 from teleop.sim.loop import FixedRateLoop
+from teleop.types import Side
 from teleop.unoq.client import UnoQClient
 from teleop.unoq.dmp import HAND_ACTUATORS
 from teleop.unoq.mcu_bridge import McuConsoleBridge
@@ -194,10 +196,32 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
 class GloveOperator:
     """Right-hand glove frames -> ``OperatorInput`` (wrist pose + hand targets by name)."""
 
-    def __init__(self, source: InputSource, wrist: WristSource, retargeter: Retargeter) -> None:
+    def __init__(
+        self,
+        source: InputSource,
+        wrist: WristSource,
+        retargeter: Retargeter,
+        *,
+        hand: HandSpec | None = None,
+        ctrlrange: Mapping[str, tuple[float, float]] | None = None,
+    ) -> None:
         self.source = source
         self.wrist = wrist
         self.retargeter = retargeter
+        self.hand = hand
+        self.ctrlrange = dict(ctrlrange) if ctrlrange is not None else None
+
+    def recalibrate(self, calib: Calibration) -> set[tuple[Side, str]]:
+        """Swap in a retargeter built from ``calib``; returns the actuators left on defaults.
+
+        One reference assignment, so the control thread's next ``latest`` uses either the old
+        or the new retargeter, never a half-built one.
+        """
+        if self.hand is None or self.ctrlrange is None:
+            raise RuntimeError("glove operator was built without its hand spec and ctrlrange")
+        retargeter = DirectRetargeter(self.hand, {"right": self.ctrlrange}, calib)
+        self.retargeter = cast("Retargeter", retargeter)
+        return set(retargeter.degenerate)
 
     @classmethod
     def build(
@@ -228,6 +252,8 @@ class GloveOperator:
             source,
             cast("WristSource", wrist_cls(WristConfig(mode=cfg.wrist_mode))),
             cast("Retargeter", retarget_cls(hand, {"right": ranges}, calib)),
+            hand=hand,
+            ctrlrange=ranges,
         )
 
     def latest(self) -> OperatorInput | None:
@@ -691,6 +717,7 @@ def _run(
                         steps=cfg.steps,
                         health=health,
                         dummy=dummy,
+                        calib=_console_calibrator(cfg, glove),
                     )
                 except ConsolePortInUse as exc:
                     print(f"teleop atc: console port {exc.port} in use (try --console-port)")
@@ -709,6 +736,27 @@ def _run(
         took = f"{r.end_s - r.start_s:5.1f} s" if r.end_s is not None else "   --  "
         print(f"beat {r.name:<30} {'ok' if r.ok else 'FAILED':<6} {took}", flush=True)
     return 0 if director.ok else 1
+
+
+CONSOLE_CALIB_PATH = REPO_ROOT / "data" / "calib" / "atc.json"
+
+
+def _console_calibrator(
+    cfg: AtcConfig, glove: GloveOperator | ScriptedGlove | SelectingGlove | None
+) -> Any:
+    """The console's glove calibration wizard, or ``None`` without a real glove operator."""
+    inner = glove.glove if isinstance(glove, SelectingGlove) else glove
+    if not isinstance(inner, GloveOperator) or inner.hand is None:
+        return None
+    from teleop.console.calib import GloveCalibrator
+
+    return GloveCalibrator(
+        inner.hand,
+        inner.source,
+        inner.recalibrate,
+        persist_path=CONSOLE_CALIB_PATH,
+        loaded_from=cfg.calibration,
+    )
 
 
 def _run_viewer(

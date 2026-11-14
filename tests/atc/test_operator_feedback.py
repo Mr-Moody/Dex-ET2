@@ -77,6 +77,7 @@ def test_key_names() -> None:
     assert key_name(SPACE) == "SPACE"
     assert key_name(ord("F")) == "F"
     assert key_name(ord("1")) == "1"
+    assert [key_name(c) for c in (263, 262, 265, 264)] == ["LEFT", "RIGHT", "UP", "DOWN"]
     assert key_name(300) == "key 300"
 
 
@@ -114,6 +115,24 @@ def test_presses_outside_a_rescue_are_explained(controller: StageController) -> 
 
 
 @needs_models
+def test_arrow_keys_move_between_the_camera_panels(controller: StageController) -> None:
+    """Arrows move the selection one panel (Bay 1 | Bay 2 over Bay 3 | Bay 4), like the stick."""
+    ctl = controller
+    left, right, down = 263, 262, 264
+
+    key, text, level = _press(ctl, right)  # nothing selected yet: start from Bay 1
+    assert (key, level) == ("RIGHT", "ok") and text.startswith("Bay 2 selected")
+    _, text, level = _press(ctl, right)
+    assert level == "warn" and "Bay 2 is already in the right column" in text
+    _, text, level = _press(ctl, left)
+    assert level == "ok" and text.startswith("Bay 1 selected")
+    assert ctl.console.selected_bay == 1
+    _, text, level = _press(ctl, down)  # Bay 3 is not built in this simulation
+    assert level == "warn" and "Bay 3" in text
+    assert ctl.console.selected_bay == 1
+
+
+@needs_models
 def test_rescue_presses_point_at_the_bay_waiting(controller: StageController) -> None:
     ctl = controller
     co = ctl.coordinator
@@ -131,8 +150,8 @@ def test_rescue_presses_point_at_the_bay_waiting(controller: StageController) ->
     _, text, level = _press(ctl, SPACE)  # release again
     assert level == "info"
 
-    _, text, level = _press(ctl, "1")
-    assert level == "ok" and "Engage the clutch" in text
+    key, text, level = _press(ctl, 263)  # Left arrow moves from Bay 2 to Bay 1
+    assert key == "LEFT" and level == "ok" and "Engage the clutch" in text
     _, text, level = _press(ctl, SPACE)
     assert level == "ok" and "gloves now drive Bay 1" in text
     _, text, level = _press(ctl, SPACE)
