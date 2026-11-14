@@ -367,4 +367,8 @@ def main(
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["watch"]:  # T-211: live event printout (teleop.copilot.watch)
+        from teleop.copilot.watch import watch_main
+
+        raise SystemExit(watch_main(sys.argv[2:]))
     raise SystemExit(main())
