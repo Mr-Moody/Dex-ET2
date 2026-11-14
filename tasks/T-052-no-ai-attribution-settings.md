@@ -1,7 +1,7 @@
 ---
 id: T-052
 title: Disable AI attribution in Claude Code settings and the plan
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: chore/no-ai-attribution-settings
 depends_on: []
