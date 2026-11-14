@@ -1,12 +1,12 @@
 ---
 id: T-174
 title: Fleet ops console web front end and preview server
-status: todo
-owner: null
-branch: null
+status: in_review
+owner: lead-laptop
+branch: feat/console-frontend
 depends_on: [T-172]
 plan: docs/superpowers/plans/2026-11-14-fleet-ops-console.md#task-t-174-console-front-end
-claimed_at: null
+claimed_at: '2026-11-14T05:44:19+00:00'
 ---
 
 **Fleet ops console, front end. Edit only `src/teleop/console/web/*`, `scripts/console_preview.py`, `tests/console/test_web_assets.py`.**
