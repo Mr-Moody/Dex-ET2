@@ -51,6 +51,10 @@
       <button type="button" class="vbtn" id="view-auto" title="Grid normally; a bay under rescue takes the stage with its close-up views">Auto focus</button>
       <button type="button" class="vbtn" id="view-overview" title="Mezzanine camera across the warehouse: 4 segmented conveyors and all 4 arms">Plant overview</button>
     </div>
+    <button type="button" class="vbtn vbtn--solo bar__data" id="open-data" aria-pressed="false"
+      title="Record episodes and manage saved recordings">
+      <span class="rec-dot" id="data-rec-dot" hidden aria-hidden="true"></span><span id="open-data-text">Data</span>
+    </button>
     <div class="bar__live">
       <button type="button" class="rchip" id="recovery-chip" data-tone="dmp" hidden
         title="Recovery backend for the next stall. Press M to switch.">
@@ -180,7 +184,26 @@
     </aside>
   </main>
 
+  <main class="datapage" id="page-data" aria-labelledby="data-title">
+    <div class="datapage__inner">
+      <header class="datapage__head">
+        <div>
+          <h2 id="data-title">Data collection</h2>
+          <p class="datapage__sub" id="data-sub">Every rescue and autonomous recovery while recording becomes a LeRobot episode.</p>
+        </div>
+        <div class="datapage__ctl">
+          <span class="datapage__timer" id="data-timer" aria-live="polite"></span>
+          <button type="button" class="actbtn rec-btn" id="data-rec" disabled>Start recording</button>
+          <button type="button" class="actbtn" id="data-back">Back to operations</button>
+        </div>
+      </header>
+      <p class="datapage__note" id="data-note" hidden></p>
+      <div class="datapage__list" id="data-list" aria-label="Recordings"></div>
+    </div>
+  </main>
+
   <script src="console.js"></script>
   <script src="health.js"></script>
+  <script src="data.js"></script>
 </body>
 </html>

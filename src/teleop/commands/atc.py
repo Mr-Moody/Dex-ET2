@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import dataclasses
 import importlib
+import importlib.util
 import logging
 import subprocess
 import threading
@@ -707,6 +708,8 @@ def _run(
             else:
                 from teleop.console.run import ConsolePortInUse, run_console
 
+                recordings = _recording_desk(cfg, controller, glove)
+                recordings.start()
                 try:
                     run_console(
                         controller,
@@ -718,10 +721,13 @@ def _run(
                         health=health,
                         dummy=dummy,
                         calib=_console_calibrator(cfg, glove),
+                        recordings=recordings,
                     )
                 except ConsolePortInUse as exc:
                     print(f"teleop atc: console port {exc.port} in use (try --console-port)")
                     return 1
+                finally:
+                    recordings.close()  # finalises a recording left running at quit
     finally:
         if dummy is not None:
             dummy.close()
@@ -739,6 +745,35 @@ def _run(
 
 
 CONSOLE_CALIB_PATH = REPO_ROOT / "data" / "calib" / "atc.json"
+CONSOLE_EPISODES_ROOT = REPO_ROOT / "data" / "episodes"
+
+
+def _recording_desk(
+    cfg: AtcConfig,
+    controller: StageController,
+    glove: GloveOperator | ScriptedGlove | SelectingGlove | None,
+) -> Any:
+    """Start/stop/delete episode recordings from the console's Data page."""
+    from teleop.console.recordings import RecordingDesk
+
+    co = controller.coordinator
+    unavailable: str | None = None
+    if cfg.record_episodes is not None:
+        unavailable = f"Recording every rescue to {cfg.record_episodes} (--record-episodes)"
+    elif importlib.util.find_spec("lerobot") is None:
+        unavailable = "Recording needs lerobot: run `uv sync --group train`"
+    label: str | Callable[[], str] = (
+        "glove" if isinstance(glove, GloveOperator) else rescue_label([glove])
+    )
+    if glove is None or isinstance(glove, ScriptedGlove):
+        label = "scripted"
+
+    def open_sink(folder: Path) -> Any:
+        from teleop.atc.episodes import EpisodeSink, fault_lookup
+
+        return EpisodeSink(folder, co.model, co.data, fault_lookup(controller), label)
+
+    return RecordingDesk(CONSOLE_EPISODES_ROOT, open_sink, co.set_observer, unavailable=unavailable)
 
 
 def _console_calibrator(

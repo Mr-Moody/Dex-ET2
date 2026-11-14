@@ -333,3 +333,14 @@ def test_glove_calibration_panel() -> None:
         "/* ---------------------------------------------------------------- glove calibration */"
         in _read("console.css")
     )
+
+
+def test_data_page_assets() -> None:
+    html, js = _read("index.html"), _read("data.js")
+    assert 'src="data.js"' in html
+    for token in ('id="open-data"', 'id="page-data"', 'id="data-rec"', 'id="data-list"'):
+        assert token in html, token
+    for token in ('type: "record"', '"start"', '"stop"', '"delete"', '"telemetry"', "#data"):
+        assert token in js, token
+    assert not re.search(r"https?://", js)
+    assert "data page */" in _read("console.css")

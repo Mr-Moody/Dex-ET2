@@ -29,6 +29,7 @@ from teleop.console.layout import (
     LayoutMode,
     ViewState,
 )
+from teleop.console.recordings import RecordingDesk
 from teleop.console.render import RenderWorker
 from teleop.console.server import ConsoleServer
 from teleop.console.snapshot import LatestSlot, SimSnapshot
@@ -133,6 +134,7 @@ def run_console(
     health: HealthMonitor | None = None,
     dummy: Any = None,
     calib: GloveCalibrator | None = None,
+    recordings: RecordingDesk | None = None,
 ) -> LoopStats:
     co = controller.coordinator
     bays = bays_in_model(co.model)
@@ -161,6 +163,8 @@ def run_console(
             dummy.apply_ui_message(msg)
         elif mtype == "calib" and calib is not None:
             calib.handle_message(msg)  # starts its own thread; never blocks the server
+        elif mtype == "record" and recordings is not None:
+            recordings.handle(msg)  # disk work runs on its own threads
 
     def reconnect(name: str) -> None:
         if health is not None:
@@ -192,6 +196,7 @@ def run_console(
         fps=fps,
         dummy_status=dummy.status_dict if dummy is not None else None,
         calib_status=calib.status_dict if calib is not None else None,
+        recordings_status=recordings.status if recordings is not None else None,
     )
     worker.set_view_state(view_box[0])
     worker.start()
@@ -210,6 +215,8 @@ def run_console(
                 controller.arm(bay, flap_jammed=True)
             elif kind == "pin":
                 controller.arm(bay, bolt_pinned=True)
+        if recordings is not None:
+            recordings.pump()  # observer swaps land between ticks, on this thread
         op_in = operator()
         if dummy is not None:
             op_in = dummy.step(op_in)

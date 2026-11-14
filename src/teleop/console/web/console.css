@@ -68,6 +68,7 @@ button { font-family: var(--font); }
 
 body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);  /* the bar's content never widens the page */
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .bar { grid-row: 1; }
@@ -240,6 +241,78 @@ kbd {
 .actbtn:hover { border-color: var(--text); }
 .actbtn--accent { border-color: var(--attn); background: var(--attn); color: var(--ink); }
 .actbtn--accent:hover { background: #ffd23e; border-color: #ffd23e; }
+
+/* ---------------------------------------------------------------- data page */
+
+.datapage { grid-row: 3; display: none; min-height: 0; overflow-y: auto; background: var(--base); }
+body[data-page="data"] .desk { display: none; }
+body[data-page="data"] .datapage { display: block; }
+body[data-page="data"] .bar__views { visibility: hidden; }
+.bar__data { flex: none; display: inline-flex; align-items: center; gap: 0.45rem; }
+.bar__data[aria-pressed="true"] { background: var(--hair); color: var(--text); }
+.rec-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--stalled);
+  animation: rec-blink 1.2s steps(2, start) infinite;
+}
+@keyframes rec-blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .rec-dot { animation: none; } }
+.datapage__inner { max-width: 70rem; margin: 0 auto; padding: 1.2rem 16px 2rem; }
+.datapage__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--hair);
+}
+.datapage__head h2 { font-size: var(--t-l); font-weight: 600; }
+.datapage__sub { margin-top: 0.25rem; color: var(--muted); font-size: var(--t-xs); }
+.datapage__ctl { display: flex; align-items: center; gap: 0.6rem; }
+.datapage__timer { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--stalled); font-weight: 600; }
+.rec-btn { min-height: 2.4rem; padding: 0 1.2rem; font-size: var(--t-s); }
+.rec-btn:not(.is-recording) { border-color: var(--stalled); background: var(--stalled); color: #fff; }
+.rec-btn:not(.is-recording):hover { background: #f05a5f; border-color: #f05a5f; }
+.rec-btn.is-recording { border-color: var(--text); }
+.rec-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.datapage__note { margin-top: 0.8rem; padding: 0.5rem 0.8rem; border-left: 4px solid var(--queued); background: var(--panel); font-size: var(--t-xs); }
+.datapage__list { display: grid; gap: 8px; margin-top: 1rem; }
+.datapage__empty { color: var(--muted); padding: 2rem 0; text-align: center; }
+.rec { border: 1px solid var(--hair); border-left: 5px solid var(--faint); border-radius: 4px; background: var(--panel); }
+.rec[data-state="recording"] { border-left-color: var(--stalled); }
+.rec[data-state="saving"], .rec[data-state="deleting"] { border-left-color: var(--queued); }
+.rec[data-state="saved"] { border-left-color: var(--nominal); }
+.rec > summary {
+  display: grid;
+  grid-template-columns: minmax(9rem, auto) 1fr auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+.rec > summary::-webkit-details-marker { display: none; }
+.rec__when { font-weight: 600; font-variant-numeric: tabular-nums; }
+.rec__when small { display: block; font-weight: 400; color: var(--muted); font-size: var(--t-xs); }
+.rec__sum { color: var(--muted); font-size: var(--t-xs); }
+.rec__sum b { color: var(--text); font-weight: 600; }
+.rec__id { font-family: var(--mono); color: var(--faint); margin-left: 0.6rem; }
+.rec__side { display: flex; align-items: center; gap: 0.6rem; }
+.rec__state { font-size: var(--t-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.rec[data-state="recording"] .rec__state { color: var(--stalled); }
+.rec[data-state="saving"] .rec__state, .rec[data-state="deleting"] .rec__state { color: var(--queued); }
+.rec__del { border-color: var(--hair); color: var(--muted); }
+.rec__del:hover { border-color: var(--stalled); color: var(--stalled); }
+.rec__del:disabled { opacity: 0.4; cursor: not-allowed; }
+.eps { width: 100%; border-collapse: collapse; font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.eps th { text-align: left; font-weight: 600; color: var(--muted); padding: 0.35rem 0.8rem; border-top: 1px solid var(--hair); }
+.eps td { padding: 0.3rem 0.8rem; border-top: 1px solid var(--hair); }
+.eps td.ok { color: var(--nominal); }
+.eps td.bad { color: var(--stalled); }
+.eps__none { padding: 0.5rem 0.8rem 0.7rem; color: var(--muted); font-size: var(--t-xs); border-top: 1px solid var(--hair); }
 
 /* ---------------------------------------------------------------- glove calibration */
 

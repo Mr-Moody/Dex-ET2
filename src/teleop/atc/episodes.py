@@ -102,6 +102,7 @@ class _Episode:
     bolt_x: float = 0.0
     max_tau_hand_inf: float = 0.0
     max_arm_ratio: float = 0.0
+    started_at: str = ""  # local wall time, ISO seconds: the episode list on the Data page
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,7 @@ class EpisodeSink:
             fault=self.fault_of(bay_id),
             signature_id=signature_id,
             signature=None if signature is None else signature.as_vector(),
+            started_at=datetime.now().isoformat(timespec="seconds"),
         )
 
     def on_tick(
@@ -317,7 +319,9 @@ class EpisodeSink:
             mj.mj_camlight(m, d)
             images = self._renderer.render(d, ep.bay)
             self._recorder.add_frame(f.state, f.action, images)
-        index = self._recorder.end_episode(item.meta.to_json())
+        index = self._recorder.end_episode(
+            {**item.meta.to_json(), "recorded_at": ep.started_at, "frames": len(ep.frames)}
+        )
         with self._lock:
             self._written += 1
         logger.info(
