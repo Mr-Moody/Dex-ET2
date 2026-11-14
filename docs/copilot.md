@@ -98,8 +98,6 @@ Speech uses a dedicated TTS model rather than the text models.
 
 Other models were considered and rejected for `T-210`:
 - **DeepSeek Flash and ElevenLabs** each need a second vendor key and a second client.
-- **Kimi** already backs the fleet reasoner (`teleop.reasoning`). Using another model family here
-  gives an independent second opinion.
 
 `T-214`'s OpenAI-compatible client can point at other providers later without code changes.
 

@@ -117,7 +117,7 @@ def _view() -> HudView:
         rescue=RescueStatus(bay_id=1, clutch_engaged=True, elapsed_s=7.25),
         gate=GateStatus(fit_ms=11.4, passed=3, total=3, elapsed_s=0.28, ok=True),
         compliance="SOLANA VALIDATION_GATE bay 1 #3f2a9c1e0b7d [anchored]",
-        reasoning="NEMOTRON bay 1: Novel jam, operator rescue requested",
+        reasoning="TRIAGE bay 1: Novel jam, operator rescue requested",
         beat="3 Operator rescue",
         unoq="UNO Q loopback",
     )
@@ -155,7 +155,7 @@ def test_hud_formats_bay_states_confidence_and_fifo_queue() -> None:
         "QUEUE",
         "UNO Q DMP fit: 11.4 ms",
         "SOLANA VALIDATION_GATE",
-        "NEMOTRON bay 1",
+        "TRIAGE bay 1",
         "3 Operator rescue",
     ):
         assert needle in text
@@ -304,7 +304,7 @@ def test_atc_command_headless_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     from teleop.commands import atc
 
     monkeypatch.chdir(tmp_path)  # compliance audit log lands in tmp_path/outputs
-    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "UNOQ_HOST"):
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "UNOQ_HOST"):
         monkeypatch.delenv(var, raising=False)
     rc = atc.main(
         [
@@ -398,7 +398,7 @@ def test_cli_seed_reaches_coordinator(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(StageController, "build", staticmethod(spy))
     monkeypatch.chdir(tmp_path)
-    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "UNOQ_HOST"):
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "UNOQ_HOST"):
         monkeypatch.delenv(var, raising=False)
     base = [
         "--headless",

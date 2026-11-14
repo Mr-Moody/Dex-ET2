@@ -1,4 +1,4 @@
-"""Fleet reasoning contract (spec 6.2). T-161 implements a Verda Nemotron reasoner against this.
+"""Fleet reasoning contract (spec 6.2). ``TriageReasoner`` implements it.
 
 Do not change these signatures without updating every reasoner.
 """

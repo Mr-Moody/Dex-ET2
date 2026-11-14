@@ -23,8 +23,7 @@ cycles it live. ``--record-episodes DIR`` saves every recovery as a LeRobot epis
 when used, so the default run needs no torch.
 
 Hooks come from the environment (``.env``): ``SOLANA_RPC_URL``/``SOLANA_KEYPAIR_PATH`` for the
-compliance chain and ``VERDA_API_KEY``/``VERDA_BASE_URL``/``NEMOTRON_MODEL`` for the reasoner.
-Both fall back to local/offline modes.
+compliance chain, falling back to a local audit log. The fleet reasoner is the offline triage.
 """
 
 from __future__ import annotations
@@ -427,14 +426,14 @@ def _run_booth(
 ) -> int:
     """Build the stage, the operator and (unless headless) the health checks, then run."""
     from teleop.compliance.solana import SolanaComplianceSink
-    from teleop.reasoning.nemotron import VerdaNemotronReasoner
+    from teleop.reasoning.triage import TriageReasoner
 
     unoq = SwitchableUnoQ(
         UnoQClient.connect_or_mock(cfg.unoq_host, cfg.unoq_udp_port, cfg.unoq_tcp_port)
     )
     stack.callback(unoq.close)
     sink = SolanaComplianceSink.from_env()
-    reasoner = VerdaNemotronReasoner.from_env()
+    reasoner = TriageReasoner()
     speak = cfg.audio and not cfg.headless
     hardware = _hardware_consoles(cfg, unoq)
     suffix = f" | compliance {sink.mode} | reasoner {reasoner.mode}"

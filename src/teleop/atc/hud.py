@@ -87,7 +87,7 @@ class HudView:
     rescue: RescueStatus = field(default_factory=RescueStatus)
     gate: GateStatus = field(default_factory=GateStatus)
     compliance: str = "SOLANA  no events yet"
-    reasoning: str = "NEMOTRON  idle"
+    reasoning: str = "TRIAGE  idle"
     beat: str = ""
     unoq: str = ""
     actions: tuple[ActionNote, ...] = ()  # recent key outcomes, oldest first

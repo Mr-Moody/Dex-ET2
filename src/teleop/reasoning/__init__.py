@@ -1,6 +1,6 @@
-"""Fleet reasoning co-pilot hooks (Verda Nemotron track, T-161)."""
+"""Fleet reasoning hooks: the ``FleetReasoner`` contract and the offline triage reasoner."""
 
-from teleop.reasoning.nemotron import VerdaNemotronPlaceholder
 from teleop.reasoning.protocol import FleetReasoner, ReasoningContext, ReasoningVerdict
+from teleop.reasoning.triage import TriageReasoner
 
-__all__ = ["FleetReasoner", "ReasoningContext", "ReasoningVerdict", "VerdaNemotronPlaceholder"]
+__all__ = ["FleetReasoner", "ReasoningContext", "ReasoningVerdict", "TriageReasoner"]
