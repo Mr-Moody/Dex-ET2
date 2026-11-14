@@ -480,7 +480,9 @@ class AtcCoordinator:
         start = compose_pose(wfl, self.routine.pose_at(0.0))
         here = rig.wrist_pose()
         lift_z = rig.world_latch().position[2] + LIFT_HEIGHT_M
-        fingers = dict(self.routine.fingers)
+        # Every LEAP actuator, not just the routine's: clutch release pins all 16 targets to the
+        # rescue posture, and a stale one (e.g. mf_rot_act) would rest a finger on the bolt.
+        fingers = {name: 0.0 for name in LEAP_ACTUATORS} | dict(self.routine.fingers)
         rig.ik.reset()
         bay.approach = ApproachPlan(here, [lifted(here, lift_z), lifted(start, lift_z), start])
         bay.pending_latch = (flap_jammed, bolt_pinned)
