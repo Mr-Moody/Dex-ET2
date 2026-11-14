@@ -15,56 +15,50 @@ Everything runs locally on the laptop in one Python process. The only exception 
 optional real UNO Q board on the network. MuJoCo does all the physics and all the 3D rendering.
 The browser is only a display and a keyboard.
 
+**Control loop.** Glove input drives a 60 Hz MuJoCo loop. Side services run on their own
+threads (or on the UNO Q board), so the physics never waits on them.
+
 ```mermaid
-flowchart LR
-    subgraph IN["Operator input"]
-        direction TB
-        GLOVES["Rokoko gloves<br/>(or synthetic / replay)"]
-        RET["Retargeting +<br/>relative clutch"]
-        GLOVES -->|"Studio JSON over UDP"| RET
-    end
+flowchart TD
+    GLOVES["Rokoko gloves<br/>(or synthetic / replay)"]
+    RET["Retargeting + relative clutch"]
+    COORD["AtcCoordinator · 60 Hz<br/>stall detection · rescue queue · torque tube"]
+    PHYS[("MuJoCo physics<br/>Bays 1–2: Panda + LEAP")]
+    GATE["SkillValidator<br/>3 headless rollouts"]
+    UNOQ["UNO Q edge node or mock<br/>filter · classifier · DMP fit"]
+    SOL["Compliance sink<br/>hash-chained log → Solana"]
+    KIMI["Reasoner<br/>Verda · Kimi K3.1 Pro"]
 
-    subgraph MAIN["Main thread · 60 Hz"]
-        direction TB
-        STAGE["StageController<br/>(script, keys)"]
-        COORD["AtcCoordinator<br/>C(t) stalls · rescue queue · torque tube"]
-        PHYS[("MuJoCo physics<br/>Bays 1–2: Panda + LEAP")]
-        GATE["SkillValidator<br/>3 headless rollouts"]
-        STAGE --> COORD
-        COORD <--> PHYS
-        COORD --> GATE
-    end
-
-    subgraph SIDE["Off the control loop"]
-        direction TB
-        UNOQ["UNO Q edge node (or mock)<br/>1-Euro · Mahalanobis · RBF-DMP"]
-        SOL["Compliance sink<br/>hash-chained log → Solana"]
-        KIMI["Reasoner<br/>Verda · Kimi K3.1 Pro"]
-    end
-
-    subgraph VIEW["Display"]
-        direction TB
-        SNAP["SimSnapshot<br/>(latest-value slot)"]
-        REND["Render thread<br/>offscreen MuJoCo · CCTV → JPEG"]
-        SRV["Console server<br/>HTTP + WebSocket :8765"]
-        WEB["Browser console<br/>HTML · CSS · JS"]
-        SNAP --> REND --> SRV
-        SRV -->|"JPEG frames + telemetry"| WEB
-        WEB -->|"key presses"| SRV
-    end
-
-    RET -->|"operator input"| STAGE
+    GLOVES -->|"Studio JSON over UDP"| RET
+    RET --> COORD
+    COORD <--> PHYS
+    COORD --> GATE
     COORD <-->|"UDP / TCP"| UNOQ
     COORD -->|"events"| SOL
     COORD -->|"contexts"| KIMI
-    COORD -->|"after each tick"| SNAP
-    SRV -->|"keys"| STAGE
 ```
 
-The physics never waits on the side services or the display. The UNO Q, compliance sink and
-reasoner run on their own threads or devices and fall back to local modes when unavailable. The
-render thread draws from its own copy of the model, and Bays 3–4 replay a canned background
-cycle.
+**Display pipeline.** After every tick the loop drops a snapshot. A separate render thread draws
+the camera feeds from it, and the browser only shows the resulting images.
+
+```mermaid
+flowchart TD
+    LOOP["60 Hz control loop"]
+    SNAP["SimSnapshot<br/>latest-value slot"]
+    REND["Render thread<br/>own model copy · offscreen MuJoCo<br/>per-bay CCTV → JPEG"]
+    SRV["Console server<br/>HTTP + WebSocket on :8765"]
+    WEB["Browser console<br/>plain HTML · CSS · JS"]
+
+    LOOP -->|"after each tick"| SNAP
+    SNAP --> REND
+    REND --> SRV
+    SRV -->|"JPEG frames + telemetry"| WEB
+    WEB -->|"key presses"| SRV
+    SRV -->|"keys"| LOOP
+```
+
+The UNO Q, compliance sink and reasoner fall back to local modes when unavailable. Bays 3–4
+replay a canned background cycle rather than running live physics.
 
 How the coordinator handles a stall:
 
