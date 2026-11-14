@@ -152,7 +152,10 @@ class UnoQClient:
                     self._tcp.settimeout(self.timeout_s)
         if not line:
             raise UnoQTransportError(f"{message.get('op')}: connection closed")
-        reply = P.decode(line)
+        try:
+            reply = P.decode(line)
+        except ValueError as exc:  # ProtocolError or bad UTF-8: a truncated or garbled reply
+            raise UnoQTransportError(f"{message.get('op')}: bad reply ({exc})") from exc
         if not reply.get("ok"):
             raise UnoQError(str(reply.get("error", "request failed")))
         return reply

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 from collections.abc import Iterator
 from typing import cast
@@ -109,6 +110,26 @@ def test_error_reply_on_board_propagates_without_swap(board: UnoQServer) -> None
         assert unoq.current.tcp_port == board.tcp_port
     finally:
         unoq.close()
+
+
+class _TruncatingBoard(UnoQServer):
+    """A board that dies mid-reply: half a JSON line, then the connection closes."""
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        with conn, conn.makefile("rb") as reader:
+            if reader.readline():
+                conn.sendall(b'{"ok": true, "matched_sig')
+
+
+def test_truncated_board_reply_fails_over_to_loopback() -> None:
+    with _TruncatingBoard(host="127.0.0.1", udp_port=0, tcp_port=0).start() as broken:
+        unoq = SwitchableUnoQ(_client(broken))
+        try:
+            match, _ = unoq.classify_stall(SKU, Z)  # retried on the loopback node
+            assert unoq.is_mock is True
+            assert match.is_ood is True  # the fresh loopback node knows no skills
+        finally:
+            unoq.close()
 
 
 def test_replaying_skills_twice_adds_no_duplicate_samples(board: UnoQServer) -> None:
