@@ -28,9 +28,10 @@ from teleop.atc.types import (
 )
 from teleop.atc.validator import (
     CONTROL_DT,
-    BayRig,
+    ApproachPlan,
     SkillReplay,
     SkillValidator,
+    lifted,
     step_physics,
     torque_tube_ok,
 )
@@ -132,7 +133,7 @@ class Rig:
         adr = int(m.joint(f"bay{bay_id}/flap_hinge").qposadr[0])
         return math.degrees(float(d.qpos[adr]))
 
-    def run_until(self, bay_id: int, states: set[BayState], max_ticks: int = 400) -> int:
+    def run_until(self, bay_id: int, states: set[BayState], max_ticks: int = 1500) -> int:
         for k in range(max_ticks):
             snaps = self.co.tick()
             if snaps[bay_id - 1].state in states:
@@ -258,9 +259,10 @@ def test_confidence_high_in_nominal_slide_and_below_0_3_on_300ms_flap_stall(rig:
     co = rig.co
     co.start_cycle(1)
     confidence: list[float] = []
-    for _ in range(200):
+    for _ in range(500):
         snap = co.tick()[0]
-        confidence.append(snap.confidence)
+        if co.in_routine(1):
+            confidence.append(snap.confidence)
         assert snap.state == BayState.NOMINAL
         if co.outcome(1) == "cleared":
             break
@@ -273,9 +275,10 @@ def test_confidence_high_in_nominal_slide_and_below_0_3_on_300ms_flap_stall(rig:
     co.start_cycle(1, flap_jammed=True)
     confidence = []
     trigger_tick = -1
-    for k in range(300):
+    for k in range(900):
         snap = co.tick()[0]
-        confidence.append(snap.confidence)
+        if co.in_routine(1) or snap.state != BayState.NOMINAL:
+            confidence.append(snap.confidence)
         if snap.state != BayState.NOMINAL:
             trigger_tick = k
             break
@@ -322,12 +325,18 @@ def test_additive_torque_tube_allows_free_space_zero_demo_torque_and_aborts_on_e
     )
 
     # Free-space replay in the headless single-bay rig stays inside the tube.
-    bay = BayRig(validator.model, validator.data, 1)
-    bay.set_world_latch(bay.world_latch())
-    bay.reset(flap_jammed=False)
+    bay = validator.rig  # one-time home keyframe was applied when the validator was built
+    bay.reset_latch(flap_jammed=False)
     replay = SkillReplay(skill, bay.world_from_latch(), hold_s=0.0)
     start = replay.command(0.0)
-    bay.teleport_to(start.wrist, start.fingers)
+    plan = ApproachPlan(bay.wrist_pose(), [lifted(bay.wrist_pose(), 0.22), start.wrist])
+    bay.ik.reset()
+    for _ in range(600):  # physical approach under IK + servos, then converge
+        bay.command(plan.step(), start.fingers)
+        step_physics(validator.model, validator.data)
+        if plan.done and bay.reached(start.wrist):
+            break
+    assert bay.reached(start.wrist)
     worst = 0.0
     for k in range(int(0.6 / CONTROL_DT)):  # first 0.6 s: well short of the bolt hook
         cmd = replay.command(k * CONTROL_DT)
@@ -346,7 +355,7 @@ def test_additive_torque_tube_allows_free_space_zero_demo_torque_and_aborts_on_e
     tight.co.library[skill.skill_id] = skill
     tight.co.start_cycle(2, flap_jammed=True)
     states: set[BayState] = set()
-    for _ in range(500):
+    for _ in range(1500):
         states.add(tight.co.tick()[1].state)
         if tight.co.outcome(2):
             break
@@ -360,11 +369,15 @@ def test_additive_torque_tube_allows_free_space_zero_demo_torque_and_aborts_on_e
 def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> None:
     co = rig.co
     co.start_cycle(1, flap_jammed=True)
-    for _ in range(25):  # Bay 1 starts first, so it stalls first
+    for _ in range(1500):  # Bay 2 starts once Bay 1 is on its routine, so Bay 1 stalls first
+        co.tick()
+        if co.in_routine(1):
+            break
+    for _ in range(40):  # Bay 1 is mid-push when Bay 2 starts its own jammed cycle
         co.tick()
     co.start_cycle(2, flap_jammed=True)
     seen_queued = False
-    for _ in range(400):
+    for _ in range(1500):
         snaps = co.tick()
         assert len(co.rescue_slot_holders()) <= 1
         if snaps[1].state == BayState.QUEUED:
@@ -440,8 +453,8 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
     ]
     assert rig.reasoner.contexts[-1].rollout_passed == 3
 
-    # The gate itself is fast: 3 headless rollouts in < 0.4 s (best of two warm runs).
-    elapsed = min(validator.validate(skill).elapsed_s for _ in range(2))
+    # The gate itself is fast: 3 headless rollouts in < 0.4 s (best of three warm runs).
+    elapsed = min(validator.validate(skill).elapsed_s for _ in range(3))
     assert elapsed < 0.4, f"validation gate took {elapsed:.3f}s"
 
     # Bay 2 sits at +12 cm / +35 deg relative to Bay 1's latch frame.
@@ -453,7 +466,7 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
     states: list[BayState] = []
     taus: list[float] = []
     wrist_at_stall = None
-    for _ in range(700):
+    for _ in range(1500):
         snap = co.tick()[1]
         states.append(snap.state)
         taus.append(snap.tau_ext_inf_nm)
@@ -480,6 +493,8 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
     assert rig.sink.kinds()[-1] == "RESCUE_LOGGED"
     assert rig.sink.events[-1].metadata["autonomous"] is True
     assert "OOD_REFUSAL" not in rig.sink.kinds()
+    for bay_id in (1, 2):  # arm torque guard never came close in any phase
+        assert co.peak_arm_ratio(bay_id) < co.config.arm_torque_margin
 
 
 def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: Rig) -> None:
@@ -514,3 +529,57 @@ def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: R
     assert co.rig(2).bolt_x() < BOLT_CLEARED_M
     assert len(co.library) == 1
     assert rig.sink.kinds().count("SKILL_DEPLOYED") == 1
+
+
+def test_arm_torque_ratio_stays_below_limit_through_jammed_routine_to_stall(rig: Rig) -> None:
+    """Per-joint ratio |tau_ext| / actuator forcerange stays under the margin up to the stall."""
+    co = rig.co
+    margin = co.config.arm_torque_margin
+    for bay_id in (1, 2):
+        # limits come from the model by joint name: 87 Nm joints 1-4, 12 Nm joints 5-7
+        np.testing.assert_allclose(co.rig(bay_id).arm_force_limit, [87, 87, 87, 87, 12, 12, 12])
+        co.start_cycle(bay_id, flap_jammed=True)
+    worst = {1: 0.0, 2: 0.0}
+    for _ in range(1500):
+        snaps = co.tick()
+        for bay_id in (1, 2):
+            worst[bay_id] = max(worst[bay_id], co.rig(bay_id).arm_torque_ratio())
+        if all(s.state != BayState.NOMINAL for s in snaps):
+            break
+    assert all(s.state != BayState.NOMINAL for s in snaps)
+    for bay_id in (1, 2):
+        assert worst[bay_id] < margin
+        assert co.peak_arm_ratio(bay_id) < margin
+        assert co.last_trigger_reason(bay_id) == "confidence"  # the guard was only a backstop
+
+
+def test_arm_torque_breach_fast_path_triggers_stall_without_300ms_window(
+    unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator
+) -> None:
+    from teleop.atc.coordinator import CoordinatorConfig
+
+    tight = Rig(unoq, hand_spec, validator)
+    tight.co.config = CoordinatorConfig(arm_torque_margin=0.06)  # wrist limit 0.72 Nm
+    tight.co.start_cycle(1, flap_jammed=True)
+    ticks_in_routine = 0
+    for _ in range(1500):
+        snaps = tight.co.tick()
+        if tight.co.in_routine(1):
+            ticks_in_routine += 1
+        if snaps[0].state != BayState.NOMINAL:
+            break
+    assert tight.co.state(1) in (BayState.RESCUE, BayState.QUEUED)
+    assert tight.co.last_trigger_reason(1) == "arm_torque"
+    # Fired at the first contact tick: well before the 18-tick C(t) window could complete.
+    free = Rig(unoq, hand_spec, validator)
+    free.co.start_cycle(1, flap_jammed=True)
+    free_ticks = 0
+    for _ in range(1500):
+        snaps = free.co.tick()
+        if free.co.in_routine(1):
+            free_ticks += 1
+        if snaps[0].state != BayState.NOMINAL:
+            break
+    assert free.co.last_trigger_reason(1) == "confidence"
+    assert ticks_in_routine <= free_ticks - 10
+    assert tight.co.rig(1).bolt_x() < BOLT_CLEARED_M

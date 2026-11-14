@@ -34,6 +34,7 @@ from teleop.sim.bays import (
     build_single_bay_scene,
     latch_world_pose,
     reset_robot_home,
+    wrist_pose_over_latch,
 )
 from teleop.sim.hands import HandSpec
 from teleop.sim.ik import PandaDiffIK
@@ -43,6 +44,7 @@ from teleop.types import Pose
 from teleop.unoq.dmp import (
     LEAP_ACTUATORS,
     compose_pose,
+    evaluate_latch_frame,
     evaluate_rbf_dmp,
     mat_to_quat,
     quat_to_mat,
@@ -63,6 +65,14 @@ CONTROL_DT = SUBSTEPS / PHYSICS_HZ
 TAU_MARGIN_NM = 3.5
 TAU_HARD_MAX_NM = 12.0
 JOINT_LIMIT_TOL_RAD = 0.02
+# Fraction of each Panda joint's actuator force limit that the arm may load before a breach.
+ARM_TORQUE_MARGIN = 0.8
+APPROACH_SPEED_MPS = 0.4
+COARSE_FACTOR = 2  # approach-only timestep multiplier (free space, no contacts)
+SETTLE_MAX_TICKS = 300  # 1.5 s to converge on an approach target
+APPROACH_ROT_SPEED = 1.5  # rad/s
+LIFT_HEIGHT_M = 0.14  # wrist height above the latch origin for free-space transits
+PRE_APPROACH_M = 0.04  # DMP pre-approach pose: this far above the DMP start, latch +Z
 
 # (dx m, dy m, dyaw deg) in the bay-local latch frame, spec 4.4.
 PERTURBATIONS_DEG: tuple[tuple[float, float, float], ...] = (
@@ -119,8 +129,65 @@ def torque_tube_ok(
 # --------------------------------------------------------------------------- bay rig
 
 
+class ApproachPlan:
+    """Rate-limited free-space path through world wrist waypoints (smoothstep per segment).
+
+    Segment durations come from ``speed`` (m/s) and ``rot_speed`` (rad/s), so the arm always
+    moves under IK and the position servos, never by kinematic placement. ``index`` is the
+    segment being executed (``len(waypoints)`` once finished).
+    """
+
+    def __init__(
+        self,
+        start: Pose,
+        waypoints: Sequence[Pose],
+        speed: float = APPROACH_SPEED_MPS,
+        rot_speed: float = APPROACH_ROT_SPEED,
+    ) -> None:
+        self._segments: list[tuple[Pose, Pose, float]] = []
+        prev = start
+        for wp in waypoints:
+            dist = float(np.linalg.norm(pose_position(wp) - pose_position(prev)))
+            ra, rb = quat_to_mat(prev.orientation), quat_to_mat(wp.orientation)
+            ang = float(np.linalg.norm(so3_log(ra.T @ rb)))
+            dur = max(dist / speed, ang / rot_speed, CONTROL_DT)
+            self._segments.append((prev, wp, dur))
+            prev = wp
+        self.index = 0
+        self._t = 0.0
+        self.last = start
+
+    @property
+    def done(self) -> bool:
+        return self.index >= len(self._segments)
+
+    def step(self) -> Pose:
+        if self.done:
+            return self.last
+        a, b, dur = self._segments[self.index]
+        self._t = min(self._t + CONTROL_DT, dur)
+        u = self._t / dur
+        self.last = blend_pose(a, b, u * u * (3.0 - 2.0 * u))
+        if self._t >= dur:
+            self.index += 1
+            self._t = 0.0
+        return self.last
+
+
+def lifted(pose: Pose, z_world: float) -> Pose:
+    """``pose`` raised to at least ``z_world``."""
+    p = pose_position(pose)
+    if p[2] >= z_world:
+        return pose
+    return Pose(orientation=pose.orientation, position=(float(p[0]), float(p[1]), z_world))
+
+
 class BayRig:
-    """One bay's IK, torque estimator, latch fault controller and LEAP actuators by name."""
+    """One bay's IK, torque estimator, latch fault controller and LEAP actuators by name.
+
+    The arm is only ever moved by ``command`` (IK + position servos). The single kinematic
+    placement is ``home_keyframe`` once, when a scene or model is first built.
+    """
 
     def __init__(self, model: Any, data: Any, bay_id: int) -> None:
         p = bay_prefix(bay_id)
@@ -142,6 +209,15 @@ class BayRig:
         arm = [model.joint(n) for n in self.torque.joint_names[:7]]
         self._arm_range = np.array([model.jnt_range[int(j.id)] for j in arm], dtype=np.float64)
         self._arm_qadr = np.array([int(j.qposadr[0]) for j in arm])
+        # Per-joint Panda torque limits by actuator name: the menagerie panda_nohand.xml
+        # forcerange (87 Nm joints 1-4, 12 Nm joints 5-7, the Franka rated torques).
+        self.arm_force_limit: FloatArray = np.array(
+            [
+                float(model.actuator_forcerange[int(model.actuator(f"{p}actuator{i}").id)][1])
+                for i in range(1, N_ARM_DOF + 1)
+            ],
+            dtype=np.float64,
+        )
 
     # -- frames
 
@@ -189,6 +265,16 @@ class BayRig:
         t = self.tau_ext() if tau is None else tau
         return float(np.max(np.abs(t[:N_ARM_DOF])))
 
+    def reached(self, target: Pose, pos_tol: float = 0.004, rot_tol: float = 0.04) -> bool:
+        """True once the measured wrist is within tolerance of ``target`` (world frame)."""
+        err = self.ik.error(self.data, target)
+        return bool(np.linalg.norm(err[:3]) < pos_tol and np.linalg.norm(err[3:]) < rot_tol)
+
+    def arm_torque_ratio(self, tau: FloatArray | None = None) -> float:
+        """Largest per-joint ``|tau_ext| / force_limit`` over the 7 Panda joints."""
+        t = self.tau_ext() if tau is None else tau
+        return float(np.max(np.abs(t[:N_ARM_DOF]) / self.arm_force_limit))
+
     def arm_in_limits(self) -> bool:
         q = np.asarray(self.data.qpos, dtype=np.float64)[self._arm_qadr]
         lo, hi = self._arm_range[:, 0], self._arm_range[:, 1]
@@ -200,9 +286,13 @@ class BayRig:
 
     # -- control
 
-    def reset(self, flap_jammed: bool = False, bolt_pinned: bool = False) -> None:
+    def home_keyframe(self) -> None:
+        """One-time kinematic home keyframe (arm at ``PANDA_HOME``, open hand) at scene build."""
         reset_robot_home(self.model, self.data, self.bay_id)
         self.ik.reset()
+
+    def reset_latch(self, flap_jammed: bool = False, bolt_pinned: bool = False) -> None:
+        """New pallet cycle on the latch only (the rig fault toggles); the arm is not moved."""
         self.latch.reset(flap_jammed=flap_jammed, bolt_pinned=bolt_pinned)
 
     def command(self, wrist: Pose, fingers: Mapping[str, float] | None = None) -> None:
@@ -213,24 +303,6 @@ class BayRig:
     def set_fingers(self, fingers: Mapping[str, float] | None) -> None:
         for name, value in (fingers or {}).items():
             self.data.ctrl[self._leap_act[name]] = value
-
-    def teleport_to(self, wrist: Pose, fingers: Mapping[str, float], iterations: int = 120) -> None:
-        """Kinematically place the arm at ``wrist`` and the hand at ``fingers`` (validation)."""
-        m, d = self.model, self.data
-        self.ik.reset()
-        for _ in range(iterations):
-            d.qpos[self.ik.qpos_adr] = self.ik.solve(d, wrist, 0.2)
-            mj.mj_kinematics(m, d)
-            err = self.ik.error(d, wrist)
-            if float(np.linalg.norm(err[:3])) < 5e-4 and float(np.linalg.norm(err[3:])) < 5e-3:
-                break
-        d.ctrl[self.ik.actuator_ids] = d.qpos[self.ik.qpos_adr]
-        for name, value in fingers.items():
-            d.qpos[self._leap_qadr[name]] = value
-            d.ctrl[self._leap_act[name]] = value
-        d.qvel[:] = 0.0
-        self.ik.reset()
-        mj.mj_forward(m, d)
 
 
 def step_physics(model: Any, data: Any, n: int = SUBSTEPS) -> None:
@@ -265,7 +337,9 @@ class SkillReplay:
         start_fingers: Mapping[str, float] | None = None,
         blend_s: float = 0.0,
         hold_s: float = 0.3,
+        latch_cache: dict[int, tuple[Pose, dict[str, float], float]] | None = None,
     ) -> None:
+        self._latch_cache = latch_cache  # latch-frame DMP samples, shared across rollouts
         self.skill = skill
         self.world_from_latch = world_from_latch
         self.blend_s = blend_s if start_wrist is not None else 0.0
@@ -287,7 +361,14 @@ class SkillReplay:
             return ReplayCommand(blend_pose(self._start_wrist, wrist0, a), fingers, 0.0, False)
         t = min(max(t_s - self.blend_s, 0.0), sk.duration_s)
         s = math.exp(-sk.alpha_s * t / sk.duration_s)
-        wrist, fingers, tau_demo = evaluate_rbf_dmp(sk, s, self.world_from_latch)
+        key = round(t * PHYSICS_HZ)
+        hit = self._latch_cache.get(key) if self._latch_cache is not None else None
+        if hit is None:
+            hit = evaluate_latch_frame(sk, s)
+            if self._latch_cache is not None:
+                self._latch_cache[key] = hit
+        local, fingers, tau_demo = hit
+        wrist = compose_pose(self.world_from_latch, local)
         return ReplayCommand(wrist, fingers, tau_demo, t_s >= self.total_s)
 
 
@@ -298,7 +379,8 @@ class SkillReplay:
 class RolloutResult:
     perturbation: tuple[float, float, float]  # dx m, dy m, dyaw deg
     bolt_x_m: float
-    max_tau_ext_inf_nm: float
+    max_tau_ext_inf_nm: float  # hand-only
+    max_arm_torque_ratio: float
     joint_limits_ok: bool
     cleared: bool
     passed: bool
@@ -325,10 +407,14 @@ class ValidationReport:
 class SkillValidator:
     """Pre-deployment gate: 3 headless single-bay rollouts across latch pose perturbations.
 
-    The bolt starts at the skill's recorded stall position (``prototype.x_bolt_m``) with the
-    stopper flap jammed, the arm teleported to the DMP start for the perturbed latch frame. A
-    rollout passes when ``x_bolt >= 0.052``, ``max |tau_ext|_inf < tau_hard_max`` and the Panda
-    stays inside its joint limits.
+    Every rollout is physical: the arm lifts clear of the previous latch pose, the latch is
+    moved to the perturbed frame and reset to its jammed stall state (bolt at the skill's
+    recorded stall x, flap released), then the arm approaches a pre-approach pose 4 cm above
+    the DMP start under IK and the position servos, blends into the DMP and replays it. A
+    rollout passes when ``x_bolt >= 0.052``, hand ``max |tau_ext|_inf < tau_hard_max``, every
+    Panda joint stays below ``arm_margin`` of its force limit and inside its joint limits.
+
+    The only kinematic placement is the home keyframe applied once when the model is built.
     """
 
     def __init__(
@@ -337,50 +423,113 @@ class SkillValidator:
         tau_hard_max: float = TAU_HARD_MAX_NM,
         base_latch: LatchPose = CANONICAL_LATCH,
         perturbations_deg: Sequence[tuple[float, float, float]] = PERTURBATIONS_DEG,
+        arm_margin: float = ARM_TORQUE_MARGIN,
     ) -> None:
         self.hand_spec = hand_spec
         self.tau_hard_max = tau_hard_max
+        self.arm_margin = arm_margin
         self.base_latch = base_latch
         self.perturbations_deg = tuple(perturbations_deg)
         self.model: Any = build_single_bay_scene(base_latch)
         self.data: Any = mj.MjData(self.model)
         self.rig = BayRig(self.model, self.data, 1)
+        self.rig.home_keyframe()
+        self._move_to_ready_pose()
+
+    def _move_to_ready_pose(self) -> None:
+        """Physically bring the arm from the home keyframe to a ready pose above the latch.
+
+        Done once at construction (not part of any timed rollout), so the first rollout starts
+        from a pose comparable to where every later one starts.
+        """
+        rig = self.rig
+        ready = wrist_pose_over_latch(rig.world_latch(), LIFT_HEIGHT_M)
+        plan = ApproachPlan(rig.wrist_pose(), [ready])
+        rig.ik.reset()
+        for _ in range(600):
+            rig.command(plan.step())
+            step_physics(self.model, self.data)
+            if plan.done and rig.reached(ready):
+                break
 
     def _rollout(
-        self, skill: SkillPrimitive, perturbation: tuple[float, float, float]
+        self,
+        skill: SkillPrimitive,
+        perturbation: tuple[float, float, float],
+        cache: dict[int, tuple[Pose, dict[str, float], float]],
     ) -> RolloutResult:
         dx, dy, dyaw_deg = perturbation
         rig, m, d = self.rig, self.model, self.data
-        local = self.base_latch.offset(dx, dy, math.radians(dyaw_deg))
-        rig.set_world_latch(latch_world_pose(1, local))
-        world_from_latch = rig.world_from_latch()
+        new_latch = latch_world_pose(1, self.base_latch.offset(dx, dy, math.radians(dyaw_deg)))
+        new_wfl = new_latch.as_pose()
+        y0 = SkillReplay(skill, new_wfl, hold_s=0.0).command(0.0)
+        up = local_axis_world(new_wfl, 2)
+        pre = translate_pose(y0.wrist, PRE_APPROACH_M * up)
+        lift_z = new_latch.position[2] + LIFT_HEIGHT_M
+        plan = ApproachPlan(
+            rig.wrist_pose(), [lifted(rig.wrist_pose(), lift_z), lifted(pre, lift_z), pre]
+        )
 
-        rig.reset(flap_jammed=True)
-        start = SkillReplay(skill, world_from_latch, hold_s=0.0).command(0.0)
-        rig.teleport_to(start.wrist, start.fingers)
-        rig.set_bolt_x(skill.prototype.x_bolt_m)
-
-        replay = SkillReplay(skill, world_from_latch, hold_s=0.2)
         max_tau = 0.0
+        max_ratio = 0.0
         limits_ok = True
+
+        def monitor() -> None:
+            nonlocal max_tau, max_ratio, limits_ok
+            tau = rig.tau_ext()
+            max_tau = max(max_tau, rig.tau_hand_inf(tau))
+            max_ratio = max(max_ratio, rig.arm_torque_ratio(tau))
+            limits_ok = limits_ok and rig.arm_in_limits()
+
+        latch_ready = False
+        rig.ik.reset()
+        settle_ticks = 0
+        m.opt.timestep = COARSE_FACTOR / PHYSICS_HZ
+        while (
+            not plan.done
+            or not latch_ready
+            or (not rig.reached(pre) and settle_ticks < SETTLE_MAX_TICKS)
+        ):
+            settle_ticks += 1 if plan.done else 0
+            if plan.index >= 1 and not latch_ready:  # lifted clear: move + reset the latch
+                rig.set_world_latch(new_latch)
+                rig.reset_latch(flap_jammed=True)
+                rig.set_bolt_x(skill.prototype.x_bolt_m)
+                latch_ready = True
+            rig.command(plan.step(), y0.fingers)
+            step_physics(m, d, SUBSTEPS // COARSE_FACTOR)  # coarse physics, free space only
+            monitor()
+
+        m.opt.timestep = 1.0 / PHYSICS_HZ  # full-rate physics for the contact replay
+        replay = SkillReplay(
+            skill,
+            new_wfl,
+            start_wrist=pre,
+            start_fingers=y0.fingers,
+            blend_s=0.2,
+            hold_s=0.2,
+            latch_cache=cache,
+        )
         cleared = False
-        ticks = int(math.ceil(replay.total_s / CONTROL_DT))
-        for k in range(ticks):
+        for k in range(int(math.ceil(replay.total_s / CONTROL_DT))):
             cmd = replay.command(k * CONTROL_DT)
             rig.command(cmd.wrist, cmd.fingers)
             step_physics(m, d)
-            max_tau = max(max_tau, rig.tau_hand_inf())
-            limits_ok = limits_ok and rig.arm_in_limits()
+            monitor()
             if rig.bolt_x() >= BOLT_CLEARED_M:
                 cleared = True
                 break
-        bolt_x = rig.bolt_x()
-        passed = cleared and max_tau < self.tau_hard_max and limits_ok
-        return RolloutResult(perturbation, bolt_x, max_tau, limits_ok, cleared, passed)
+        passed = (
+            cleared and max_tau < self.tau_hard_max and max_ratio < self.arm_margin and limits_ok
+        )
+        return RolloutResult(
+            perturbation, rig.bolt_x(), max_tau, max_ratio, limits_ok, cleared, passed
+        )
 
     def validate(self, skill: SkillPrimitive) -> ValidationReport:
         t0 = time.perf_counter()
-        results = tuple(self._rollout(skill, p) for p in self.perturbations_deg)
+        cache: dict[int, tuple[Pose, dict[str, float], float]] = {}
+        results = tuple(self._rollout(skill, p, cache) for p in self.perturbations_deg)
         return ValidationReport(results, time.perf_counter() - t0)
 
 
@@ -389,6 +538,8 @@ __all__ = [
     "PERTURBATIONS_DEG",
     "TAU_HARD_MAX_NM",
     "TAU_MARGIN_NM",
+    "ARM_TORQUE_MARGIN",
+    "ApproachPlan",
     "BayRig",
     "ReplayCommand",
     "RolloutResult",
@@ -396,6 +547,7 @@ __all__ = [
     "SkillValidator",
     "ValidationReport",
     "blend_pose",
+    "lifted",
     "compose_pose",
     "local_axis_world",
     "pose_position",

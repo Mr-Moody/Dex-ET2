@@ -22,8 +22,18 @@ Compliance events and reasoning contexts are emitted without blocking the contro
 Torque convention: ``tau_ext_inf`` for the stall signature, torque tube, rescue recordings and
 snapshots is the inf-norm over the 16 LEAP joints (arm torques depend on which Panda reached
 the contact, hand torques do not). C(t) keeps the spec's all-DoF (arm + hand) ``tau_ext``, which
-already gives C > 0.85 nominal and C < 0.3 on a stall. A separate arm safety abort
-(``arm_tau_hard_max``) guards the Panda during autonomous replay.
+already gives C > 0.85 nominal and C < 0.3 on a stall.
+
+Arm torque safety: in every phase the per-joint ratio ``|tau_ext| / actuator forcerange`` of the
+7 Panda joints (87 Nm joints 1-4, 12 Nm joints 5-7 from the menagerie model, read by actuator
+name) must stay below ``arm_torque_margin`` (0.8). A breach in the routine is a fast-path stall
+trigger (no 300 ms wait); in autonomous replay it aborts and escalates; in an operator rescue it
+bleeds off and discards the recording until the clutch is released; elsewhere it bleeds off to a
+zero-velocity hold. The validator fails a rollout on the same ratio.
+
+Motion: the arm only moves through IK + the position servos. ``start_cycle`` lifts the hand
+clear, resets the latch faults, then follows a rate-limited path to the routine start. The one
+kinematic placement is the home keyframe applied once when the coordinator is built.
 """
 
 from __future__ import annotations
@@ -51,15 +61,20 @@ from teleop.atc.types import (
     StallSignature,
 )
 from teleop.atc.validator import (
+    ARM_TORQUE_MARGIN,
     CONTROL_DT,
+    LIFT_HEIGHT_M,
+    SETTLE_MAX_TICKS,
     TAU_HARD_MAX_NM,
     TAU_MARGIN_NM,
+    ApproachPlan,
     BayRig,
     ReplayCommand,
     SkillReplay,
     SkillValidator,
     ValidationReport,
     blend_pose,
+    lifted,
     local_axis_world,
     pose_position,
     step_physics,
@@ -131,7 +146,7 @@ class CoordinatorConfig:
     watchdog_s: float = 3.0
     tau_margin: float = TAU_MARGIN_NM
     tau_hard_max: float = TAU_HARD_MAX_NM
-    arm_tau_hard_max: float = 40.0  # separate Panda safety abort, Nm
+    arm_torque_margin: float = ARM_TORQUE_MARGIN  # fraction of each Panda joint's force limit
     retract_m: float = 0.03
     backoff_m: float = 0.01
     retract_s: float = 0.5
@@ -323,6 +338,13 @@ class _Bay:
     confidence: float = 1.0
     tau_inf: float = 0.0
     tau_arm: float = 0.0
+    arm_ratio: float = 0.0
+    approach: ApproachPlan | None = None
+    pending_latch: tuple[bool, bool] | None = None
+    settle_ticks: int = 0
+    breach_lock: bool = False
+    trigger_reason: str = ""
+    peak_ratio: dict[str, float] = field(default_factory=dict[str, float])
     v_cmd: float = 0.0
     v_act: float = 0.0
     prev_cmd_pos: FloatArray | None = None
@@ -364,6 +386,8 @@ class AtcCoordinator:
         for b in BACKGROUND_BAYS:
             with contextlib.suppress(KeyError):  # scene built without the background bays
                 reset_robot_home(model, data, b)
+        for bay in self._bays.values():
+            bay.rig.home_keyframe()  # the only kinematic arm placement: once, at scene build
         for bay in self._bays.values():
             self.start_cycle(bay.bay_id)
 
@@ -444,22 +468,26 @@ class AtcCoordinator:
     def start_cycle(
         self, bay_id: int, flap_jammed: bool = False, bolt_pinned: bool = False
     ) -> None:
-        """New pallet cycle: reset the bay, place the hand at the routine start and run.
+        """New pallet cycle: lift clear, reset the latch, move the hand to the routine start, run.
 
-        ``flap_jammed`` and ``bolt_pinned`` are rig faults (the physical fault rig of spec 2.1).
-        They are set, never read back, by the coordinator.
+        The arm travels under IK and the position servos (rate-limited), never kinematically.
+        ``flap_jammed`` and ``bolt_pinned`` are rig faults (the physical fault rig of spec 2.1);
+        they are applied once the hand is lifted clear of the latch and are never read back.
         """
         bay = self._bays[bay_id]
         rig = bay.rig
-        rig.reset(flap_jammed=flap_jammed, bolt_pinned=bolt_pinned)
         wfl = rig.world_from_latch()
         start = compose_pose(wfl, self.routine.pose_at(0.0))
+        here = rig.wrist_pose()
+        lift_z = rig.world_latch().position[2] + LIFT_HEIGHT_M
         fingers = dict(self.routine.fingers)
-        rig.teleport_to(start, fingers)
+        rig.ik.reset()
+        bay.approach = ApproachPlan(here, [lifted(here, lift_z), lifted(start, lift_z), start])
+        bay.pending_latch = (flap_jammed, bolt_pinned)
         bay.state = BayState.NOMINAL
-        bay.routine_active = True
+        bay.routine_active = False
         bay.routine_t = 0.0
-        bay.hold_pose = start
+        bay.hold_pose = here
         bay.fingers = fingers
         bay.move = None
         bay.auto = None
@@ -470,6 +498,8 @@ class AtcCoordinator:
         bay.match = None
         bay.skill_id = None
         bay.outcome = ""
+        bay.breach_lock = False
+        bay.trigger_reason = ""
         bay.confidence = 1.0
         bay.tau_inf = 0.0
         bay.prev_cmd_pos = None
@@ -537,7 +567,9 @@ class AtcCoordinator:
         self, bay: _Bay, console: ConsoleInputState, operator: OperatorInput | None
     ) -> None:
         if bay.state == BayState.NOMINAL:
-            if bay.routine_active:
+            if bay.approach is not None:
+                self._control_approach(bay)
+            elif bay.routine_active:
                 bay.routine_t += CONTROL_DT
                 wfl = bay.rig.world_from_latch()
                 target = compose_pose(wfl, self.routine.pose_at(bay.routine_t))
@@ -559,11 +591,33 @@ class AtcCoordinator:
         else:  # QUEUED, STALLED, VALIDATING: zero-velocity safe hover
             self._hold(bay)
 
+    def _control_approach(self, bay: _Bay) -> None:
+        plan = bay.approach
+        assert plan is not None
+        if plan.index >= 1 and bay.pending_latch is not None:  # lifted clear: reset the latch
+            jam, pin = bay.pending_latch
+            bay.pending_latch = None
+            bay.rig.reset_latch(flap_jammed=jam, bolt_pinned=pin)
+        pose = plan.step()
+        bay.hold_pose = pose
+        self._command(bay, pose, self.routine.fingers, v_cmd=0.0)
+        bay.settle_ticks += 1 if plan.done else 0
+        if plan.done and (bay.rig.reached(pose) or bay.settle_ticks >= SETTLE_MAX_TICKS):
+            bay.approach = None
+            bay.settle_ticks = 0
+            bay.routine_active = True
+            bay.routine_t = 0.0
+            bay.detector.reset()
+            bay.prev_cmd_pos = None
+
     def _control_rescue(
         self, bay: _Bay, console: ConsoleInputState, operator: OperatorInput | None
     ) -> None:
+        if not console.clutch:
+            bay.breach_lock = False
         engaged = (
-            console.clutch
+            not bay.breach_lock
+            and console.clutch
             and console.selected_bay == bay.bay_id
             and operator is not None
             and bay.move is None
@@ -649,6 +703,13 @@ class AtcCoordinator:
         )
         x_bolt = rig.bolt_x()
 
+        bay.arm_ratio = rig.arm_torque_ratio(tau)
+        phase = self._phase(bay)
+        bay.peak_ratio[phase] = max(bay.peak_ratio.get(phase, 0.0), bay.arm_ratio)
+        breach = bay.arm_ratio >= cfg.arm_torque_margin
+        if breach and phase != "routine" and self._arm_breach(bay, phase):
+            return
+
         if bay.state == BayState.NOMINAL and bay.routine_active:
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
@@ -658,6 +719,9 @@ class AtcCoordinator:
             trigger = bay.detector.update(
                 bay.confidence, x_bolt, bay.tau_inf, tau[4:7], bay.routine_t
             )
+            if trigger is None and breach:  # fast path: no 300 ms wait
+                self._arm_breach(bay, phase)
+                return
             if trigger is not None:
                 self._on_stall(bay, trigger)
         elif bay.state == BayState.AUTONOMOUS_SKILL:
@@ -673,14 +737,80 @@ class AtcCoordinator:
             return
         in_dmp = auto.t > auto.replay.blend_s + CONTROL_DT
         timed_out = auto.t > auto.replay.total_s + self.config.skill_timeout_s
-        if in_dmp and bay.tau_arm >= self.config.arm_tau_hard_max:
-            self._abort_autonomous(bay, "arm torque safety limit")
-        elif in_dmp and not torque_tube_ok(
+        if in_dmp and not torque_tube_ok(
             bay.tau_inf, auto.last.tau_demo, self.config.tau_margin, self.config.tau_hard_max
         ):
             self._abort_autonomous(bay, "torque tube violated")
         elif timed_out:
             self._abort_autonomous(bay, "skill timeout")
+
+    # ------------------------------------------------------------------ arm torque safety
+
+    def _phase(self, bay: _Bay) -> str:
+        if bay.state == BayState.NOMINAL:
+            if bay.approach is not None:
+                return "approach"
+            return "routine" if bay.routine_active else "idle"
+        if bay.state == BayState.AUTONOMOUS_SKILL:
+            return "autonomous"
+        if bay.state in (BayState.RESCUE, BayState.OOD_ESCALATED) and bay.clutch_held:
+            return "rescue"
+        return "hover"  # STALLED, QUEUED, VALIDATING and an unclutched rescue hold
+
+    def _arm_breach(self, bay: _Bay, phase: str) -> bool:
+        """A Panda joint reached its torque limit fraction. Returns True if the tick is consumed.
+
+        Routine: fast-path stall trigger (no 300 ms wait). Autonomous: abort and escalate.
+        Rescue: bleed off and discard the recording until the clutch is released. Everything
+        else (approach, hover): bleed off to a zero-velocity hold.
+        """
+        logger.warning(
+            "bay %d: arm torque ratio %.2f >= %.2f in %s",
+            bay.bay_id,
+            bay.arm_ratio,
+            self.config.arm_torque_margin,
+            phase,
+        )
+        if phase == "routine":  # the detector window already holds this tick's sample
+            trigger = StallTrigger("arm_torque", bay.detector.signature())
+            self._on_stall(bay, trigger)
+            return True
+        if phase == "autonomous":
+            self._abort_autonomous(bay, "arm torque limit")
+            return True
+        self._bleed_off(bay)
+        if phase == "rescue":
+            if bay.buffer is not None:
+                bay.buffer.finish(False)
+            bay.clutch_held = False
+            bay.breach_lock = True
+            bay.indexer.reset()
+        elif phase == "approach":
+            bay.approach = None
+            bay.pending_latch = None
+            bay.outcome = "approach aborted: arm torque limit"
+        return True
+
+    def _bleed_off(self, bay: _Bay) -> None:
+        bleed_off_targets(self.model, self.data, bay.rig.prefix)
+        bay.rig.ik.reset()
+        bay.move = None
+        bay.prev_cmd_pos = None
+        bay.hold_pose = bay.rig.wrist_pose()
+
+    def peak_arm_ratio(self, bay_id: int, phase: str | None = None) -> float:
+        """Largest per-joint arm torque ratio seen (per phase, or over all phases)."""
+        peaks = self._bays[bay_id].peak_ratio
+        return max(peaks.values(), default=0.0) if phase is None else peaks.get(phase, 0.0)
+
+    def arm_phases(self, bay_id: int) -> dict[str, float]:
+        return dict(self._bays[bay_id].peak_ratio)
+
+    def in_routine(self, bay_id: int) -> bool:
+        return self._bays[bay_id].routine_active
+
+    def last_trigger_reason(self, bay_id: int) -> str:
+        return self._bays[bay_id].trigger_reason
 
     # ------------------------------------------------------------------ stall handling
 
@@ -689,6 +819,7 @@ class AtcCoordinator:
         bay.state = BayState.STALLED
         bay.routine_active = False
         bay.signature = trigger.signature
+        bay.trigger_reason = trigger.reason
         t0 = time.monotonic_ns()
         match, skill_id = self.unoq.classify_stall(cfg.part_sku_id, trigger.signature)
         self.last_classify_ms = (time.monotonic_ns() - t0) * 1e-6
