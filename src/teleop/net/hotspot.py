@@ -161,6 +161,11 @@ class HotspotWatchdog:
         self._clock = clock
         self._thread: threading.Thread | None = None
         self.events: list[tuple[int, str]] = []
+        self.last_status: dict[str, object] | None = None
+
+    @property
+    def hotspot(self) -> Hotspot:
+        return self._hotspot
 
     def _emit(self, event: str) -> None:
         self.events.append((self._clock(), event))
@@ -173,6 +178,10 @@ class HotspotWatchdog:
         except Exception as exc:
             log.warning("hotspot watchdog poll failed: %s", exc)
             self._emit(f"error: {exc}")
+        try:
+            self.last_status = self._hotspot.status()
+        except Exception as exc:
+            log.warning("hotspot status read failed: %s", exc)
 
     def run(self) -> None:
         """Blocking poll loop; returns after :meth:`stop`."""
