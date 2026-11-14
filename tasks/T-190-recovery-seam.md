@@ -1,7 +1,7 @@
 ---
 id: T-190
 title: Recovery backend seam, policy schema and gate manifest (dmp default)
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/recovery-seam
 depends_on: [T-140, T-150]
