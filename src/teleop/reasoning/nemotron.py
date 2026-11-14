@@ -9,10 +9,12 @@ Pipeline for every ``ReasoningContext``::
       |
     worker pool     Up to ``max_workers`` daemon threads (at most 1 in-flight request per bay)
                     POST OpenAI-compatible chat completions to Verda (``VERDA_BASE_URL``,
-                    ``VERDA_API_KEY``, ``NEMOTRON_MODEL``), retry without ``response_format``
-                    if an endpoint rejects ``json_object`` mode with HTTP 400/422, strip
-                    ``<think>`` / prompt-prefilled ``</think>`` / code-fence wrappers, and
-                    upgrade ``ReasoningVerdict`` if no newer event superseded that bay.
+                    ``VERDA_API_KEY``, ``NEMOTRON_MODEL``; default model ``kimi-k3-1-pro``
+                    with ``reasoning_effort="none"``), ignore ``reasoning_content``, retry
+                    without ``response_format`` if an endpoint rejects ``json_object`` mode with
+                    HTTP 400/422, strip ``<think>`` / prompt-prefilled ``</think>`` / code-fence
+                    wrappers, and upgrade ``ReasoningVerdict`` if no newer event superseded
+                    that bay.
                     On missing ``VERDA_API_KEY``, timeout, HTTP error, or malformed model output,
                     retains deterministic ``triage(ctx)``.
 
@@ -51,7 +53,11 @@ OOD_THRESHOLD = 3.0  # gamma_ood, spec 4.2; quoted in rationales and system prom
 BOLT_CLEARED_CM = 5.2  # x_bolt threshold in cm (spec 2.1)
 
 DEFAULT_VERDA_BASE_URL = "https://inference.verda.com/v1"
-DEFAULT_NEMOTRON_MODEL = "nvidia/Llama-3.3-Nemotron-Super-49B-v1"
+DEFAULT_NEMOTRON_MODEL = "kimi-k3-1-pro"  # Verda Inference API model ID (name kept for compat)
+# Kimi reasons before answering (default effort "max"), which would burn the 4 s budget and
+# max_tokens on hidden reasoning; "none" returns the JSON verdict directly.
+DEFAULT_REASONING_EFFORT = "none"
+REASONING_EFFORTS = ("none", "low", "high", "max")
 DEFAULT_TIMEOUT_S = 4.0
 DEFAULT_MAX_TOKENS = 512
 DEFAULT_MAX_WORKERS = 4
@@ -65,7 +71,6 @@ _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
 _FENCE_RE = re.compile(r"\A```(?:json)?\s*(.*?)\s*```\Z", re.DOTALL | re.IGNORECASE)
 
 SYSTEM_PROMPT = (
-    "detailed thinking off\n"
     "You are the Fleet Reasoning Co-Pilot for a 4-bay EV-battery disassembly cell "
     "(7-DoF Franka Panda + 16-DoF LEAP Hand unlatching a 3-box sprung slide-bolt latch). "
     "Physics reference: bolt clears at x_bolt >= 5.2 cm; a sprung stopper flap stalls the bolt "
@@ -550,6 +555,7 @@ class VerdaNemotronReasoner:
         temperature: float = 0.1,
         close_grace_s: float = DEFAULT_CLOSE_GRACE_S,
         max_workers: int = DEFAULT_MAX_WORKERS,
+        reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
     ) -> None:
         if timeout_s <= 0.0 or not math.isfinite(timeout_s):
             raise ValueError(f"timeout_s must be positive and finite, got {timeout_s}")
@@ -561,6 +567,11 @@ class VerdaNemotronReasoner:
             raise ValueError(f"close_grace_s must be non-negative and finite, got {close_grace_s}")
         if max_workers < 1:
             raise ValueError(f"max_workers must be >= 1, got {max_workers}")
+        if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(
+                f"reasoning_effort must be one of {REASONING_EFFORTS} or None, "
+                f"got {reasoning_effort!r}"
+            )
 
         clean_key = (api_key or "").strip() or None
         raw_model = (model or "").strip() or None
@@ -584,6 +595,7 @@ class VerdaNemotronReasoner:
         self.timeout_s = timeout_s
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.reasoning_effort = reasoning_effort
         self._close_grace_s = close_grace_s
         self._max_workers = max_workers
 
@@ -628,6 +640,7 @@ class VerdaNemotronReasoner:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         close_grace_s: float = DEFAULT_CLOSE_GRACE_S,
         max_workers: int = DEFAULT_MAX_WORKERS,
+        reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
     ) -> Self:
         """Construct from ``VERDA_BASE_URL``, ``VERDA_API_KEY``, and ``NEMOTRON_MODEL``."""
         src = os.environ if env is None else env
@@ -640,6 +653,7 @@ class VerdaNemotronReasoner:
             max_tokens=max_tokens,
             close_grace_s=close_grace_s,
             max_workers=max_workers,
+            reasoning_effort=reasoning_effort,
         )
 
     @property
@@ -752,6 +766,8 @@ class VerdaNemotronReasoner:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
         if self._use_json_mode:
             payload["response_format"] = {"type": "json_object"}
         t0 = time.perf_counter()
