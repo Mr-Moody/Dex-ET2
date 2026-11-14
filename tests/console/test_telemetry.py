@@ -203,6 +203,17 @@ def test_bays_report_power_cut_by_the_estop() -> None:
     assert msg["powered_off"] == [1, 3]
 
 
+def test_conveyor_carries_the_resuming_flag() -> None:
+    from teleop.atc.hud import ConveyorStatus
+
+    view = _view(
+        conveyors=(ConveyorStatus(1, "paused"), ConveyorStatus(2, "paused", resuming=True))
+    )
+    msg = _adapter().build(view, 1.0, GRID, {})
+    assert _bay(msg, 1)["conveyor"] == {"mode": "paused", "resuming": False, "pack_dy_cm": 0.0}
+    assert _bay(msg, 2)["conveyor"]["resuming"] is True  # type: ignore[index]
+
+
 def test_layout_id_bumps_on_layout_change() -> None:
     a = _adapter()
     first = a.build(_view(), 1.0, GRID, {})["layout_id"]

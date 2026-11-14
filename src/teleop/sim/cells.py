@@ -889,6 +889,243 @@ def _add_agv_cart(parent: Any, prefix: str, ax: float, ay: float) -> None:
     )
 
 
+def _axis_quat_y() -> list[float]:
+    """Rotate cylinder local Z axis onto world Y axis (-90 deg about +X)."""
+    s = math.sqrt(0.5)
+    return [s, -s, 0.0, 0.0]
+
+
+def _add_pallet_stack(parent: Any, prefix: str, x: float, y: float, tiers: int) -> None:
+    """Timber pallet carrying ``tiers`` crated EV modules (0 = an empty pallet)."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    z0 = WAREHOUSE_FLOOR_Z
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_pallet",
+            type=box,
+            size=[0.50, 0.40, 0.05],
+            pos=[x, y, z0 + 0.05],
+            rgba=list(TIMBER_RGBA),
+        )
+    )
+    for tier in range(tiers):
+        cz = z0 + 0.10 + 0.17 + tier * 0.34
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_crate_{tier}",
+                type=box,
+                size=[0.46, 0.36, 0.17],
+                pos=[x, y, cz],
+                rgba=list(BATTERY_CASE_RGBA),
+            )
+        )
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_band_{tier}",
+                type=box,
+                size=[0.464, 0.364, 0.022],
+                pos=[x, y, cz + 0.06],
+                rgba=list(HV_ORANGE_RGBA),
+            )
+        )
+
+
+def _add_staging_zone(
+    parent: Any,
+    prefix: str,
+    cx: float,
+    cy: float,
+    stacks: Sequence[tuple[float, float, int]],
+    half_x: float = 0.78,
+    half_y: float = 1.10,
+) -> None:
+    """Yellow-outlined floor bay holding pallet stacks ``(dx, dy, tiers)`` of spent modules."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    z = WAREHOUSE_FLOOR_Z + 0.003
+    w = 0.03
+    lines = (
+        ("s", cx, cy - half_y, half_x, w),
+        ("n", cx, cy + half_y, half_x, w),
+        ("w", cx - half_x, cy, w, half_y),
+        ("e", cx + half_x, cy, w, half_y),
+    )
+    for tag, lx, ly, sx, sy in lines:
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_line_{tag}",
+                type=box,
+                size=[sx, sy, 0.003],
+                pos=[lx, ly, z],
+                rgba=list(SAFETY_YELLOW),
+            )
+        )
+    for s_i, (dx, dy, tiers) in enumerate(stacks):
+        _add_pallet_stack(parent, f"{prefix}_stack_{s_i}", cx + dx, cy + dy, tiers)
+
+
+def _add_forklift(parent: Any, prefix: str, x: float, y: float) -> None:
+    """Parked electric counterbalance forklift, forks pointing along -X."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    cyl = mj.mjtGeom.mjGEOM_CYLINDER
+    z0 = WAREHOUSE_FLOOR_Z
+    parts: tuple[tuple[str, list[float], list[float], Sequence[float]], ...] = (
+        ("chassis", [0.50, 0.30, 0.20], [x, y, z0 + 0.34], BIN_AMBER_RGBA),
+        ("counterweight", [0.14, 0.30, 0.27], [x + 0.56, y, z0 + 0.41], STEEL_DARK_RGBA),
+        ("seat", [0.14, 0.17, 0.16], [x + 0.18, y, z0 + 0.70], PALLET_RGBA),
+        ("guard_roof", [0.36, 0.29, 0.02], [x + 0.06, y, z0 + 1.62], STEEL_DARK_RGBA),
+        ("carriage", [0.02, 0.27, 0.16], [x - 0.60, y, z0 + 0.30], STEEL_DARK_RGBA),
+    )
+    for tag, size, pos, rgba in parts:
+        _visual(
+            parent.add_geom(name=f"{prefix}_{tag}", type=box, size=size, pos=pos, rgba=list(rgba))
+        )
+    for sy_tag, sy in (("l", -0.22), ("r", 0.22)):
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_mast_{sy_tag}",
+                type=box,
+                size=[0.03, 0.035, 0.88],
+                pos=[x - 0.55, y + sy, z0 + 0.96],
+                rgba=list(STEEL_DARK_RGBA),
+            )
+        )
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_fork_{sy_tag}",
+                type=box,
+                size=[0.42, 0.05, 0.02],
+                pos=[x - 1.03, y + sy, z0 + 0.09],
+                rgba=list(STEEL_BRUSHED_RGBA),
+            )
+        )
+        for sx_tag, sx in (("front", -0.30), ("rear", 0.42)):
+            _visual(
+                parent.add_geom(
+                    name=f"{prefix}_post_{sx_tag}_{sy_tag}",
+                    type=box,
+                    size=[0.02, 0.02, 0.54],
+                    pos=[x + 0.06 + sx, y + sy * 1.2, z0 + 1.07],
+                    rgba=list(STEEL_DARK_RGBA),
+                )
+            )
+            _visual(
+                parent.add_geom(
+                    name=f"{prefix}_wheel_{sx_tag}_{sy_tag}",
+                    type=cyl,
+                    size=[0.16, 0.05, 0.0],
+                    pos=[x + (-0.32 if sx_tag == "front" else 0.40), y + sy * 1.5, z0 + 0.16],
+                    quat=_axis_quat_y(),
+                    rgba=[0.07, 0.07, 0.08, 1.0],
+                )
+            )
+
+
+def _add_control_station(spec: Any, parent: Any, prefix: str, x: float, y: float) -> None:
+    """Line supervisor desk with a lit screen facing -Y and a three-colour stack light."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    cyl = mj.mjtGeom.mjGEOM_CYLINDER
+    z0 = WAREHOUSE_FLOOR_Z
+    screen = _ensure_material(spec, "warehouse_screen_mat", (0.30, 0.86, 0.62, 1.0), emission=0.7)
+    boxes: tuple[tuple[str, list[float], list[float], Sequence[float]], ...] = (
+        ("plinth", [0.50, 0.24, 0.45], [x, y, z0 + 0.45], STEEL_DARK_RGBA),
+        ("top", [0.56, 0.30, 0.025], [x, y, z0 + 0.925], TIMBER_RGBA),
+        ("screen_back", [0.30, 0.02, 0.19], [x - 0.12, y + 0.14, z0 + 1.27], PALLET_RGBA),
+        ("screen_stand", [0.04, 0.03, 0.08], [x - 0.12, y + 0.16, z0 + 1.03], PALLET_RGBA),
+        ("keys", [0.20, 0.07, 0.012], [x - 0.12, y - 0.10, z0 + 0.962], PALLET_RGBA),
+    )
+    for tag, size, pos, rgba in boxes:
+        _visual(
+            parent.add_geom(name=f"{prefix}_{tag}", type=box, size=size, pos=pos, rgba=list(rgba))
+        )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_screen",
+            type=box,
+            size=[0.27, 0.004, 0.16],
+            pos=[x - 0.12, y + 0.118, z0 + 1.27],
+            material=screen,
+        )
+    )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_light_pole",
+            type=cyl,
+            size=[0.015, 0.22, 0.0],
+            pos=[x + 0.42, y + 0.14, z0 + 1.17],
+            rgba=list(STEEL_BRUSHED_RGBA),
+        )
+    )
+    lamps = (BEACON_ESTOP_RGBA, BEACON_PAUSE_RGBA, BEACON_FEED_RGBA)
+    for l_i, rgba in enumerate(lamps):
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_light_{l_i}",
+                type=cyl,
+                size=[0.04, 0.035, 0.0],
+                pos=[x + 0.42, y + 0.14, z0 + 1.59 - 0.08 * l_i],
+                rgba=list(rgba),
+            )
+        )
+
+
+def _add_drum_cluster(parent: Any, prefix: str, x: float, y: float) -> None:
+    """Four electrolyte recovery drums on a yellow spill pallet."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    cyl = mj.mjtGeom.mjGEOM_CYLINDER
+    z0 = WAREHOUSE_FLOOR_Z
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_spill_pallet",
+            type=box,
+            size=[0.64, 0.64, 0.07],
+            pos=[x, y, z0 + 0.07],
+            rgba=list(SAFETY_YELLOW),
+        )
+    )
+    for d_i, (dx, dy) in enumerate(((-0.30, -0.30), (-0.30, 0.30), (0.30, -0.30), (0.30, 0.30))):
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_drum_{d_i}",
+                type=cyl,
+                size=[0.27, 0.42, 0.0],
+                pos=[x + dx, y + dy, z0 + 0.14 + 0.42],
+                rgba=list(BIN_BLUE_RGBA),
+            )
+        )
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_drum_{d_i}_lid",
+                type=cyl,
+                size=[0.275, 0.02, 0.0],
+                pos=[x + dx, y + dy, z0 + 0.14 + 0.85],
+                rgba=list(STEEL_BRUSHED_RGBA),
+            )
+        )
+
+
+def _add_fire_point(parent: Any, prefix: str, x: float, y: float, inward: float) -> None:
+    """Red extinguisher board on a column face; ``inward`` is +1/-1 along X into the hall."""
+    z0 = WAREHOUSE_FLOOR_Z
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_board",
+            type=mj.mjtGeom.mjGEOM_BOX,
+            size=[0.012, 0.11, 0.30],
+            pos=[x, y, z0 + 1.30],
+            rgba=[0.93, 0.94, 0.92, 1.0],
+        )
+    )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_extinguisher",
+            type=mj.mjtGeom.mjGEOM_CYLINDER,
+            size=[0.065, 0.20, 0.0],
+            pos=[x + inward * 0.08, y, z0 + 1.22],
+            rgba=list(BEACON_ESTOP_RGBA),
+        )
+    )
+
+
 def add_warehouse(spec: Any, include_background: bool = True) -> None:
     """Build the shared sustainable battery-recycling warehouse and twin conveyor lines."""
     world = spec.worldbody
@@ -1067,6 +1304,21 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
                 rgba=list(ECO_BRIGHT_RGBA),
             )
         )
+
+    # Working-floor dressing: staged pallets of spent modules beside each line, a parked
+    # forklift, a line supervisor desk, drum clusters and extinguisher points. All of it stays
+    # outside the bay cells and the walkways, so no camera view of a latch is blocked.
+    _add_staging_zone(wh, "warehouse/stage_w_n", -6.5, 1.80, ((0.0, -0.52, 2), (0.0, 0.52, 3)))
+    _add_staging_zone(wh, "warehouse/stage_w_s", -6.5, -1.80, ((0.0, -0.52, 1), (0.0, 0.52, 0)))
+    _add_staging_zone(wh, "warehouse/stage_e_n", 7.1, 1.80, ((0.0, -0.52, 3), (0.0, 0.52, 1)))
+    _add_staging_zone(wh, "warehouse/stage_e_s", 7.1, -1.80, ((0.0, -0.52, 2), (0.0, 0.52, 2)))
+    _add_forklift(wh, "warehouse/forklift", 6.3, 7.0)
+    _add_control_station(spec, wh, "warehouse/control_desk", -0.95, 1.25)
+    _add_drum_cluster(wh, "warehouse/drums_n", 1.9, 7.2)
+    _add_drum_cluster(wh, "warehouse/drums_nw", -7.7, 7.7)
+    for c_i, col_y in enumerate((-7.2, -2.4, 2.4, 7.2)):
+        _add_fire_point(wh, f"warehouse/fire_w_{c_i}", x0 + 0.275, col_y, 1.0)
+        _add_fire_point(wh, f"warehouse/fire_e_{c_i}", x1 - 0.275, col_y, -1.0)
 
     # Four independent segmented conveyor belts (one per bay), all inside the same warehouse.
     active_conveyors = (1, 2, 3, 4) if include_background else (1, 2)

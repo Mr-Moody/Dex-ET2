@@ -92,3 +92,14 @@ def test_warehouse_overview_layout() -> None:
         (3, "bay3/cctv", 3, "strip"),
         (4, "bay4/cctv", 4, "strip"),
     ]
+
+
+def test_rescue_never_changes_a_grid_or_pinned_layout() -> None:
+    from teleop.console.layout import ViewState
+
+    assert ViewState().mode == "grid"
+    for vs in (ViewState(), ViewState(mode="pin", pinned_bay=2)):
+        assert feed_layout([1, 2, 3, 4], 2, vs) == feed_layout([1, 2, 3, 4], None, vs)
+    # Only the opt-in auto focus opens the split close-up on the rescued bay.
+    auto = feed_layout([1, 2, 3, 4], 2, ViewState(mode="auto"))
+    assert [f.camera for f in auto[:2]] == ["bay2/top_ortho", "bay2/side_ortho"]

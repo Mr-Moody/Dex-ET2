@@ -56,7 +56,9 @@ class FeedSpec:
 class ViewState:
     """Operator-chosen layout, pinned bay, per-bay camera angles, tile order and zoom/pan/orbit."""
 
-    mode: LayoutMode = "auto"
+    # "grid": a stall or rescue never rearranges the cameras. "auto" (rescue bay takes the
+    # stage in split view) is opt-in from the console header.
+    mode: LayoutMode = "grid"
     pinned_bay: int | None = None
     cameras: Mapping[int, str] = field(default_factory=dict[int, str])
     bay_order: tuple[int, ...] = (1, 2, 3, 4)
@@ -157,7 +159,9 @@ def feed_layout(
             tiles.append(_feed(i, b, cam, "tile", TILE, view_state))
         return tuple(tiles)
 
-    default_focus_cam = SPLIT_VIEW if focus_bay == rescue_bay else CCTV_SUFFIX
+    # Only "auto" opens the split close-up for a rescue. A pinned bay keeps the camera the
+    # operator chose, so an anomaly on it changes nothing on screen.
+    default_focus_cam = SPLIT_VIEW if mode == "auto" else CCTV_SUFFIX
     focus_cam = (
         view_state.camera_for(focus_bay, default_focus_cam)
         if view_state is not None

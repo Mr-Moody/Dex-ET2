@@ -147,7 +147,7 @@ The user picked 1, with as much MuJoCo scene polish as possible.
 │ └─────────────────┘ └───────────────┘ │ GATE  3/3 ✓ 0.4s  │
 │ ┌BAY 3 ●NOM ──────┐ ┌BAY 4 ●NOM ────┐ │ EVENT LOG         │
 │ │ cctv feed       │ │ cctv feed     │ │ SOLANA tx 4f2…    │
-│ └─────────────────┘ └───────────────┘ │ NEMOTRON advisory │
+│ └─────────────────┘ └───────────────┘ │ TRIAGE advisory   │
 └─────────────────────────────────────────┴─────────────────┘
 ```
 
@@ -156,7 +156,10 @@ The user picked 1, with as much MuJoCo scene polish as possible.
   bay pulses.
 - **Side panel:** FIFO queue, per-bay C(t) sparklines with the 0.3 threshold line, gate result
   (fit ms, rollouts passed out of total, time), a timestamped event log, and the
-  Solana/Nemotron (Kimi) feeds.
+  Solana feed and the triage line. The triage line comes from the offline rule-based
+  `TriageReasoner`; the hosted Nemotron/Kimi reasoner was removed. The operator copilot
+  (`teleop copilot`, Gemini 4 Hydrogen for call-outs) is a separate advisory process and does
+  not write to the console.
 - **Rescue mode:** the rescued bay takes the main area with top and side views, a clutch
   indicator (HELD/RELEASED), a rescue timer and a "LIVE CONTROL" banner. The other bays drop to
   a strip.

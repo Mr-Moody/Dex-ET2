@@ -124,6 +124,7 @@ def test_player_freezes_a_powered_off_bay_and_resumes_where_it_stopped() -> None
     player.apply(data, 3.0, frozen={3})
     assert float(data.qpos[adr3]) == pytest.approx(q3_cut)  # braked
     assert player.conveyor_statuses(3.0, frozen={3})[3].mode == "estop"
+    assert not player.conveyor_statuses(3.0, frozen={3})[3].resuming
     assert player.conveyor_statuses(3.0, frozen={3})[4].mode != "estop"
     q4 = float(data.qpos[adr4])
 
