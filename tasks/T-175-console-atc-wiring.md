@@ -1,7 +1,7 @@
 ---
 id: T-175
 title: Run teleop atc through the fleet ops console by default
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/console-atc-wiring
 depends_on: [T-173, T-174]
