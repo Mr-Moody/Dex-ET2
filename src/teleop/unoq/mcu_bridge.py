@@ -277,6 +277,12 @@ class McuConsoleBridge:
     # -- state
 
     @property
+    def last_heard_ns(self) -> int | None:
+        """Monotonic ns (this bridge's clock) of the last valid MCU line, None before any."""
+        with self._lock:
+            return self._last_rx_ns
+
+    @property
     def link_ok(self) -> bool:
         with self._lock:
             last = self._last_rx_ns

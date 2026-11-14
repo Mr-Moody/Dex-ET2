@@ -1,0 +1,6 @@
+name: Booth Console Service
+icon: "\U0001F3AE"
+description: Teleop booth edge service. Serves the MCU operator console (buttons, heartbeat, bay LEDs) to the laptop over TCP 15052 and UDP 15051.
+ports:
+  - 15051
+  - 15052

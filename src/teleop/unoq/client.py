@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
-from teleop.atc.types import ConsoleInputState, SkillPrimitive, StallMatch, StallSignature
+from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive, StallMatch, StallSignature
 from teleop.types import Pose
 from teleop.unoq import protocol as P
 from teleop.unoq.dmp import pose_to_vec7
@@ -241,4 +241,14 @@ class UnoQClient:
         return int(reply["signature_samples"])
 
     def console_state(self) -> ConsoleInputState:
-        return console_from_dict(self.request({"op": P.OP_CONSOLE_STATE})["console"])
+        return self.console_status()[0]
+
+    def console_status(self) -> tuple[ConsoleInputState, int | None]:
+        """Console state plus the MCU heartbeat age in ms (None: no MCU attached or heard)."""
+        reply = self.request({"op": P.OP_CONSOLE_STATE})
+        age = reply.get("mcu_heartbeat_age_ms")
+        return console_from_dict(reply["console"]), None if age is None else int(age)
+
+    def set_bay_state(self, bay_id: int, state: BayState) -> None:
+        """Set one bay's LED state on the board's MCU console (no-op without a console)."""
+        self.request({"op": P.OP_SET_BAY_STATE, "bay_id": bay_id, "state": state.name})
