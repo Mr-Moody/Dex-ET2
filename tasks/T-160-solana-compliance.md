@@ -1,12 +1,12 @@
 ---
 id: T-160
 title: Solana compliance & alert chain integration
-status: claimed
-owner: lead-laptop
-branch: feat/solana-compliance
+status: done
+owner: null
+branch: null
 depends_on: [T-100]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-160-solana-compliance--alert-chain-integration-teammate-task
-claimed_at: '2026-11-14T00:40:09+00:00'
+claimed_at: null
 ---
 
 **Reserved for Solana teammate. Implement inside `src/teleop/compliance/solana.py` and `tests/compliance/test_solana.py` without changing `ComplianceSink` / `ComplianceEvent` signatures in `protocol.py`.**

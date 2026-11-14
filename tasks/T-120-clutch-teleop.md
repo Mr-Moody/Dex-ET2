@@ -1,12 +1,12 @@
 ---
 id: T-120
 title: Relative-clutch pose indexing, force bleed-off on release & split cameras
-status: in_review
-owner: lead-laptop
-branch: feat/clutch-teleop
+status: done
+owner: null
+branch: null
 depends_on: [T-100, T-110]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-120-relative-clutch-pose-indexing-force-bleed-off-on-release--split-cameras
-claimed_at: '2026-11-14T01:56:45+00:00'
+claimed_at: null
 ---
 
 **P0 Ergonomic Teleop Rescue track. Edit only `src/teleop/retarget/clutch.py` and `tests/retarget/test_clutch.py`.**

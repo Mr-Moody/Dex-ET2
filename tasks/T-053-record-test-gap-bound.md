@@ -1,12 +1,12 @@
 ---
 id: T-053
 title: Fix flaky max_gap_s bound in the record integration test
-status: in_review
-owner: lead-laptop
-branch: fix/record-test-gap-bound
+status: done
+owner: null
+branch: null
 depends_on: [T-051]
 plan: null
-claimed_at: '2026-11-14T00:23:28+00:00'
+claimed_at: null
 ---
 
 `test_record_two_short_episodes` asserts `max_gap_s < 1.0` and fails intermittently on CI

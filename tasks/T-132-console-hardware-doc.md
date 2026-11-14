@@ -1,12 +1,12 @@
 ---
 id: T-132
 title: Operator console hardware doc (sensor suite, pin map, wiring diagram)
-status: in_review
-owner: lead-laptop
-branch: docs/console-hardware
+status: done
+owner: null
+branch: null
 depends_on: [T-100]
 plan: null
-claimed_at: '2026-11-14T02:56:13+00:00'
+claimed_at: null
 ---
 
 **Docs only. Create `docs/hardware/console/` and nothing else outside this task file.**
