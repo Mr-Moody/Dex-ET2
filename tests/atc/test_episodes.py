@@ -399,3 +399,31 @@ def test_rescue_label_follows_selecting_glove() -> None:
     assert label() == "scripted"
     selecting.rescue_input = "glove"
     assert label() == "glove"
+
+
+@needs_models
+def test_close_says_it_is_saving(
+    unoq: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Quitting waits for encoding; the operator is told so instead of seeing a silent hang."""
+    controller, _ = _controller(unoq)
+    rig = controller.coordinator.rig(1)
+    rec = FakeRecorder(save_delay_s=0.2)
+    sink = _sink(controller, tmp_path / "ds", recorder=rec)
+    sink.on_episode_start(1, "operator", None, None)
+    sink.on_tick(1, rig, rig.wrist_pose(), {})
+    sink.on_episode_end(1, True, None)
+    sink.close()
+    out = capsys.readouterr().out
+    assert "saving 1 recorded episode" in out
+    assert len(rec.episodes) == 1
+
+
+@needs_models
+def test_close_is_quiet_with_nothing_to_save(
+    unoq: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    controller, _ = _controller(unoq)
+    sink = _sink(controller, tmp_path / "ds", recorder=FakeRecorder())
+    sink.close()
+    assert "saving" not in capsys.readouterr().out

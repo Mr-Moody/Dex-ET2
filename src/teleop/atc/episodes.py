@@ -172,6 +172,7 @@ class EpisodeSink:
         self._queue: queue.Queue[_Finished | None] = queue.Queue()
         self._lock = threading.Lock()
         self._written = 0
+        self._pending = 0  # finished episodes queued or being written
         self._closed = False
         self._thread = threading.Thread(target=self._write_loop, name="episode-writer", daemon=True)
         self._thread.start()
@@ -253,6 +254,8 @@ class EpisodeSink:
             max_arm_ratio=ep.max_arm_ratio,
             aborted_reason=aborted_reason,
         )
+        with self._lock:
+            self._pending += 1
         self._queue.put(_Finished(ep, meta))
 
     def close(self) -> None:
@@ -263,6 +266,10 @@ class EpisodeSink:
         if self._open:
             logger.info("episode sink closing: dropping %d unfinished episode(s)", len(self._open))
         self._open.clear()
+        with self._lock:
+            pending = self._pending
+        if pending:  # encoding can take a while: don't let quitting look like a hang
+            print(f"teleop atc: saving {pending} recorded episode(s) to {self.root}...")
         self._queue.put(None)
         self._thread.join()
 
@@ -282,6 +289,9 @@ class EpisodeSink:
                 except Exception:
                     logger.exception("bay %d: failed to write episode", item.episode.bay)
                     self._recorder.discard_episode()
+                finally:
+                    with self._lock:
+                        self._pending -= 1
         finally:
             try:
                 self._recorder.close()
