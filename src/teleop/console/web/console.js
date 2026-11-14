@@ -67,7 +67,9 @@ const ui = {
   telemetry: null,
   lastActionSeq: null, // null until the first telemetry, so a reload does not replay old toasts
   briefKey: null,
-  view: { mode: "auto", pinnedBay: null, cameras: {}, bayOrder: [1, 2, 3, 4], zooms: {} },
+  // "grid" by default: a stall or rescue never rearranges the cameras on its own. "auto"
+  // (the rescue bay takes the stage) is opt-in from the header switch.
+  view: { mode: "grid", pinnedBay: null, cameras: {}, bayOrder: [1, 2, 3, 4], zooms: {} },
   dragBay: null,
   dragRole: null,
   padActive: false,
@@ -608,7 +610,12 @@ function updateWall(t) {
     if (el.dataset.state !== "STANDBY" || b.state !== "STANDBY") el.dataset.state = b.state;
     el.classList.toggle("is-selected", t.selected_bay === b.id && t.mode !== "rescue");
     const state = el.querySelector(".feed__state");
-    if (state) state.textContent = STATE_TEXT[b.state] || b.label;
+    if (state) {
+      // In the grid there is no stage header, so the rescued bay's tile carries the timer.
+      const timed = t.rescue && t.rescue.bay === b.id && b.state === "RESCUE";
+      const text = STATE_TEXT[b.state] || b.label;
+      state.textContent = timed ? `${text} ${(t.rescue.elapsed_s ?? 0).toFixed(1)} s` : text;
+    }
     const conf = el.querySelector(".feed__conf-val");
     if (conf) conf.textContent = b.state === "STANDBY" ? "" : b.confidence.toFixed(2);
     const time = el.querySelector(".feed__time");
@@ -890,7 +897,8 @@ function situation(t) {
     const tag = refused ? `Refused · Bay ${r}` : `Rescue · Bay ${r}`;
     const tone = refused ? "ood" : "rescue";
     const acts = [];
-    if (t.mode === "grid") acts.push({ label: `Focus Bay ${r}`, accent: true, run: () => setLayoutMode("pin", r) });
+    // Staying in the grid is a choice, so the close-up is offered, never pushed.
+    if (t.mode === "grid") acts.push({ label: `Close-up of Bay ${r}`, accent: false, run: () => setLayoutMode("pin", r) });
     if (t.rescue.clutch && !refused && b && b.x_bolt_cm != null && b.x_bolt_cm >= t.bolt_clear_cm) {
       acts.push({ label: "Release Clutch", accent: true, run: () => pressKey(32, "Space") });
       return {
@@ -1484,7 +1492,7 @@ function initViewBar() {
   const ovBtn = $("view-overview");
   if (ovBtn) {
     ovBtn.addEventListener("click", () =>
-      setLayoutMode(ui.view.mode === "overview" ? "auto" : "overview", null)
+      setLayoutMode(ui.view.mode === "overview" ? "grid" : "overview", null)
     );
   }
   $("view-grid").addEventListener("click", () => setLayoutMode("grid", null));
