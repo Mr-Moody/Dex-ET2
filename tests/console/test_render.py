@@ -345,14 +345,14 @@ def test_rescue_feeds_render_the_full_arm(monkeypatch: pytest.MonkeyPatch) -> No
     xml = """<mujoco><worldbody>
       <camera name="bay1/top_ortho" pos="0 0 1"/><camera name="bay1/side_ortho" pos="1 0 0"/>
       <body><freejoint/><geom size="0.1"/></body></worldbody></mujoco>"""
-    model = _mujoco.MjModel.from_xml_string(xml)
+    model = mj.MjModel.from_xml_string(xml)
     feeds = [
         FeedSpec(0, "bay1/top_ortho", 1, "main", 64, 48),
         FeedSpec(1, "bay1/side_ortho", 1, "main", 64, 48),
     ]
     r = FeedRenderer(model, None)
     try:
-        frames, _ = r.render(SimSnapshot.capture(_mujoco.MjData(model), _view(1), 0.0), feeds, 0.0)
+        frames, _ = r.render(SimSnapshot.capture(mj.MjData(model), _view(1), 0.0), feeds, 0.0)
     finally:
         r.close()
     assert len(frames) == 2
