@@ -189,6 +189,32 @@ def test_clutch_release_sets_qtarget_to_qactual_and_discards_incomplete_buffer()
     assert buf.finish(bolt_cleared=True) is None  # nothing left to keep
 
 
+def test_new_clutch_hold_without_finish_drops_the_stale_hold() -> None:
+    buf = RescueTrajectoryBuffer(LatchPose(position=(0.0, 0.0, 0.0)))
+    wrist = _pose(0.1, 0.0, 0.0)
+    q16 = [0.0] * 16
+    for t in (0.0, 0.1):
+        assert buf.record(True, t, wrist, q16, 0.0)
+    assert not buf.record(False, 0.2, wrist, q16, 0.0)  # released, but finish() never called
+    for t in (5.0, 5.1, 5.2):
+        assert buf.record(True, t, wrist, q16, 0.0)
+
+    traj = buf.finish(bolt_cleared=True)
+    assert traj is not None
+    np.testing.assert_allclose(traj.timestamps_s, [0.0, 0.1, 0.2])  # second hold only
+
+
+def test_finish_after_release_tick_keeps_the_hold() -> None:
+    buf = RescueTrajectoryBuffer(LatchPose(position=(0.0, 0.0, 0.0)))
+    wrist = _pose(0.1, 0.0, 0.0)
+    for t in (0.0, 0.1, 0.2):
+        assert buf.record(True, t, wrist, [0.0] * 16, 0.0)
+    assert not buf.record(False, 0.3, wrist, [0.0] * 16, 0.0)
+    traj = buf.finish(bolt_cleared=True)
+    assert traj is not None
+    assert len(traj) == 3
+
+
 def test_successful_clutch_rescue_transforms_wrist_into_local_latch_frame() -> None:
     world_latch = latch_world_pose(2, BAY2_LATCH)  # 35 deg yaw, shifted
     buf = RescueTrajectoryBuffer(world_latch)
