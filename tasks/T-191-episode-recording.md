@@ -1,7 +1,7 @@
 ---
 id: T-191
 title: Wrist camera and LeRobot episode recording of ATC recoveries
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/episode-recording
 depends_on: [T-190]
