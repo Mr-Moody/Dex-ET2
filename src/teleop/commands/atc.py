@@ -36,6 +36,7 @@ from teleop.atc.stage import (
     AudioCues,
     ConsoleSource,
     NullSpeaker,
+    ScriptedGlove,
     StageController,
     StageDirector,
     SystemSpeaker,
@@ -262,7 +263,14 @@ def main(argv: list[str]) -> int:
 
 def _run(cfg: AtcConfig, controller: StageController) -> int:
     director = StageDirector(controller) if cfg.script else None
-    glove = None if director is not None else GloveOperator.build(cfg, controller.coordinator.model)
+    glove: GloveOperator | ScriptedGlove | None = None
+    if director is None:
+        # Without real gloves, a scripted rescue plays while the clutch is held (see ScriptedGlove).
+        glove = (
+            ScriptedGlove(controller)
+            if cfg.source == "synthetic"
+            else GloveOperator.build(cfg, controller.coordinator.model)
+        )
     co = controller.coordinator
     next_log = 0.0
 

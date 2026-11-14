@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from datetime import datetime
 
-from teleop.atc.hud import GateStatus, HudView, RescueStatus
+from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
 from teleop.atc.types import BaySnapshot, BayState
 from teleop.console.layout import feed_layout
 from teleop.console.telemetry import EVENT_LOG_LEN, HISTORY_LEN, THRESHOLD, TelemetryAdapter
@@ -123,7 +123,7 @@ def test_transition_texts() -> None:
         (
             _snap(1, BayState.OOD_ESCALATED, 0.2),
             "alert",
-            "Bay 1: unseen jam, skill transfer refused",
+            "Bay 1: stall refused, no validated skill is close enough",
         ),
         (_snap(1), "ok", "Bay 1 back to nominal"),
     ]
@@ -203,3 +203,26 @@ def test_non_finite_values_never_reach_the_wire() -> None:
     assert msg["gate"]["elapsed_s"] is None  # type: ignore[index]
     assert _bay(msg, 3)["confidence"] == 0.0
     assert msg["events"][-1]["text"] == "Skill gate 3/3 passed in ? s"  # type: ignore[index]
+
+
+def test_key_outcomes_are_sent_and_logged_once() -> None:
+    a = _adapter()
+    note1 = ActionNote(1, "F", "Bay 1 flap jam armed: Bay 1 stalls on its next cycle", "ok")
+    note2 = ActionNote(2, "SPACE", "Clutch engaged, but no bay is waiting for rescue", "warn")
+    msg = a.build(_view(actions=(note1,)), 1.0, GRID, {})
+    assert msg["actions"] == [{"seq": 1, "key": "F", "text": note1.text, "level": "ok"}]
+    msg = a.build(_view(actions=(note1, note2)), 2.0, GRID, {})
+    assert [x["seq"] for x in msg["actions"]] == [1, 2]  # type: ignore[union-attr]
+    msg = a.build(_view(actions=(note1, note2)), 3.0, GRID, {})  # no new press
+    logged = [(e["level"], e["text"]) for e in msg["events"]]  # type: ignore[union-attr]
+    assert logged == [("info", f"[F] {note1.text}"), ("warn", f"[SPACE] {note2.text}")]
+
+
+def test_armed_faults_and_bolt_travel_per_bay() -> None:
+    a = _adapter()
+    snap1 = BaySnapshot(1, BayState.NOMINAL, 0.9, 0.0351, 0.5, SKU)
+    msg = a.build(_view(snap1, _snap(2), faults=((2, "pin", "armed"),)), 1.0, GRID, {})
+    assert msg["bolt_clear_cm"] == 5.2
+    assert _bay(msg, 1)["x_bolt_cm"] == 3.51 and _bay(msg, 1)["fault"] is None
+    assert _bay(msg, 2)["fault"] == {"kind": "pin", "phase": "armed"}
+    assert _bay(msg, 3)["x_bolt_cm"] is None  # background replay has no live bolt

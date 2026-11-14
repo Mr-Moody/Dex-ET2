@@ -24,7 +24,22 @@
   <div class="linkdown" id="linkdown" hidden>Link to the cell controller is down. Reconnecting…</div>
 
   <main class="desk">
-    <section class="wall" id="wall" aria-label="Bay cameras"></section>
+    <div class="stagecol">
+      <section class="brief" id="brief" data-tone="connecting" aria-live="polite">
+        <div class="brief__body">
+          <span class="brief__tag" id="brief-tag">Status</span>
+          <h2 class="brief__head" id="brief-head">Connecting to the cell controller</h2>
+          <p class="brief__hint" id="brief-hint"></p>
+        </div>
+        <div class="brief__beat" id="beat" hidden>
+          <span class="brief__beat-label">Stage script</span>
+          <span class="brief__beat-name" id="beat-name"></span>
+        </div>
+      </section>
+      <section class="wall" id="wall" aria-label="Bay cameras"></section>
+      <nav class="keys" id="keys" aria-label="Keyboard controls"></nav>
+      <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+    </div>
 
     <aside class="rail" aria-label="Fleet status">
       <section class="panel">

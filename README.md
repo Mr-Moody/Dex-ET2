@@ -217,7 +217,13 @@ negative control (refused).
 
 ### Keys
 
-These work in the console page or the MuJoCo window.
+These work in the console page or the MuJoCo window. In the console you can also click the
+key caps at the bottom of the page.
+
+The console answers every key press. A toast shows what it did, or why it did nothing (for
+example, engaging the clutch while the wrong bay is selected). The banner above the cameras
+says what is happening and highlights the key to press next. The MuJoCo viewer shows the last
+key's outcome in its bottom-right overlay.
 
 | Key | Action |
 |---|---|
@@ -228,10 +234,15 @@ These work in the console page or the MuJoCo window.
 | `P` | Arm the Bay 2 pinned bolt (out-of-distribution, refused) |
 | `R` | Reset |
 
+Without gloves (`--source synthetic`), engaging the clutch on the bay waiting for rescue plays a
+scripted rescue: the hand presses the stopper flap and slides the bolt clear, then holds. The
+hand stays still the rest of the time. With `--source studio`, your gloves drive the hand
+instead.
+
 A typical manual run:
 
 1. Press `F` and wait for Bay 1 to stall and queue.
-2. Press `1`, then `SPACE`, to rescue it.
+2. Press `1`, then `SPACE`, to rescue it. Press `SPACE` again once the bolt is clear.
 3. Watch the skill fit, the 3/3 gate and Bay 2 clearing itself.
 4. Press `P` to see the refusal.
 

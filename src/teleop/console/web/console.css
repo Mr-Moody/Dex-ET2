@@ -26,6 +26,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* components below set display; hidden must win */
 
 html, body {
   margin: 0;
@@ -91,6 +92,139 @@ body {
   grid-template-columns: minmax(0, 1fr) var(--rail);
   min-height: 0;
 }
+
+/* ---------------------------------------------------------------- stage column */
+
+.stagecol {
+  position: relative;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+/* what is happening now + what to press next */
+.brief {
+  --tone: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin: var(--gap) var(--gap) 0;
+  padding: 12px 16px 12px 18px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-left: 6px solid var(--tone);
+}
+.brief[data-tone="idle"] { --tone: var(--nominal); }
+.brief[data-tone="armed"] { --tone: var(--safety); }
+.brief[data-tone="stalled"] { --tone: var(--stalled); }
+.brief[data-tone="queued"] { --tone: var(--queued); }
+.brief[data-tone="rescue"] { --tone: var(--rescue); }
+.brief[data-tone="validating"] { --tone: var(--validating); }
+.brief[data-tone="auto"] { --tone: var(--auto); }
+.brief[data-tone="ood"] { --tone: var(--ood); }
+.brief.is-new { animation: brief-in 420ms ease-out; }
+@keyframes brief-in { from { background: color-mix(in srgb, var(--tone) 22%, var(--panel)); } }
+.brief__body { min-width: 0; display: grid; gap: 2px; }
+.brief__tag {
+  justify-self: start;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--tone);
+}
+.brief__head { font-size: 22px; font-weight: 600; line-height: 1.2; }
+.brief__hint { color: var(--muted); font-size: 15px; }
+.brief__hint kbd, .toast kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0 6px;
+  border: 1px solid var(--faint);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: 600 13px/1.5 var(--font);
+  text-align: center;
+}
+.brief__beat {
+  margin-left: auto;
+  flex: none;
+  display: grid;
+  text-align: right;
+  padding-left: 18px;
+  border-left: 1px solid var(--hair);
+}
+.brief__beat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.brief__beat-name { font-size: 16px; font-weight: 600; }
+
+/* keyboard bar: every control, lit when pressed, pulsing when it is the next step */
+.keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 22px;
+  margin: 0 var(--gap) var(--gap);
+  padding: 9px 14px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+}
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.key__text { color: var(--muted); font-size: 14px; margin-left: 2px; white-space: nowrap; }
+.key__cap {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--faint);
+  border-bottom-width: 3px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: 600 14px var(--font);
+  cursor: pointer;
+}
+.key__cap--wide { min-width: 64px; }
+.key__cap:hover { border-color: var(--muted); }
+.key__cap.is-suggested {
+  border-color: var(--safety);
+  color: var(--safety);
+  animation: suggest 1.4s ease-in-out infinite;
+}
+@keyframes suggest { 50% { box-shadow: 0 0 0 4px rgb(242 183 5 / 0.22); } }
+.key__cap.is-pressed { animation: press 260ms ease-out; }
+@keyframes press {
+  0% { background: var(--safety); color: #111; transform: translateY(2px); border-bottom-width: 1px; }
+  100% { background: var(--panel-2); }
+}
+
+/* key outcomes from the cell controller */
+.toasts {
+  position: absolute;
+  right: calc(var(--gap) + 8px);
+  bottom: 64px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+  max-width: min(520px, 80%);
+}
+.toast {
+  --tone: var(--nominal);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgb(32 38 45 / 0.96);
+  border: 1px solid var(--hair);
+  border-left: 5px solid var(--tone);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.45);
+  font-size: 15px;
+  animation: toast-in 200ms ease-out;
+  transition: opacity 300ms, transform 300ms;
+}
+.toast[data-level="info"] { --tone: var(--rescue); }
+.toast[data-level="warn"] { --tone: var(--queued); }
+.toast.is-leaving { opacity: 0; transform: translateX(16px); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 
 .wall {
   min-height: 0;
@@ -217,6 +351,24 @@ body {
 .feed__rec::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--stalled); animation: rec 1.6s steps(2, jump-none) infinite; }
 @keyframes rec { 50% { opacity: 0.2; } }
 .feed__replay { margin-left: auto; }
+.feed__armed {
+  padding: 1px 8px;
+  border: 1px solid var(--safety);
+  color: var(--safety);
+  font-weight: 600;
+  text-shadow: none;
+  background: rgb(0 0 0 / 0.5);
+}
+.feed__bolt { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+.feed__bolt-label { color: var(--muted); }
+.feed__bolt-track {
+  position: relative;
+  width: 90px; height: 6px;
+  background: rgb(255 255 255 / 0.14);
+}
+.feed__bolt-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--state); transition: width 120ms linear; }
+.feed__bolt.is-clear .feed__bolt-fill { background: var(--nominal); }
+.feed__bolt-val { min-width: 7.5em; text-align: right; }
 
 .feed__nosignal, .feed__lost {
   position: absolute; inset: 0;
@@ -234,6 +386,7 @@ body {
 .feed--strip .feed__name { font-size: 15px; }
 .feed--strip .feed__state { font-size: 12px; padding: 1px 6px; }
 .feed--strip .feed__conf { font-size: 15px; }
+.feed--strip .feed__armed,
 .feed--strip .feed__bottom,
 .feed--strip .feed__view,
 .feed--strip .feed__nosignal span,
@@ -313,6 +466,9 @@ body {
   .panel { padding: 10px 12px; }
   .panel--hooks { display: none; }
   .feed--strip .feed__conf { display: none; }
+  .brief__head { font-size: 19px; }
+  .key__text { display: none; }
+  .feed__bolt-track { width: 60px; }
 }
 
 @media (max-width: 760px) {
@@ -323,6 +479,9 @@ body {
   .wall.is-rescue { grid-template-rows: none; }
   .strip { grid-template-columns: 1fr 1fr; }
   .rail { border-left: 0; }
+  .brief { flex-wrap: wrap; }
+  .brief__beat { margin-left: 0; padding-left: 0; border-left: 0; text-align: left; }
+  .toasts { position: fixed; bottom: 12px; right: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

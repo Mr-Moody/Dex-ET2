@@ -15,7 +15,7 @@ const STATE_TEXT = {
   RESCUE: "Under rescue",
   VALIDATING: "Validating",
   AUTONOMOUS_SKILL: "Auto skill",
-  OOD_ESCALATED: "Needs a human",
+  OOD_ESCALATED: "Refused",
   STANDBY: "Standby",
 };
 const STATE_COLOR = {
@@ -40,7 +40,26 @@ const ui = {
   sparks: new Map(), // bay -> { row, canvas, val }
   lastEventKey: null,
   telemetry: null,
+  lastActionSeq: null, // null until the first telemetry, so a reload does not replay old toasts
+  briefKey: null,
 };
+
+// Keyboard bar. Codes are GLFW key codes (the same ones the MuJoCo viewer receives).
+const KEY_BAR = [
+  { caps: ["1", "2", "3", "4"], codes: [49, 50, 51, 52], text: "Select bay" },
+  { caps: ["Space"], codes: [32], text: "Clutch on / off" },
+  { caps: ["F"], codes: [70], text: "Jam Bay 1 flap" },
+  { caps: ["G"], codes: [71], text: "Jam Bay 2 flap" },
+  { caps: ["P"], codes: [80], text: "Pin Bay 2 bolt" },
+  { caps: ["R"], codes: [82], text: "Reset" },
+];
+const FAULT_TEXT = {
+  armed: { flap: "Flap jam armed", pin: "Bolt pin armed" },
+  active: { flap: "Flap jammed", pin: "Bolt pinned" },
+};
+const faultName = (kind) => (kind === "pin" ? "pinned bolt" : "flap jam");
+const TOAST_MS = 4500;
+const MAX_TOASTS = 4;
 
 // ------------------------------------------------------------------ feed tiles
 
@@ -61,7 +80,13 @@ function feedTile(bayId, camera, role) {
     <div class="feed__bottom">
       <span class="feed__rec">REC</span>
       <time class="feed__time"></time>
+      <span class="feed__armed" hidden></span>
       <span class="feed__replay"></span>
+      <span class="feed__bolt" hidden>
+        <span class="feed__bolt-label">Bolt</span>
+        <span class="feed__bolt-track"><span class="feed__bolt-fill"></span></span>
+        <span class="feed__bolt-val"></span>
+      </span>
     </div>
     <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>`;
   el.addEventListener("click", () => selectBay(bayId));
@@ -108,7 +133,9 @@ function buildWall(t) {
     wall.classList.add("is-rescue");
     const head = document.createElement("div");
     head.className = "takeover";
-    head.innerHTML = `<h2>You have control of Bay ${t.rescue.bay}</h2>
+    const refusedBay = t.bays.some((b) => b.id === t.rescue.bay && b.state === "OOD_ESCALATED");
+    // The brief above says who is driving; this header only names the takeover.
+    head.innerHTML = `<h2>Bay ${t.rescue.bay} · ${refusedBay ? "refused stall" : "operator rescue"}</h2>
       <span class="takeover__timer" id="rescue-timer"></span>
       <span class="clutch" id="clutch"></span>`;
     wall.append(head);
@@ -162,6 +189,24 @@ function updateWall(t) {
     if (time) time.textContent = t.wall;
     const replay = el.querySelector(".feed__replay");
     if (replay) replay.textContent = b.replayed ? "Replayed routine cycle" : "";
+    const armed = el.querySelector(".feed__armed");
+    if (armed) {
+      const f = b.fault;
+      armed.hidden = !f;
+      armed.textContent = f ? (FAULT_TEXT[f.phase] || {})[f.kind] || "Fault" : "";
+    }
+    const bolt = el.querySelector(".feed__bolt");
+    if (bolt) {
+      const show = b.x_bolt_cm != null && t.bolt_clear_cm;
+      bolt.hidden = !show;
+      if (show) {
+        const frac = Math.max(0, Math.min(1, b.x_bolt_cm / t.bolt_clear_cm));
+        bolt.querySelector(".feed__bolt-fill").style.width = `${(frac * 100).toFixed(1)}%`;
+        bolt.classList.toggle("is-clear", b.x_bolt_cm >= t.bolt_clear_cm);
+        bolt.querySelector(".feed__bolt-val").textContent =
+          `${b.x_bolt_cm.toFixed(1)} / ${t.bolt_clear_cm.toFixed(1)} cm`;
+      }
+    }
   }
   if (t.mode === "rescue" && t.rescue) {
     const timer = $("rescue-timer");
@@ -292,6 +337,217 @@ function updateLog(t) {
   }
 }
 
+// ------------------------------------------------------------------ what is happening now
+
+const kbd = (k) => `<kbd>${k}</kbd>`;
+
+// One headline for the whole cell, picked by priority, plus the key(s) worth pressing next.
+// Everything comes from telemetry, so the brief is always consistent with the tiles.
+function situation(t) {
+  const bays = t.bays.filter((b) => b.state !== "STANDBY");
+  const first = (state) => bays.find((b) => b.state === state);
+  const clear = t.bolt_clear_cm ? t.bolt_clear_cm.toFixed(1) : "5.2";
+
+  if (t.rescue) {
+    const r = t.rescue.bay;
+    const b = bays.find((x) => x.id === r);
+    const refused = b && b.state === "OOD_ESCALATED";
+    const bolt = b && b.x_bolt_cm != null ? `${b.x_bolt_cm.toFixed(1)} cm` : "unknown";
+    const tag = refused ? `Refused · Bay ${r}` : `Rescue · Bay ${r}`;
+    const tone = refused ? "ood" : "rescue";
+    if (t.rescue.clutch && !refused && b && b.x_bolt_cm != null && b.x_bolt_cm >= t.bolt_clear_cm) {
+      return {
+        tone, tag,
+        head: `Bolt cleared on Bay ${r}`,
+        hint: `Release the clutch with ${kbd("Space")} to hand the rescue over: the UNO Q learns it as a skill.`,
+        keys: [32],
+      };
+    }
+    if (t.rescue.clutch) {
+      return {
+        tone, tag,
+        head: `You are driving Bay ${r}`,
+        hint: refused
+          ? `This bolt is pinned and will not clear by hand. Release the clutch with ${kbd("Space")}, then press ${kbd("R")} to reset.`
+          : `Slide the bolt past ${clear} cm (now ${bolt}), then release the clutch with ${kbd("Space")}.`,
+        keys: [32],
+      };
+    }
+    const head = refused
+      ? `Bay ${r} refused to guess and needs a human`
+      : `Bay ${r} stalled on a jam it has not learned`;
+    if (t.selected_bay !== r) {
+      return { tone, tag, head, hint: `Press ${kbd(r)} to select it, then ${kbd("Space")} to take control.`, keys: [48 + r] };
+    }
+    return {
+      tone, tag, head,
+      hint: refused
+        ? `No validated skill is close enough to this stall. Press ${kbd("Space")} to inspect it by hand, or ${kbd("R")} to reset.`
+        : `Press ${kbd("Space")} to engage the clutch and drive Bay ${r} with the gloves.`,
+      keys: [32],
+    };
+  }
+  const val = first("VALIDATING");
+  if (val) {
+    return {
+      tone: "validating", tag: "Learning",
+      head: `Turning Bay ${val.id}'s rescue into a skill`,
+      hint: "The UNO Q fits the motion, then three headless simulations must all clear the bolt before the fleet can use it.",
+      keys: [],
+    };
+  }
+  const stalled = first("STALLED");
+  if (stalled) {
+    return {
+      tone: "stalled", tag: `Stall · Bay ${stalled.id}`,
+      head: `Bay ${stalled.id} stalled`,
+      hint: "Matching the stall against the skills the fleet has learned…",
+      keys: [],
+    };
+  }
+  const auto = first("AUTONOMOUS_SKILL");
+  if (auto) {
+    return {
+      tone: "auto", tag: `Autonomous · Bay ${auto.id}`,
+      head: `Bay ${auto.id} is clearing the jam on its own`,
+      hint: `Replaying learned skill${auto.skill ? ` ${auto.skill}` : ""} inside the torque safety tube. No operator needed.`,
+      keys: [],
+    };
+  }
+  if (t.queue.length) {
+    return {
+      tone: "queued", tag: "Queue",
+      head: `Bay ${t.queue[0]} is next in the rescue queue`,
+      hint: "It is retracted to a safe hover and will be handed to you as soon as the rescue slot frees up.",
+      keys: [],
+    };
+  }
+  // A faulted cycle that has not stalled yet: the bay is still pushing, about to hit it.
+  const active = bays.filter((b) => b.fault && b.fault.phase === "active" && b.state === "NOMINAL" && b.x_bolt_cm < t.bolt_clear_cm);
+  if (active.length) {
+    const b = active[0];
+    return {
+      tone: "armed", tag: `Fault · Bay ${b.id}`,
+      head: `Bay ${b.id} is pushing into a ${faultName(b.fault.kind)}`,
+      hint: `Watch its confidence: a stall is declared when it stays below ${t.threshold.toFixed(1)} for 300 ms.`,
+      keys: [],
+    };
+  }
+  const armed = bays.filter((b) => b.fault && b.fault.phase === "armed");
+  if (armed.length) {
+    const what = armed.map((b) => `Bay ${b.id} (${faultName(b.fault.kind)})`).join(" and ");
+    return {
+      tone: "armed", tag: "Fault armed",
+      head: `Fault armed on ${what}`,
+      hint: "It takes effect when the bay starts its next cycle.",
+      keys: [],
+    };
+  }
+  if (t.gate && t.gate.ok) {
+    return {
+      tone: "idle", tag: "Routine",
+      head: "All bays running their routine",
+      hint: `A skill is deployed. Press ${kbd("G")} to jam Bay 2 and watch it clear on its own, or ${kbd("P")} for the refused case.`,
+      keys: [71, 80],
+    };
+  }
+  return {
+    tone: "idle", tag: "Routine",
+    head: "All bays running their routine",
+    hint: `Press ${kbd("F")} to jam Bay 1's flap and start a rescue.`,
+    keys: [70],
+  };
+}
+
+function updateBrief(t) {
+  const s = situation(t);
+  const key = `${s.tone}|${s.tag}|${s.head}|${s.hint}`;
+  if (key !== ui.briefKey) {
+    ui.briefKey = key;
+    const brief = $("brief");
+    brief.dataset.tone = s.tone;
+    $("brief-tag").textContent = s.tag;
+    $("brief-head").textContent = s.head;
+    $("brief-hint").innerHTML = s.hint; // built only from our own strings and numbers
+    brief.classList.remove("is-new");
+    void brief.offsetWidth; // restart the arrival animation
+    brief.classList.add("is-new");
+  }
+  for (const cap of $("keys").querySelectorAll(".key__cap")) {
+    cap.classList.toggle("is-suggested", s.keys.includes(Number(cap.dataset.code)));
+  }
+  const beat = t.beat || "";
+  $("beat").hidden = !beat;
+  $("beat-name").textContent = beat;
+}
+
+// ------------------------------------------------------------------ key bar and toasts
+
+function buildKeyBar() {
+  const bar = $("keys");
+  for (const group of KEY_BAR) {
+    const item = document.createElement("div");
+    item.className = "key";
+    group.caps.forEach((cap, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "key__cap";
+      if (cap.length > 1) b.classList.add("key__cap--wide");
+      b.dataset.code = String(group.codes[i]);
+      b.textContent = cap;
+      b.title = `${group.text} (${cap})`;
+      b.tabIndex = -1; // never keeps focus, so a later Space press is not also a click
+      b.addEventListener("mousedown", (e) => e.preventDefault());
+      b.addEventListener("click", () => pressKey(group.codes[i], cap));
+      item.append(b);
+    });
+    const label = document.createElement("span");
+    label.className = "key__text";
+    label.textContent = group.text;
+    item.append(label);
+    bar.append(item);
+  }
+}
+
+function flashCap(code) {
+  const cap = $("keys").querySelector(`.key__cap[data-code="${code}"]`);
+  if (!cap) return;
+  cap.classList.remove("is-pressed");
+  void cap.offsetWidth;
+  cap.classList.add("is-pressed");
+}
+
+function toast(key, text, level) {
+  const box = $("toasts");
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.dataset.level = level;
+  const k = document.createElement("kbd");
+  k.textContent = key;
+  const span = document.createElement("span");
+  span.textContent = text;
+  el.append(k, span);
+  box.append(el);
+  while (box.children.length > MAX_TOASTS) box.firstElementChild.remove();
+  setTimeout(() => {
+    el.classList.add("is-leaving");
+    setTimeout(() => el.remove(), 300);
+  }, TOAST_MS);
+}
+
+function updateActions(t) {
+  const actions = t.actions || [];
+  const newest = actions.length ? actions[actions.length - 1].seq : 0;
+  if (ui.lastActionSeq === null) {
+    ui.lastActionSeq = newest; // first message after a (re)load: do not replay history
+    return;
+  }
+  for (const a of actions) {
+    if (a.seq > ui.lastActionSeq) toast(a.key, a.text, a.level);
+  }
+  ui.lastActionSeq = Math.max(ui.lastActionSeq, newest);
+}
+
 function render(t) {
   ui.telemetry = t;
   const layoutKey = `${t.layout_id}|${t.mode}|${t.feeds.map((f) => `${f.slot}:${f.camera}`).join(",")}`;
@@ -308,6 +564,8 @@ function render(t) {
   updateSparks(t);
   updateGate(t);
   updateLog(t);
+  updateBrief(t);
+  updateActions(t);
   $("compliance").textContent = t.compliance;
   $("reasoning").textContent = t.reasoning;
   $("unoq").textContent = t.unoq;
@@ -403,12 +661,26 @@ function connect() {
 // ------------------------------------------------------------------ keys (GLFW codes)
 
 function sendKey(code) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "key", code }));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "key", code }));
+    return true;
+  }
+  return false;
+}
+
+// Every press flashes its key cap at once; the server's answer arrives as a toast.
+function pressKey(code, name) {
+  flashCap(code);
+  if (!sendKey(code)) toast(name, "Not connected to the cell controller, key not sent", "warn");
+}
+
+function keyName(code) {
+  return code === 32 ? "Space" : String.fromCharCode(code);
 }
 
 function selectBay(bayId) {
   const b = ui.telemetry && ui.telemetry.bays.find((x) => x.id === bayId);
-  if (b && b.state !== "STANDBY") sendKey(48 + bayId); // same as pressing 1-4
+  if (b && b.state !== "STANDBY") pressKey(48 + bayId, String(bayId)); // same as pressing 1-4
 }
 
 window.addEventListener("keydown", (event) => {
@@ -420,11 +692,12 @@ window.addEventListener("keydown", (event) => {
   else if (k.length === 1 && /[a-z]/i.test(k)) code = k.toUpperCase().charCodeAt(0);
   if (code === null) return;
   if (code === 32) event.preventDefault();
-  sendKey(code);
+  pressKey(code, keyName(code));
 });
 
 window.addEventListener("resize", () => ui.telemetry && updateSparks(ui.telemetry));
 
+buildKeyBar();
 setLink(false);
 $("live-text").textContent = "Connecting";
 connect();
