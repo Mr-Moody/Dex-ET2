@@ -10,7 +10,8 @@ audio cues.
 Keys (GLFW codes from the passive viewer, mirrors the hardware console):
 
 =========  ===============================================================================
-``1..4``   select a bay (the operator takes the queued bay that holds the rescue slot)
+arrows     select a bay: LEFT 1, RIGHT 2, UP 3, DOWN 4 (``1..4`` still work); the operator
+           takes the queued bay that holds the rescue slot
 ``SPACE``  toggle the software dead-man clutch
 ``F``      Judge Fault Rig: arm Bay 1's sprung flap for its next cycle (beat 2)
 ``G``      arm Bay 2's sprung flap (35 deg / 12 cm latch) for its next cycle (beat 5)
@@ -85,7 +86,22 @@ class StageAction(StrEnum):
 
 
 KEY_SPACE = 32
+# GLFW arrow key codes. The arrows select bays like the console joystick: Left 1, Right 2,
+# Up 3, Down 4. The digits 1-4 stay as a silent fallback.
+KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP = 262, 263, 264, 265
+BAY_KEYS: dict[int, int] = {1: KEY_LEFT, 2: KEY_RIGHT, 3: KEY_UP, 4: KEY_DOWN}
+_KEY_NAMES = {
+    KEY_SPACE: "SPACE",
+    KEY_LEFT: "LEFT",
+    KEY_RIGHT: "RIGHT",
+    KEY_UP: "UP",
+    KEY_DOWN: "DOWN",
+}
 KEYMAP: dict[int, StageAction] = {
+    KEY_LEFT: StageAction.SELECT_BAY_1,
+    KEY_RIGHT: StageAction.SELECT_BAY_2,
+    KEY_UP: StageAction.SELECT_BAY_3,
+    KEY_DOWN: StageAction.SELECT_BAY_4,
     ord("1"): StageAction.SELECT_BAY_1,
     ord("2"): StageAction.SELECT_BAY_2,
     ord("3"): StageAction.SELECT_BAY_3,
@@ -99,13 +115,13 @@ KEYMAP: dict[int, StageAction] = {
     ord("M"): StageAction.CYCLE_BACKEND,
 }
 ACTION_LOG_LEN = 20
-CONTROL_KEYS_HINT = "Use 1-4, SPACE, E, F, G, P, R or M"
+CONTROL_KEYS_HINT = "Use the arrow keys, SPACE, E, F, G, P, R or M"
 
 
 def key_name(code: int) -> str:
-    """Readable name for a GLFW key code: ``SPACE``, ``F``, ``1``."""
-    if code == KEY_SPACE:
-        return "SPACE"
+    """Readable name for a GLFW key code: ``SPACE``, ``LEFT``, ``F``, ``1``."""
+    if code in _KEY_NAMES:
+        return _KEY_NAMES[code]
     if 32 < code < 127:
         return chr(code)
     return f"key {code}"
@@ -860,8 +876,8 @@ class StageController:
             if selected != rescue:
                 shown = f"Bay {selected}" if selected is not None else "no bay"
                 return (
-                    f"Clutch engaged, but {shown} is selected. Press {rescue} to drive "
-                    f"Bay {rescue}",
+                    f"Clutch engaged, but {shown} is selected. "
+                    f"Press {key_name(BAY_KEYS[rescue])} to drive Bay {rescue}",
                     "warn",
                 )
             return f"Clutch engaged: your gloves now drive Bay {rescue}", "ok"
@@ -1337,7 +1353,7 @@ class StageDirector:
             self._end(beat, True)
 
             beat = self._begin(2)  # operator selects Bay 1, holds the clutch, rescues
-            self._press("1")
+            self._press(BAY_KEYS[1])
             self._press(KEY_SPACE)
             for sample in scripted_rescue(co, 1):
                 yield sample
@@ -1381,6 +1397,7 @@ class StageDirector:
 
 
 __all__ = [
+    "BAY_KEYS",
     "BEATS",
     "KEYMAP",
     "STAGE_SEED",

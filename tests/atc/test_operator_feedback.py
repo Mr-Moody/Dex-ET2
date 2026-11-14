@@ -77,6 +77,7 @@ def test_key_names() -> None:
     assert key_name(SPACE) == "SPACE"
     assert key_name(ord("F")) == "F"
     assert key_name(ord("1")) == "1"
+    assert [key_name(c) for c in (263, 262, 265, 264)] == ["LEFT", "RIGHT", "UP", "DOWN"]
     assert key_name(300) == "key 300"
 
 
@@ -127,12 +128,12 @@ def test_rescue_presses_point_at_the_bay_waiting(controller: StageController) ->
     _, text, level = _press(ctl, "2")
     assert level == "warn" and "Bay 1 is the one waiting for rescue" in text
     _, text, level = _press(ctl, SPACE)
-    assert level == "warn" and "Press 1 to drive Bay 1" in text
+    assert level == "warn" and "Press LEFT to drive Bay 1" in text
     _, text, level = _press(ctl, SPACE)  # release again
     assert level == "info"
 
-    _, text, level = _press(ctl, "1")
-    assert level == "ok" and "Engage the clutch" in text
+    key, text, level = _press(ctl, 263)  # Left arrow selects Bay 1
+    assert key == "LEFT" and level == "ok" and "Engage the clutch" in text
     _, text, level = _press(ctl, SPACE)
     assert level == "ok" and "gloves now drive Bay 1" in text
     _, text, level = _press(ctl, SPACE)

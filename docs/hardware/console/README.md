@@ -16,7 +16,7 @@ each board.
 
 | Qty | Kit module | ID | Role |
 |---|---|---|---|
-| 1 | Joystick module (XY-axis) | KY-023 | Bay select: push up 1, right 2, down 3, left 4 (recalibratable) |
+| 1 | Joystick module (XY-axis) | KY-023 | Bay select: push left 1, right 2, up 3, down 4 (recalibratable) |
 | 2 | Button module | KY-004 | Hold-to-control clutch, per-robot E-stop |
 | 4 | 5mm 2-colour LED (red + green) | KY-011 | Bay status: green nominal, red stalled or queued, both = amber |
 | 1 | Passive piezo-buzzer module | KY-006 | Stall and queue alert tones |
@@ -34,8 +34,8 @@ All MCU header pins are 3.3 V logic (STM32U585).
 
 | UNO Q pin | Module | Module pin | Firmware meaning |
 |---|---|---|---|
-| A0 | Joystick KY-023 | VRx | left / right → `BTN:BAY:4` / `BTN:BAY:2` (default map) |
-| A1 | Joystick KY-023 | VRy | up / down → `BTN:BAY:1` / `BTN:BAY:3` (default map) |
+| A0 | Joystick KY-023 | VRx | left / right → `BTN:BAY:1` / `BTN:BAY:2` (default map) |
+| A1 | Joystick KY-023 | VRy | up / down → `BTN:BAY:3` / `BTN:BAY:4` (default map) |
 | A2 | Joystick KY-023 | SW | optional: click re-sends the bay, hold 2 s to calibrate |
 | D2 | Clutch KY-004 | S | `CLUTCH:0\|1` |
 | D12 | E-stop KY-004 | S | `ESTOP:0\|1`, each press toggles `POWER:<bay>:0\|1` |
@@ -142,8 +142,9 @@ stick towards where you want that bay. A direction that's already taken buzzes l
 another one. When all four are set, the map is saved on the board
 (`~/.config/teleop/unoq_joystick_map`) and restored on every start and MCU reboot.
 
-`--joy-map 2431` sets the map directly (the bays for raw stick X+, X-, Y+, Y-; `2431` is the
-default). `--joy-raw` prints the raw ADC values for 15 s to check the wiring.
+`--joy-map 2143` sets the map directly (the bays for raw stick X+, X-, Y+, Y-; `2143`, i.e.
+left 1, right 2, up 3, down 4 like the keyboard arrows, is the default). `--joy-raw` prints
+the raw ADC values for 15 s to check the wiring.
 
 ## Differences from the `T-131` acceptance list
 

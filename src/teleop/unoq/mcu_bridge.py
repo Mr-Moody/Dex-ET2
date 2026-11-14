@@ -71,9 +71,9 @@ LED_STATE_TOKENS: Mapping[BayState, str] = {
 RESET_RIG_CMD = "CMD:RESET_RIG"
 JOY_CAL_CMD = "CMD:JOY_CAL"
 JOY_CAL_ABORT_CMD = "CMD:JOY_CAL_ABORT"
-# Bays for the raw stick directions X+, X-, Y+, Y- (the firmware default: up 1, right 2,
-# down 3, left 4 with higher VRx = right and lower VRy = up).
-DEFAULT_JOY_MAP = "2431"
+# Bays for the raw stick directions X+, X-, Y+, Y- (the firmware default: left 1, right 2,
+# up 3, down 4 like the keyboard arrows, with higher VRx = right and lower VRy = up).
+DEFAULT_JOY_MAP = "2143"
 JOY_MAP_FILE_ENV = "UNOQ_JOYMAP_FILE"
 
 
