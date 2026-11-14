@@ -246,6 +246,18 @@ kbd {
   cursor: pointer;
 }
 .key__cap--wide { min-width: 4.2rem; }
+.key__cap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+/* the cap is the key: its <kbd> takes no second border */
+.key__cap kbd { all: unset; font: inherit; }
+.key__sub { color: var(--muted); font-size: 0.85em; font-weight: 500; }
+.key__cap.is-suggested .key__sub { color: inherit; }
 .key__cap:hover { border-color: var(--muted); }
 .key__cap.is-suggested { border-color: var(--attn); color: var(--attn); }
 .key__cap.is-pressed { animation: press 260ms ease-out; }
@@ -399,6 +411,8 @@ kbd {
   cursor: pointer;
 }
 .feed:focus-visible { outline-offset: 1px; }
+/* Double clicks on a tile pin it or press its buttons twice; they never select overlay text. */
+.feed { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
 .feed[data-state="STALLED"] { --state: var(--stalled); }
 .feed[data-state="QUEUED"] { --state: var(--queued); }
 .feed[data-state="RESCUE"] { --state: var(--rescue); }
@@ -476,6 +490,7 @@ kbd {
   pointer-events: none;
 }
 .feed__bottom > * {
+  pointer-events: auto;  /* labels catch their own double clicks, so those never pin the pane */
   padding: 0.1rem 0.45rem;
   background: rgb(11 14 17 / 0.82);
   font-size: var(--t-xs);
@@ -529,6 +544,10 @@ kbd {
 .feed.is-dragging { opacity: 0.45; }
 .feed.is-drop-target { outline: 2px dashed var(--text); outline-offset: -4px; }
 .feed__zoom {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  touch-action: manipulation;
   padding: 0 0.4rem;
   border: 1px solid currentColor;
   border-radius: 3px;
@@ -552,6 +571,7 @@ kbd {
 }
 .feed:hover .feed__tools,
 .feed:focus-within .feed__tools { opacity: 1; }
+@media (hover: none) { .feed__tools { opacity: 1; } }  /* no hover to reveal them on touch */
 .ftool {
   min-width: 1.75rem;
   height: 1.75rem;
@@ -564,7 +584,11 @@ kbd {
   font-weight: 600;
   cursor: pointer;
 }
+.ftool { touch-action: manipulation; }
 .ftool:hover { border-color: var(--text); }
+@media (pointer: coarse) {
+  .ftool, .feed__zoom, .key__cap { min-width: 44px; min-height: 44px; }
+}
 .ftool.is-active { background: var(--text); border-color: var(--text); color: var(--ink); }
 .ftool--gap { margin-left: 6px; }
 
@@ -895,3 +919,15 @@ kbd {
   white-space: nowrap;
 }
 .bar__badge[hidden] { display: none; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
