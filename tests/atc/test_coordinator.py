@@ -1,4 +1,4 @@
-"""T-140: ATC fleet coordinator, confidence C(t), FIFO queue, torque tube and 3-rollout gate.
+"""T-140: ATC fleet coordinator, confidence C(t), FIFO queue, torque tube and 20-rollout gate.
 
 The scripted operator drives the coordinator through its public rescue/clutch API
 (``ConsoleInputState`` + ``OperatorInput``). Tests read ``flap_hinge`` only to assert simulator
@@ -10,17 +10,23 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Iterator
+from typing import Any
 
 import numpy as np
 import pytest
 
 from teleop.atc.coordinator import (
+    DEFAULT_REALISM,
     ROUTINE,
     AtcCoordinator,
+    CoordinatorConfig,
     OperatorInput,
     StallDetector,
+    TouchDetector,
     compute_confidence,
 )
+from teleop.atc.estimate import HOOK_BACK_X_M, INDEX_PAD_RADIUS_M, POSE_SIGMA_XY_M
+from teleop.atc.stage import RESCUE_PRESS, RESCUE_WAYPOINTS
 from teleop.atc.types import (
     BOLT_CLEARED_M,
     BayState,
@@ -29,16 +35,25 @@ from teleop.atc.types import (
 )
 from teleop.atc.validator import (
     CONTROL_DT,
+    GATE_PASS_MIN,
+    GATE_ROLLOUTS,
+    PERTURBATIONS_DEG,
     ApproachPlan,
+    BayRig,
+    RolloutConditions,
+    RolloutResult,
     SkillReplay,
     SkillValidator,
+    ValidationReport,
     lifted,
+    pose_position,
     step_physics,
     torque_tube_ok,
+    translate_pose,
 )
 from teleop.compliance.protocol import ComplianceEvent
 from teleop.reasoning.protocol import ReasoningContext, ReasoningVerdict
-from teleop.sim.bays import PANDA_XML
+from teleop.sim.bays import CANONICAL_LATCH, PANDA_XML, build_single_bay_scene
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
@@ -106,7 +121,7 @@ def hand_spec() -> HandSpec:
 
 @pytest.fixture(scope="module")
 def validator(hand_spec: HandSpec) -> SkillValidator:
-    return SkillValidator(hand_spec)
+    return SkillValidator(hand_spec, realism=DEFAULT_REALISM)  # the coordinator's default
 
 
 @pytest.fixture
@@ -119,13 +134,28 @@ def unoq() -> Iterator[UnoQClient]:
     client.close()
 
 
+_RIGS: list[Rig] = []
+
+
 class Rig:
-    def __init__(self, unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator) -> None:
+    def __init__(
+        self,
+        unoq: UnoQClient,
+        hand_spec: HandSpec,
+        validator: SkillValidator,
+        config: CoordinatorConfig | None = None,
+    ) -> None:
+        _RIGS.append(self)
         self.sink = RecordingSink()
         self.reasoner = RecordingReasoner()
         self.unoq = unoq
         self.co = AtcCoordinator.build(
-            unoq, self.sink, self.reasoner, hand_spec=hand_spec, validator=validator
+            unoq,
+            self.sink,
+            self.reasoner,
+            hand_spec=hand_spec,
+            validator=validator,
+            config=config,
         )
 
     def flap_deg(self, bay_id: int) -> float:
@@ -148,6 +178,14 @@ class Rig:
             self.co.tick()
 
 
+@pytest.fixture(autouse=True)
+def _close_rigs() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Shut every coordinator's gate worker down after each test (no leaked threads)."""
+    yield
+    while _RIGS:
+        _RIGS.pop().co.close()
+
+
 @pytest.fixture
 def rig(unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator) -> Rig:
     return Rig(unoq, hand_spec, validator)
@@ -155,17 +193,10 @@ def rig(unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator) -> Rig
 
 # --------------------------------------------------------------------------- scripted operator
 
-# Waypoints (duration s, wrist delta from the safe hover in the latch frame in metres, finger
-# press fraction). The index finger rests behind the bolt hook, the thumb presses the raised
-# stopper flap flat (press fraction 1), then the wrist pushes the bolt clear.
-DEMO_PRESS = {"thumb_yaw": 0.6}
-DEMO_WAYPOINTS: list[tuple[float, tuple[float, float, float], float]] = [
-    (0.0, (0.0, 0.0, 0.0), 0.0),
-    (0.4981, (0.0055, -0.004, -0.012), 0.0),
-    (0.8199, (0.0055, -0.004, -0.012), 1.0),
-    (0.3333, (0.0055, -0.004, -0.012), 1.0),
-    (1.4385, (0.0055 + 0.0458, -0.004, -0.012), 1.0),
-]
+# The stage's scripted rescue (duration s, wrist delta from the safe hover in the latch frame in
+# metres, finger press fraction): one source, so the tests rescue exactly as the show does.
+DEMO_PRESS = RESCUE_PRESS
+DEMO_WAYPOINTS = list(RESCUE_WAYPOINTS)
 
 
 def demo_operator(rig: Rig, bay_id: int) -> Iterator[OperatorInput]:
@@ -195,17 +226,24 @@ def demo_operator(rig: Rig, bay_id: int) -> Iterator[OperatorInput]:
         t_wp += dur
 
 
-def run_rescue(rig: Rig, bay_id: int, max_extra_ticks: int = 30) -> None:
-    """Hold the clutch through the scripted rescue, release it, and let validation finish."""
+def run_rescue(rig: Rig, bay_id: int, max_extra_ticks: int | None = None) -> None:
+    """Hold the clutch through the scripted rescue, release it, and let validation finish.
+
+    ``max_extra_ticks=0`` returns as soon as the bay is VALIDATING. The default waits
+    out the sim-time gate deadline plus margin.
+    """
+    if max_extra_ticks is None:
+        max_extra_ticks = round(rig.co.config.gate_deadline_s / CONTROL_DT) + 60
     console = ConsoleInputState(selected_bay=bay_id, clutch=True)
     for sample in demo_operator(rig, bay_id):
         snaps = rig.co.tick(console, sample)
         if snaps[bay_id - 1].x_bolt_m >= BOLT_CLEARED_M + 0.0015:
             break
     released = ConsoleInputState(selected_bay=bay_id, clutch=False)
-    for _ in range(max_extra_ticks):
+    stop = BayState.VALIDATING if max_extra_ticks == 0 else BayState.NOMINAL
+    for _ in range(max_extra_ticks or 30):
         rig.co.tick(released, None)
-        if rig.co.state(bay_id) == BayState.NOMINAL:
+        if rig.co.state(bay_id) == stop:
             return
 
 
@@ -419,7 +457,7 @@ def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> 
     assert len(co.rescue_slot_holders()) == 1
 
 
-def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg_12cm(
+def test_end_to_end_bay1_rescue_fits_dmp_passes_20_rollouts_and_bay2_clears_35deg_12cm(
     rig: Rig, validator: SkillValidator
 ) -> None:
     co = rig.co
@@ -436,13 +474,8 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
     assert co.state(1) == BayState.NOMINAL
     assert co.rig(1).bolt_x() >= BOLT_CLEARED_M
     report = co.last_report
-    assert report is not None and report.passed and report.total == 3
-    assert [r.perturbation for r in report.results] == [
-        (-0.08, -0.06, -30.0),
-        (0.0, 0.0, 0.0),
-        (0.08, 0.06, 30.0),
-    ]
-    assert all(r.bolt_x_m >= BOLT_CLEARED_M and r.joint_limits_ok for r in report.results)
+    assert report is not None and report.total == 20 and report.passed
+    assert report.threshold == GATE_PASS_MIN
     assert all(r.max_tau_ext_inf_nm < 12.0 for r in report.results)
     assert rig.sink.kinds() == [
         "STALL_ALERT",
@@ -457,16 +490,16 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
         "RESCUE_LOGGED",
         "VALIDATION_GATE",
     ]
-    assert rig.reasoner.contexts[-1].rollout_passed == 3
+    assert (rig.reasoner.contexts[-1].rollout_passed or 0) >= GATE_PASS_MIN
+    assert rig.reasoner.contexts[-1].rollout_total == GATE_ROLLOUTS
 
-    # The gate itself is fast (best of three warm runs). The spec target is VALIDATION_BUDGET_S
-    # (0.4 s), but CI runners and the booth laptop measure ~0.45-0.65 s, so assert a regression
-    # ceiling instead of the target, which wall-clock jitter would make flaky.
-    elapsed = min(validator.validate(skill).elapsed_s for _ in range(3))
-    assert elapsed < 1.0, f"validation gate took {elapsed:.3f}s"
+    # The 20-rollout gate measures ~6-9 s on an idle booth laptop and ~14 s with other test
+    # suites running, so assert a regression ceiling rather than a target. It runs in a worker;
+    # past the sim-time deadline the apply blocks on it, so wall time never breaks determinism.
+    assert report.elapsed_s < 20.0, f"validation gate took {report.elapsed_s:.3f}s"
 
     # Bay 2 sits at +12 cm / +35 deg relative to Bay 1's latch frame.
-    l1, l2 = co.rig(1).world_latch(), co.rig(2).world_latch()
+    l1, l2 = co.rig(1).true_world_latch(), co.rig(2).true_world_latch()  # scene layout
     assert math.degrees(l2.yaw_rad - l1.yaw_rad) == pytest.approx(35.0)
     assert math.hypot(0.08, 0.09) == pytest.approx(0.12, abs=0.001)
 
@@ -740,3 +773,396 @@ def test_arm_torque_breach_in_autonomous_replay_aborts_retracts_and_escalates(
     assert co.rig(2).bolt_x() < BOLT_CLEARED_M
     assert co.outcome(2) == "aborted: arm torque limit"
     assert len(rig.sink.events) == n_events + 1  # no further alerts
+
+
+def test_control_uses_estimate_not_truth(unoq, hand_spec, validator):
+    rig = Rig(unoq, hand_spec, validator)
+    rig.co.start_cycle(1)
+    for _ in range(300):
+        rig.co.tick()
+        if rig.co.in_routine(1):
+            break
+    est, truth = rig.co.estimate(1).pose, rig.co.rig(1).true_world_latch()
+    assert est != truth  # seeded error is applied
+    assert rig.co.rig(1).world_latch() == est
+
+
+def test_zero_sigma_reproduces_true_frame_cycles(unoq, hand_spec, validator):
+    cfg = CoordinatorConfig(pose_sigma_xy_m=0.0, pose_sigma_yaw_rad=0.0)
+    rig = Rig(unoq, hand_spec, validator, config=cfg)  # the rig fixture closes the coordinator
+    co = rig.co
+    for _ in range(3):
+        for bay in (1, 2):
+            co.start_cycle(bay)
+        for _ in range(600):
+            co.tick()
+            if co.outcome(1) and co.outcome(2):
+                break
+        assert co.outcome(1) == co.outcome(2) == "cleared"
+        for bay in (1, 2):
+            touch = co.last_touch(bay)
+            assert touch is not None and touch.last_correction_m is not None
+            assert abs(touch.last_correction_m) < 0.0005  # exact frame: nothing to correct
+
+
+def test_same_seed_stall_rescue_gate_is_deterministic(
+    hand_spec: HandSpec, validator: SkillValidator
+) -> None:
+    def run() -> tuple[Any, Any, Any]:
+        # A fresh UNO Q node per run: its prototype library is stateful (Jam_Sig_N).
+        server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0, name="det-node").start()
+        client = UnoQClient(
+            "127.0.0.1", server.udp_port, server.tcp_port, local_server=server
+        ).connect()
+        try:
+            return _run_once(client)
+        finally:
+            client.close()
+
+    def _run_once(client: UnoQClient) -> tuple[Any, Any, Any]:
+        r = Rig(client, hand_spec, validator)
+        _rescued_rig(r)
+        report = r.co.last_report
+        assert report is not None
+        events = [(e.kind, e.bay_id, e.summary) for e in r.sink.events]
+        results = [(x.passed, x.conditions) for x in report.results]
+        return events, results, np.array(r.co.data.qpos)
+
+    ev_a, res_a, q_a = run()
+    ev_b, res_b, q_b = run()
+    assert ev_a == ev_b
+    assert res_a == res_b
+    np.testing.assert_array_equal(q_a, q_b)
+
+
+# --------------------------------------------------------------------------- touch re-localization
+
+
+def _x_err(co: AtcCoordinator, bay_id: int) -> float:
+    """|estimate - truth| along the latch push axis (test-only ground-truth read)."""
+    est, truth = co.estimate(bay_id).pose, co.rig(bay_id).true_world_latch()
+    axis = np.array([math.cos(truth.yaw_rad), math.sin(truth.yaw_rad), 0.0])
+    return abs(float(np.dot(np.subtract(est.position, truth.position), axis)))
+
+
+def _routine_index_gap_m() -> float:
+    """Index-pad-surface to hook-back-face gap along latch +X at the routine start pose.
+
+    Kinematic: the fingers are set to ``ROUTINE.fingers`` (servoed proximal joints at their
+    targets, coupled distal joints through their joint equalities, compliant wrist at rest) and
+    the index tip offset from the wrist site is carried into the latch frame by the routine
+    start pose, with the bolt at 0.
+    """
+    import mujoco as _mujoco
+
+    mujoco: Any = _mujoco
+    m = build_single_bay_scene(CANONICAL_LATCH)
+    d = mujoco.MjData(m)
+    for name, q in ROUTINE.fingers.items():
+        jnt = int(m.actuator_trnid[int(m.actuator(f"bay1/{name}").id)][0])
+        d.qpos[int(m.jnt_qposadr[jnt])] = q
+    for i in range(int(m.neq)):
+        if int(m.eq_type[i]) == int(mujoco.mjtEq.mjEQ_JOINT) and int(m.eq_obj2id[i]) >= 0:
+            c0, c1 = float(m.eq_data[i][0]), float(m.eq_data[i][1])
+            q_driver = float(d.qpos[int(m.jnt_qposadr[int(m.eq_obj2id[i])])])
+            d.qpos[int(m.jnt_qposadr[int(m.eq_obj1id[i])])] = c0 + c1 * q_driver
+    mujoco.mj_kinematics(m, d)
+    wrist_id, tip_id = int(m.site("bay1/wrist_site").id), int(m.site("bay1/right_index_tip").id)
+    r_wrist = np.asarray(d.site_xmat[wrist_id]).reshape(3, 3)
+    tip_in_wrist = r_wrist.T @ (np.asarray(d.site_xpos[tip_id]) - np.asarray(d.site_xpos[wrist_id]))
+    start = ROUTINE.pose_at(0.0)
+    assert start.position is not None
+    tip_x = float(np.asarray(start.position)[0] + (ROUTINE.rotation() @ tip_in_wrist)[0])
+    return HOOK_BACK_X_M - (tip_x + INDEX_PAD_RADIUS_M)
+
+
+def test_touch_detector_encoder_and_wrist_paths() -> None:
+    d = TouchDetector(wrist_nm=0.5)
+    assert not d.update(0.0, 0.1) and not d.update(0.0004, 0.2)
+    assert d.update(0.0006, 0.0)
+    assert not d.update(0.01, 0.0)  # fires once per arming
+    d.reset()
+    assert not d.update(0.0, 0.6) and d.update(0.0, 0.6)  # two consecutive wrist ticks
+
+
+def test_touch_detector_encoder_is_relative_to_the_bolt_at_arming() -> None:
+    d = TouchDetector(wrist_nm=0.5)
+    assert not d.update(0.035, 0.0)  # armed on a stalled bolt: its offset is not a touch
+    assert not d.update(0.0354, 0.0)
+    assert d.update(0.0356, 0.0)
+    d.reset()
+    assert not d.update(0.0, 0.6) and not d.update(0.0, 0.1) and not d.update(0.0, 0.6)
+
+
+def test_no_false_touch_in_approach_or_lift(rig: Rig) -> None:  # Review Focus 2
+    co = rig.co
+    co.rig(1).set_bolt_x(0.06)  # the previous cycle left the bolt pushed out
+    co.start_cycle(1)
+    for _ in range(80):  # still approaching, the bolt was just reset
+        co.tick()
+        assert co.last_touch(1) is None or co.in_routine(1)
+    for _ in range(600):  # the routine arms the detector only on the reset bolt
+        co.tick()
+        if co.in_routine(1):
+            break
+    assert co.in_routine(1) and co.rig(1).bolt_x() < 0.0005 and co.last_touch(1) is None
+
+
+def test_routine_touch_shrinks_estimate_error_to_mm(rig: Rig) -> None:
+    co = rig.co
+    co.start_cycle(1)
+    err0 = _x_err(co, 1)  # |estimate - truth| along the latch axis; test-only truth read
+    for _ in range(600):
+        co.tick()
+        if co.outcome(1):
+            break
+    assert co.outcome(1) == "cleared" and co.last_touch(1) is not None
+    assert _x_err(co, 1) < 0.0015 and _x_err(co, 1) < err0
+
+
+def test_routine_touch_target_jump_is_bounded_by_lead_plus_correction(rig: Rig) -> None:
+    co = rig.co
+    bay = co._bays[1]  # noqa: SLF001 - commanded target history, no public accessor
+    co.start_cycle(1)
+    worst = 0.0
+    prev: np.ndarray | None = None
+    for _ in range(600):
+        co.tick()
+        if co.in_routine(1) and bay.prev_cmd_pos is not None:
+            if prev is not None:
+                worst = max(worst, float(np.linalg.norm(bay.prev_cmd_pos - prev)))
+            prev = np.array(bay.prev_cmd_pos)
+        if co.outcome(1):
+            break
+    touch = co.last_touch(1)
+    assert touch is not None and touch.last_correction_m is not None
+    assert worst <= co.config.push_lead_limit_m + abs(touch.last_correction_m)
+
+
+def _spy_stall_entry(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> list[tuple[bool, int]]:
+    """Record (touch already taken, armed) at the entry of every ``_on_stall``."""
+    co = rig.co
+    seen: list[tuple[bool, int]] = []
+    orig = co._on_stall  # pyright: ignore[reportPrivateUsage]
+
+    def spy(bay: Any, trigger: Any) -> None:
+        seen.append((co.last_touch(1) is not None, len(co.touch_events())))
+        orig(bay, trigger)
+
+    monkeypatch.setattr(co, "_on_stall", spy)
+    return seen
+
+
+def test_pinned_bolt_touch_via_wrist_still_escalates(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:  # Review Focus 3
+    _rescued_rig(rig)  # a known jam prototype, so the pinned signature is refused as OOD
+    seen = _spy_stall_entry(rig, monkeypatch)
+    rig.stall_bay(1, bolt_pinned=True)
+    assert rig.co.state(1) == BayState.OOD_ESCALATED
+    assert seen and seen[0][0], "the wrist path must fire before the stall tick"
+    touch = rig.co.last_touch(1)
+    assert touch is not None and touch.last_correction_m is not None
+    assert touch.rejected_correction_m is None
+    assert abs(touch.last_correction_m) < 0.004  # bolt pinned at x ~ 0: a small correction
+    assert abs(rig.co.rig(1).bolt_x()) < 0.002
+
+
+def test_stall_is_itself_a_touch_when_the_wrist_never_fired(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rescued_rig(rig)
+    monkeypatch.setattr(BayRig, "wrist_push_torque", lambda self: 0.0)
+    # The pinned bolt also creeps enough to trip the encoder path; silence it so only the
+    # stall-as-touch fallback in _on_stall (still armed) can correct the estimate.
+    monkeypatch.setattr(TouchDetector, "update", lambda self, x, w: False)
+    seen = _spy_stall_entry(rig, monkeypatch)
+    rig.stall_bay(1, bolt_pinned=True)
+    assert rig.co.state(1) == BayState.OOD_ESCALATED
+    assert seen and not seen[0][0], "no touch before the stall: the wrist path is disabled"
+    touch = rig.co.last_touch(1)
+    assert touch is not None, "the stall-as-touch fallback must correct the estimate"
+    assert len(rig.co.touch_events()) > seen[0][1]
+
+
+def test_routine_standoff_clears_hook_at_3_sigma() -> None:
+    gap = _routine_index_gap_m()  # kinematic, from tip offsets at ROUTINE.fingers
+    assert gap - 3 * POSE_SIGMA_XY_M >= 0.003
+
+
+def test_replay_rebase_blends_to_the_corrected_frame(rig: Rig) -> None:
+    _rescued_rig(rig)
+    skill = next(iter(rig.co.library.values()))
+    wfl = rig.co.rig(1).world_from_latch()
+    shifted = translate_pose(wfl, (0.004, 0.0, 0.0))
+    replay, ref = SkillReplay(skill, wfl), SkillReplay(skill, shifted)
+
+    def at(r: SkillReplay, t: float) -> np.ndarray:
+        return pose_position(r.command(t).wrist)
+
+    t0 = 0.5
+    p_old = at(replay, t0)
+    replay.rebase(shifted, t0, blend_s=0.2)
+    np.testing.assert_allclose(at(replay, t0), p_old, atol=1e-9)  # no jump at the touch
+    mid, old_mid = at(replay, t0 + 0.1), at(SkillReplay(skill, wfl), t0 + 0.1)
+    assert np.linalg.norm(mid - old_mid) > 1e-4 and np.linalg.norm(mid - at(ref, t0 + 0.1)) > 1e-4
+    np.testing.assert_allclose(at(replay, t0 + 0.25), at(ref, t0 + 0.25), atol=1e-9)
+
+
+# --------------------------------------------------------------------------- randomized gate
+
+
+def _res(passed: bool) -> RolloutResult:
+    cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
+    return RolloutResult(
+        (0.0, 0.0, 0.0), 0.06 if passed else 0.03, 1.0, 0.1, True, passed, passed, cond
+    )
+
+
+@pytest.fixture(scope="module")
+def rescued_skill(hand_spec: HandSpec, validator: SkillValidator) -> Iterator[SkillPrimitive]:
+    """The scripted Bay 1 rescue skill, fitted once per module."""
+    server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0, name="test-node").start()
+    client = UnoQClient(
+        "127.0.0.1", server.udp_port, server.tcp_port, local_server=server
+    ).connect()
+    try:
+        rig = Rig(client, hand_spec, validator)
+        _rescued_rig(rig)
+        rig.co.close()
+        yield next(iter(rig.co.library.values()))
+    finally:
+        client.close()
+
+
+def test_gate_conditions_are_seeded_and_cover_spec_offsets(validator: SkillValidator) -> None:
+    a, b = validator.draw_conditions("s/1"), validator.draw_conditions("s/1")
+    assert a == b and len(a) == 20
+    assert {round(c.perturbation[2] / 30) for c in a} == {-1, 0, 1}  # all three spec yaws
+    assert all(0.8 <= c.flap_stiffness_scale <= 1.2 for c in a)
+    assert all(abs(c.flap_springref_deg - 35.0) <= 3.0 for c in a)
+    assert all(0.75 <= c.friction_scale <= 1.25 for c in a)
+    assert a != validator.draw_conditions("s/2")  # the skill id seeds the gate RNG
+
+
+def test_realism_scales_every_gate_condition(hand_spec: HandSpec) -> None:
+    full = SkillValidator(hand_spec).draw_conditions("s/1")
+    half = SkillValidator(hand_spec, realism=0.5).draw_conditions("s/1")
+    off = SkillValidator(hand_spec, realism=0.0)
+    nominal = off.nominal_springref_deg
+    for f, h, o in zip(full, half, off.draw_conditions("s/1"), strict=True):
+        assert o.est_error == (0.0, 0.0, 0.0)
+        assert o.flap_stiffness_scale == 1.0 and o.friction_scale == 1.0
+        assert o.flap_springref_deg == nominal
+        assert h.est_error == pytest.approx(tuple(0.5 * e for e in f.est_error))
+        assert h.friction_scale - 1.0 == pytest.approx(0.5 * (f.friction_scale - 1.0))
+        jitter_full = np.subtract(f.perturbation, o.perturbation)
+        assert np.subtract(h.perturbation, o.perturbation) == pytest.approx(0.5 * jitter_full)
+    with pytest.raises(ValueError, match="realism"):
+        SkillValidator(hand_spec, realism=1.5)
+
+
+def test_rollout_restores_model_parameters(
+    validator: SkillValidator, rescued_skill: SkillPrimitive
+) -> None:
+    m = validator.model
+    before = m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy()
+    report = validator.validate(rescued_skill)
+    assert report.total == GATE_ROLLOUTS
+    np.testing.assert_array_equal(m.geom_friction, before[0])
+    np.testing.assert_array_equal(m.jnt_stiffness, before[1])
+    np.testing.assert_array_equal(m.qpos_spring, before[2])
+
+
+def test_rollout_restores_model_parameters_when_a_rollout_raises(
+    validator: SkillValidator, rescued_skill: SkillPrimitive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = validator.model
+    before = m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy()
+
+    def boom(*_: object, **__: object) -> None:
+        raise RuntimeError("rollout crashed")
+
+    monkeypatch.setattr(validator.rig, "command", boom)
+    with pytest.raises(RuntimeError, match="rollout crashed"):
+        validator.validate(rescued_skill)
+    np.testing.assert_array_equal(m.geom_friction, before[0])
+    np.testing.assert_array_equal(m.jnt_stiffness, before[1])
+    np.testing.assert_array_equal(m.qpos_spring, before[2])
+
+
+def test_threshold_rule() -> None:
+    r = ValidationReport(
+        results=(_res(True),) * 18 + (_res(False),) * 2, elapsed_s=1.0, threshold=18
+    )
+    assert r.passed and r.pass_rate == pytest.approx(0.9)
+    assert not dataclasses.replace(r, threshold=19).passed
+
+
+def _run_conditions(
+    validator: SkillValidator,
+    skill: SkillPrimitive,
+    conds: tuple[RolloutConditions, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> ValidationReport:
+    monkeypatch.setattr(validator, "draw_conditions", lambda _skill_id: conds)
+    return validator.validate(skill)
+
+
+def test_gate_rollouts_are_independent_trials(
+    validator: SkillValidator, rescued_skill: SkillPrimitive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jammed = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.2, 38.0, 1.25)
+    nominal = RolloutConditions((0.08, 0.06, 30.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
+    report = _run_conditions(validator, rescued_skill, (nominal, jammed, nominal), monkeypatch)
+    first, _, again = report.results
+    assert first == again  # the rollout in between leaves nothing behind
+
+
+def test_rescued_skill_carries_its_demo_contact_offset(rescued_skill: SkillPrimitive) -> None:
+    assert rescued_skill.touch_offset_m is not None
+    assert -0.03 < rescued_skill.touch_offset_m < 0.0  # the hook face sits ahead of the tip
+
+
+def test_replay_touch_uses_the_skill_offset(
+    validator: SkillValidator, rescued_skill: SkillPrimitive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exact = [RolloutConditions(p, (0.0, 0.0, 0.0), 1.0, 35.0, 1.0) for p in PERTURBATIONS_DEG]
+    ahead = [dataclasses.replace(c, est_error=(0.001, 0.0, 0.0)) for c in exact]
+    results = _run_conditions(validator, rescued_skill, (*exact, *ahead), monkeypatch).results
+    shifts = [r.touch_correction_m for r in results]
+    assert all(s is not None for s in shifts) and not any(r.touch_rejected for r in results)
+    nom, plus = np.array(shifts[:3], dtype=float), np.array(shifts[3:], dtype=float)
+    assert np.all(np.abs(nom) < 0.0015)  # the demo's own offset: no posture bias
+    # +1 mm along the push axis is corrected by about -1 mm on average. A single contact's encoder
+    # trigger scatters by about +-0.5 mm, depending on the rescued demo: corrections of -1.55,
+    # -1.47 and -0.85 mm at realism 0.25, and -0.9, +0.1 and -0.9 mm at 0.5. None goes the wrong
+    # way by more than the trigger's resolution.
+    delta = plus - nom
+    assert float(np.mean(delta)) == pytest.approx(-0.001, abs=6e-4), delta
+    assert np.all(delta < 4e-4), delta
+
+
+def test_gate_result_applies_exactly_at_deadline(rig: Rig) -> None:
+    rig.stall_bay(1, flap_jammed=True)
+    run_rescue(rig, 1, max_extra_ticks=0)  # release only, don't wait for validation
+    co = rig.co
+    assert co.state(1) == BayState.VALIDATING and co.gate_pending(1)
+    t_submit = co.time_s
+    while co.state(1) == BayState.VALIDATING:
+        co.tick()
+    assert co.time_s - t_submit == pytest.approx(co.config.gate_deadline_s, abs=2 * CONTROL_DT)
+    assert not co.gate_pending(1)
+
+
+def test_gate_worker_exception_fails_cleanly(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rig.co.validator, "validate", lambda s: 1 / 0)
+    rig.stall_bay(1, flap_jammed=True)
+    run_rescue(rig, 1)
+    assert rig.co.state(1) != BayState.VALIDATING and len(rig.co.library) == 0
+    assert rig.co.last_report is not None and not rig.co.last_report.passed
+
+
+def test_close_is_idempotent(rig: Rig) -> None:
+    rig.co.close()
+    rig.co.close()

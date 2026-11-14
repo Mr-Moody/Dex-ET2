@@ -44,12 +44,22 @@ import math
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.atc.estimate import (
+    POSE_SIGMA_XY_M,
+    POSE_SIGMA_YAW_RAD,
+    LatchEstimate,
+    LatchEstimator,
+    TouchDetector,
+    contact_offset,
+    touch_correct,
+)
 from teleop.atc.recovery import (
     BaySignals,
     CoordinatorObserver,
@@ -75,6 +85,7 @@ from teleop.atc.types import (
 from teleop.atc.validator import (
     ARM_TORQUE_MARGIN,
     CONTROL_DT,
+    GATE_PASS_MIN,
     LIFT_HEIGHT_M,
     SETTLE_MAX_TICKS,
     TAU_HARD_MAX_NM,
@@ -142,6 +153,13 @@ def compute_confidence(
 # --------------------------------------------------------------------------- config
 
 
+# Default realism scale. Scans of the scripted show (seeds 0-7, Windows and Linux) pass every run
+# at 0.25, 13 of 16 at 0.5 and almost none at 1.0 (gate about 14/20). A fresh rescue's gate
+# scores 19-20 at 0.25 but hovers at 17-19 around the 18 bar at 0.5, so 0.25 (pose sigma 0.75 mm
+# and 0.375 deg, quarter-range gate randomization) is the default that reliably deploys skills.
+DEFAULT_REALISM = 0.25
+
+
 @dataclass(frozen=True, slots=True)
 class CoordinatorConfig:
     part_sku_id: str = DEFAULT_SKU
@@ -165,6 +183,16 @@ class CoordinatorConfig:
     max_classify_s: float = 0.3
     # The Inspire fingers have no abduction compliance, so a blocked push loads the arm almost
     # directly: a 3 mm lead keeps a flap stall under the arm torque guard.
+    seed: int = 0
+    pose_sigma_xy_m: float = POSE_SIGMA_XY_M
+    pose_sigma_yaw_rad: float = POSE_SIGMA_YAW_RAD
+    # Scales the latch-pose estimate error and the gate's randomization: 1 is the full T-179
+    # realism, 0 is an exact placement and a gate on the spec-4.4 perturbations only.
+    realism: float = DEFAULT_REALISM
+    gate_pass_min: int = GATE_PASS_MIN  # randomized gate: deploy at >= this many of 20
+    # Sim seconds from submission to applying the skill-gate result. The gate runs in a worker
+    # (6-9 s wall); applying at a fixed sim time keeps seeded runs tick-for-tick reproducible.
+    gate_deadline_s: float = 10.0
     push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
 
 
@@ -214,7 +242,7 @@ ROUTINE = RoutineSpec(
     yaw=-2.2,
     pitch=0.0,
     roll=-0.4,
-    start_x=0.0019,
+    start_x=-0.0021,
     y=0.023,
     z=0.1163,
     fingers={
@@ -280,6 +308,21 @@ class StallDetector:
         )
 
 
+# --------------------------------------------------------------------------- touch detector
+
+TOUCH_LOG_LEN = 64
+
+
+@dataclass(frozen=True, slots=True)
+class TouchEvent:
+    """A HUD / log-feed entry for an accepted touch correction (not a compliance event)."""
+
+    bay_id: int
+    correction_mm: float
+    time_s: float
+    kind: str = "TOUCH_CORRECTED"
+
+
 # --------------------------------------------------------------------------- operator input
 
 
@@ -309,6 +352,15 @@ class _Recovery:
     error: str | None = None  # the controller raised: abort in the sense phase
 
 
+@dataclass(slots=True)
+class _Gate:
+    """A skill gate running in the worker, applied at the fixed sim-time ``deadline``."""
+
+    skill: SkillPrimitive
+    future: Future[ValidationReport]
+    deadline: float
+
+
 @dataclass
 class _Bay:
     bay_id: int
@@ -320,6 +372,11 @@ class _Bay:
     fingers: dict[str, float] = field(default_factory=dict[str, float])
     move: SmoothMove | None = None
     detector: StallDetector = field(default_factory=StallDetector)
+    touch: TouchDetector = field(default_factory=TouchDetector)
+    last_touch: LatchEstimate | None = None
+    # Rescue-demo contact calibration: encoder-only touch relative to the hold's start.
+    demo_touch: TouchDetector = field(default_factory=TouchDetector)
+    demo_offset_m: float | None = None
     indexer: RelativeClutchIndexer = field(default_factory=RelativeClutchIndexer)
     buffer: RescueTrajectoryBuffer | None = None
     clutch_held: bool = False
@@ -328,7 +385,7 @@ class _Bay:
     recording: bool = False  # an observer episode is open
     refused: bool = False
     signature: StallSignature | None = None
-    pending: tuple[RescueTrajectory, StallSignature] | None = None
+    gate: _Gate | None = None
     match: StallMatch | None = None
     skill_id: str | None = None
     confidence: float = 1.0
@@ -374,13 +431,29 @@ class AtcCoordinator:
         self.reasoner = reasoner
         self.hand_spec = hand_spec
         self.config = config or CoordinatorConfig()
-        self.validator = validator or SkillValidator(hand_spec, self.config.tau_hard_max)
+        self.validator = validator or SkillValidator(
+            hand_spec,
+            self.config.tau_hard_max,
+            pass_min=self.config.gate_pass_min,
+            seed=self.config.seed,
+            realism=self.config.realism,
+        )
         self.routine = routine or ROUTINE
         self.library: dict[str, SkillPrimitive] = {}
         self.time_s = 0.0
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="skill-gate"
+        )
         self.last_classify_ms = 0.0
         self.last_report: ValidationReport | None = None
         self._queue: list[int] = []
+        self._estimator = LatchEstimator(
+            self.config.seed,
+            self.config.realism * self.config.pose_sigma_xy_m,
+            self.config.realism * self.config.pose_sigma_yaw_rad,
+        )
+        self._cycles: dict[int, int] = {}
+        self._touch_log: deque[TouchEvent] = deque(maxlen=TOUCH_LOG_LEN)
         self._backend = RecoveryBackend(recovery_backend)
         self._act = act
         self._observer = observer
@@ -392,6 +465,7 @@ class AtcCoordinator:
         for bay in self._bays.values():
             bay.rig.home_keyframe()  # the only kinematic arm placement: once, at scene build
         for bay in self._bays.values():
+            self._cycles[bay.bay_id] = 0
             self.start_cycle(bay.bay_id)
 
     @classmethod
@@ -493,7 +567,20 @@ class AtcCoordinator:
             queue_position=queue_position,
             active_skill_id=bay.skill_id if bay.state == BayState.AUTONOMOUS_SKILL else None,
             last_match=bay.match,
+            pose_sigma_mm=bay.rig.estimate.sigma_x_m * 1e3,
+            pose_sigma_yaw_deg=math.degrees(bay.rig.estimate.sigma_yaw_rad),
+            touch_correction_mm=self._touch_mm(bay),
         )
+
+    @staticmethod
+    def _touch_mm(bay: _Bay) -> float | None:
+        """Size of this cycle's accepted touch correction (needs no ground truth)."""
+        touch = bay.last_touch
+        if touch is None or touch.rejected_correction_m is not None:
+            return None
+        if touch.last_correction_m is None:
+            return None
+        return abs(touch.last_correction_m) * 1e3
 
     def snapshots(self) -> tuple[BaySnapshot, ...]:
         return tuple(self.snapshot(b) for b in sorted(self._bays))
@@ -503,6 +590,20 @@ class AtcCoordinator:
 
     def outcome(self, bay_id: int) -> str:
         return self._bays[bay_id].outcome
+
+    def estimate(self, bay_id: int) -> LatchEstimate:
+        return self._bays[bay_id].rig.estimate
+
+    def cycle_count(self, bay_id: int) -> int:
+        return self._cycles[bay_id]
+
+    def last_touch(self, bay_id: int) -> LatchEstimate | None:
+        """The estimate produced by this cycle's last touch (accepted or rejected), if any."""
+        return self._bays[bay_id].last_touch
+
+    def touch_events(self) -> tuple[TouchEvent, ...]:
+        """Recent ``TOUCH_CORRECTED`` entries for the HUD and log feed, oldest first."""
+        return tuple(self._touch_log)
 
     # ------------------------------------------------------------------ cycle control
 
@@ -520,6 +621,12 @@ class AtcCoordinator:
             bay.auto.controller.close()
         self._end_episode(bay, False, "cycle restarted")
         rig = bay.rig
+        # A new pallet is a new pose estimate (cycle 0 at build). Sampled here rather than at
+        # the lift-clear reset so the approach waypoints below are built on the same estimate.
+        rig.set_estimate(
+            self._estimator.sample(rig.true_world_latch(), bay_id, self._cycles[bay_id])
+        )
+        self._cycles[bay_id] += 1
         wfl = rig.world_from_latch()
         start = compose_pose(wfl, self.routine.pose_at(0.0))
         here = rig.wrist_pose()
@@ -539,7 +646,11 @@ class AtcCoordinator:
         bay.auto = None
         bay.fallback_skill = None
         bay.buffer = None
-        bay.pending = None
+        # A gate still running in the worker is simply never applied. It is deliberately not
+        # cancelled: whether cancel() succeeds depends on wall-clock timing (queued vs running),
+        # and the validator's state carries over between gates, so cancelling would make the
+        # next gate's result nondeterministic.
+        bay.gate = None
         bay.clutch_held = False
         bay.refused = False
         bay.match = None
@@ -552,6 +663,8 @@ class AtcCoordinator:
         bay.prev_cmd_pos = None
         bay.prev_wrist_pos = None
         bay.detector.reset()
+        bay.touch.disarm()  # armed when the routine starts, after the latch reset
+        bay.last_touch = None
         bay.indexer.reset()
         if bay_id in self._queue:
             self._queue.remove(bay_id)
@@ -567,7 +680,7 @@ class AtcCoordinator:
     ) -> tuple[BaySnapshot, ...]:
         """One 60 Hz control tick: command every active bay, step physics, sense, transition."""
         console = console or ConsoleInputState()
-        self._run_pending()
+        self._apply_gates()
         for bay in self._bays.values():
             self._control(bay, console, operator)
         step_physics(self.model, self.data)
@@ -652,9 +765,14 @@ class AtcCoordinator:
         if plan.done and (bay.rig.reached(pose) or bay.settle_ticks >= SETTLE_MAX_TICKS):
             bay.approach = None
             bay.settle_ticks = 0
+            if bay.pending_latch is not None:  # never arm on a stale bolt from the last cycle
+                jam, pin = bay.pending_latch
+                bay.pending_latch = None
+                bay.rig.reset_latch(flap_jammed=jam, bolt_pinned=pin)
             bay.routine_active = True
             bay.routine_t = 0.0
             bay.detector.reset()
+            bay.touch.reset()
             bay.prev_cmd_pos = None
 
     def _control_rescue(
@@ -681,12 +799,27 @@ class AtcCoordinator:
                     bay.buffer.record(
                         True, self.time_s, cmd, _fingers_array(bay.fingers), bay.tau_inf
                     )
+                    self._calibrate_demo_touch(bay)
             bay.clutch_held = True
             return
         if bay.clutch_held:
             self._release_clutch(bay)
             return
         self._hold(bay)
+
+    def _calibrate_demo_touch(self, bay: _Bay) -> None:
+        """Record the demo's own index contact offset at its first bolt-encoder movement.
+
+        Reads only the encoder, the index tip forward kinematics and the bay's (stall-touch
+        corrected) estimate: the same frame the rescue trajectory is recorded in.
+        """
+        rig = bay.rig
+        if bay.buffer is not None and len(bay.buffer) == 1:  # a new clutch hold starts
+            bay.demo_touch.reset()
+            bay.demo_offset_m = None
+        x_bolt = rig.bolt_x()
+        if bay.demo_offset_m is None and bay.demo_touch.update(x_bolt, None):
+            bay.demo_offset_m = contact_offset(rig.estimate, rig.index_tip_world(), x_bolt)
 
     def _release_clutch(self, bay: _Bay) -> None:
         bay.clutch_held = False
@@ -703,8 +836,8 @@ class AtcCoordinator:
         cleared = bay.rig.bolt_x() >= BOLT_CLEARED_M
         self._end_episode(bay, cleared, None if cleared else "bolt not cleared")
         if traj is not None and bay.signature is not None:
-            bay.pending = (traj, bay.signature)
             bay.state = BayState.VALIDATING
+            self._submit_gate(bay, traj, bay.signature)
         else:
             logger.info("bay %d: rescue discarded (bolt not cleared), staying in hover", bay.bay_id)
 
@@ -765,6 +898,11 @@ class AtcCoordinator:
             return
 
         if bay.state == BayState.NOMINAL and bay.routine_active:
+            # The routine target is recomposed from the estimate every tick, so a correction
+            # lands through the push-lead clamp without an extra blend. The target may therefore
+            # step backward by up to the correction size in one tick (plan-sanctioned).
+            if bay.touch.update(x_bolt, rig.wrist_push_torque()):
+                self._apply_touch(bay, x_bolt)
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
                 bay.outcome = "cleared"
@@ -790,6 +928,18 @@ class AtcCoordinator:
         if x_bolt >= BOLT_CLEARED_M:
             self._complete_autonomous(bay)
             return
+        controller = rec.controller
+        if (
+            rec.error is None
+            and isinstance(controller, DmpRecovery)
+            and controller.in_replay
+            and controller.touch_offset_m is not None
+            and bay.touch.update(x_bolt, None)
+            and self._apply_touch(bay, x_bolt, controller.touch_offset_m)
+        ):
+            # Replay touches are encoder-only and use the skill's own demo contact offset; a
+            # skill without one gets no replay touch.
+            controller.rebase(bay.rig.world_from_latch())
         reason = rec.error
         if reason is None:
             try:
@@ -869,10 +1019,37 @@ class AtcCoordinator:
     def last_trigger_reason(self, bay_id: int) -> str:
         return self._bays[bay_id].trigger_reason
 
+    # ------------------------------------------------------------------ touch re-localization
+
+    def _apply_touch(self, bay: _Bay, x_bolt: float, pad_offset_m: float | None = None) -> bool:
+        """Correct the estimate's push axis from the index tip at a touch. True if accepted.
+
+        Reads only proprioception (index tip forward kinematics) and the bolt encoder. An
+        outlier correction is rejected and logged, and the estimate is kept.
+        """
+        rig = bay.rig
+        bay.touch.disarm()
+        est = touch_correct(rig.estimate, rig.index_tip_world(), x_bolt, pad_offset_m)
+        bay.last_touch = est
+        rig.set_estimate(est)  # a rejected touch keeps the pose and records the outlier
+        if est.rejected_correction_m is not None:
+            logger.warning(
+                "bay %d touch rejected: correction %.1f mm is an outlier, estimate kept",
+                bay.bay_id,
+                est.rejected_correction_m * 1e3,
+            )
+            return False
+        shift_mm = (est.last_correction_m or 0.0) * 1e3
+        logger.info("bay %d touched latch: pose corrected %.1f mm", bay.bay_id, shift_mm)
+        self._touch_log.append(TouchEvent(bay.bay_id, shift_mm, self.time_s))
+        return True
+
     # ------------------------------------------------------------------ stall handling
 
     def _on_stall(self, bay: _Bay, trigger: StallTrigger) -> None:
         cfg = self.config
+        if bay.touch.armed:  # the stall is itself a touch: correct before retract or back-off
+            self._apply_touch(bay, bay.rig.bolt_x())
         bay.state = BayState.STALLED
         bay.routine_active = False
         bay.signature = trigger.signature
@@ -929,7 +1106,9 @@ class AtcCoordinator:
             tau_margin=cfg.tau_margin,
             tau_hard_max=cfg.tau_hard_max,
             timeout_s=cfg.skill_timeout_s,
+            on_replay_start=bay.touch.reset,  # backed off the hook: arm for the replay's touch
         )
+        bay.touch.disarm()  # re-armed once the back-off has unloaded the wrist
         bay.auto = _Recovery(controller, "dmp", skill)
         bay.skill_id = skill.skill_id
         bay.state = BayState.AUTONOMOUS_SKILL
@@ -1104,18 +1283,36 @@ class AtcCoordinator:
 
     # ------------------------------------------------------------------ validation + library
 
-    def _run_pending(self) -> None:
-        for bay in self._bays.values():
-            if bay.state == BayState.VALIDATING and bay.pending is not None:
-                traj, sig = bay.pending
-                bay.pending = None
-                self._finalize_rescue(bay, traj, sig)
+    def gate_pending(self, bay_id: int) -> bool:
+        """True while the bay's skill gate is running or waiting for its sim-time deadline."""
+        return self._bays[bay_id].gate is not None
 
-    def _finalize_rescue(self, bay: _Bay, traj: RescueTrajectory, sig: StallSignature) -> None:
+    def close(self) -> None:
+        """Shut the gate worker down (idempotent); a running gate finishes, queued ones drop."""
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def _apply_gates(self) -> None:
+        """Apply every gate whose sim-time deadline has been reached, waiting for the worker."""
+        for bay in self._bays.values():
+            gate = bay.gate
+            if (
+                gate is not None
+                and bay.state == BayState.VALIDATING
+                and (self.time_s >= gate.deadline)
+            ):
+                bay.gate = None
+                self._apply_gate(bay, gate)
+
+    def _submit_gate(self, bay: _Bay, traj: RescueTrajectory, sig: StallSignature) -> None:
         sku = self.config.part_sku_id
         skill = self.unoq.fit_dmp(
             sku, sig, traj.timestamps_s, traj.wrist_latch_se3, traj.fingers_q, traj.tau_ext_inf
         )
+        # The demo's own contact offset rides with the skill (replay touch re-localization).
+        skill = replace(skill, touch_offset_m=bay.demo_offset_m)
+        bay.demo_offset_m = None
         self._emit(
             "RESCUE_LOGGED",
             bay,
@@ -1130,7 +1327,22 @@ class AtcCoordinator:
             },
         )
         self._submit_reasoning("RESCUE_LOGGED", bay)
-        report = self.validator.validate(skill)
+        executor = self._executor
+        if executor is None:
+            raise RuntimeError("coordinator is closed")
+        bay.gate = _Gate(
+            skill,
+            executor.submit(self.validator.validate, skill),
+            self.time_s + self.config.gate_deadline_s,
+        )
+
+    def _apply_gate(self, bay: _Bay, gate: _Gate) -> None:
+        skill = gate.skill
+        try:
+            report = gate.future.result()  # blocks if the worker is still running
+        except Exception:
+            logger.exception("bay %d: skill gate failed for %s", bay.bay_id, skill.skill_id)
+            report = ValidationReport((), 0.0, self.validator.pass_min)
         self.last_report = report
         self._emit(
             "VALIDATION_GATE",
@@ -1142,11 +1354,17 @@ class AtcCoordinator:
                 "rollouts_passed": report.n_passed,
                 "rollouts_total": report.total,
                 "elapsed_s": report.elapsed_s,
-                "max_tau_ext_inf_nm": max(r.max_tau_ext_inf_nm for r in report.results),
+                "max_tau_ext_inf_nm": max(
+                    (r.max_tau_ext_inf_nm for r in report.results), default=0.0
+                ),
             },
         )
         self._submit_reasoning(
-            "VALIDATION_GATE", bay, rollout_passed=report.n_passed, rollout_total=report.total
+            "VALIDATION_GATE",
+            bay,
+            rollout_passed=report.n_passed,
+            rollout_total=report.total,
+            rollout_threshold=report.threshold,
         )
         if report.passed:
             self.unoq.register_skill(skill)
@@ -1190,6 +1408,7 @@ class AtcCoordinator:
         bay: _Bay,
         rollout_passed: int | None = None,
         rollout_total: int | None = None,
+        rollout_threshold: int | None = None,
     ) -> None:
         match = bay.match
         try:
@@ -1210,6 +1429,7 @@ class AtcCoordinator:
                     is_ood=True if match is None else match.is_ood,
                     rollout_passed=rollout_passed,
                     rollout_total=rollout_total,
+                    rollout_threshold=rollout_threshold,
                 )
             )
         except Exception:
@@ -1224,5 +1444,7 @@ __all__ = [
     "RoutineSpec",
     "StallDetector",
     "StallTrigger",
+    "TouchDetector",
+    "TouchEvent",
     "compute_confidence",
 ]

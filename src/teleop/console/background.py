@@ -185,6 +185,7 @@ def record_cycle(max_sim_s: float = 30.0) -> BackgroundCycle:
     from teleop.unoq.client import UnoQClient
 
     unoq = UnoQClient.connect_or_mock("127.0.0.1", 1, 1, connect_timeout_s=0.2)
+    co: AtcCoordinator | None = None
     try:
         co = AtcCoordinator.build(unoq, _NullSink(), _NullReasoner())
         joints = _bay_joints(co.model, SOURCE_BAY)
@@ -210,6 +211,8 @@ def record_cycle(max_sim_s: float = 30.0) -> BackgroundCycle:
         else:
             raise RuntimeError(f"bay {SOURCE_BAY} did not clear within {max_sim_s} s")
     finally:
+        if co is not None:
+            co.close()
         unoq.close()  # also stops the local loopback node
     t = np.asarray(ts, dtype=np.float64)
     return BackgroundCycle(
