@@ -34,6 +34,7 @@ from teleop.console.background import BackgroundCycle, BackgroundPlayer
 from teleop.console.layout import FeedSpec, ViewState, feed_layout
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
+from teleop.policy.cameras import policy_clip
 from teleop.sim.cells import (
     BEACON_ESTOP_RGBA,
     BEACON_FEED_RGBA,
@@ -371,8 +372,11 @@ class FeedRenderer:
             # Clip distant stations along the same conveyor line out of orthographic close-ups.
             self.model.vis.map.zfar = (1.15 / self._extent) if is_ortho else self._base_zfar
             r = self._renderer(feed.width, feed.height)
-            r.update_scene(d, feed.camera)  # every feed shows the full arm and hand
-            pixels = r.render()
+            # Wrist cameras get metric clip planes: the warehouse-scale near plane (~0.37 m)
+            # would clip the hand and latch out of the wrist view.
+            with policy_clip(self.model, feed.camera):
+                r.update_scene(d, feed.camera)  # every feed shows the full arm and hand
+                pixels = r.render()
             buf = io.BytesIO()
             Image.fromarray(pixels).save(buf, format="JPEG", quality=self.quality)
             frames.append((feed.slot, buf.getvalue()))
