@@ -86,7 +86,7 @@ def test_joy_map_and_mask_helpers() -> None:
     assert not is_joy_map("1124") and not is_joy_map("123") and not is_joy_map("12a4")
     assert power_mask({1, 4}) == 9 and bays_from_mask(9) == frozenset({1, 4})
     assert describe_joy_map("2431") == "X+ -> right, X- -> down, Y+ -> up, Y- -> left"
-    assert describe_joy_map(DEFAULT_JOY_MAP) == "X+ -> right, X- -> left, Y+ -> down, Y- -> up"
+    assert describe_joy_map(DEFAULT_JOY_MAP) == "X+ -> left, X- -> right, Y+ -> up, Y- -> down"
 
 
 def test_console_dict_round_trip_carries_powered_off() -> None:
@@ -355,7 +355,7 @@ def test_sketch_copies_match_and_mirror_the_python_navigation() -> None:
     console, app = (p.read_text(encoding="utf-8") for p in _SKETCHES)
     assert console == app, "firmware/unoq_app/sketch/sketch.ino must stay a copy"
     assert "JOY_LEFT = 1, JOY_RIGHT = 2, JOY_UP = 3, JOY_DOWN = 4" in console
-    assert [int(d) for d in DEFAULT_JOY_MAP] == [R, L, D, U]
-    assert "joyMap[4] = {JOY_RIGHT, JOY_LEFT, JOY_DOWN, JOY_UP}" in console
+    assert [int(d) for d in DEFAULT_JOY_MAP] == [L, R, U, D]
+    assert "joyMap[4] = {JOY_LEFT, JOY_RIGHT, JOY_UP, JOY_DOWN}" in console
     assert "moveSelection(selectedBay, joyMap[dir])" in console
     assert "selectedBay = joyMap[dir]" not in console  # no direct direction -> bay jumps left

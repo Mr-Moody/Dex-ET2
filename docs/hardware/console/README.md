@@ -145,8 +145,8 @@ Bay 1, 2, 3 and 4's LED blinks amber for each step (the terminal names the direc
 direction that's already taken buzzes low, so push another one. When all four are set, the map is saved on the board
 (`~/.config/teleop/unoq_joystick_map`) and restored on every start and MCU reboot.
 
-`--joy-map 2143` sets the map directly: the direction (1 left, 2 right, 3 up, 4 down) for raw
-stick X+, X-, Y+, Y-. `2143` is the default. A map saved before panel navigation keeps working:
+`--joy-map 1234` sets the map directly: the direction (1 left, 2 right, 3 up, 4 down) for raw
+stick X+, X-, Y+, Y-. `1234` is the default (the plate holds the stick upside down). A map saved before panel navigation keeps working:
 its digits used to name bays 1-4 and now name the directions those bays sat in. `--joy-raw` prints
 the raw ADC values for 15 s to check the wiring.
 

@@ -88,8 +88,8 @@ class StickDirection(IntEnum):
 # Bay 1 | Bay 2 over Bay 3 | Bay 4. The sketch's moveSelection() mirrors neighbour_bay().
 GRID_COLUMNS = 2
 # Directions for the raw stick axes X+, X-, Y+, Y- (the firmware default for the plate's
-# mounting: higher VRx = right, lower VRy = up).
-DEFAULT_JOY_MAP = "2143"
+# mounting, which sits upside down: higher VRx = left, higher VRy = up).
+DEFAULT_JOY_MAP = "1234"
 JOY_MAP_FILE_ENV = "UNOQ_JOYMAP_FILE"
 
 

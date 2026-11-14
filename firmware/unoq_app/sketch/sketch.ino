@@ -216,9 +216,9 @@ static uint8_t joyPending = DIR_NONE;
 static bool joyRaw = false;
 
 // Direction of each raw stick axis: 1 left, 2 right, 3 up, 4 down. Default for the plate's
-// mounting: higher VRx = right and lower VRy = up.
+// mounting, which sits upside down: higher VRx = left and higher VRy = up.
 static const uint8_t JOY_LEFT = 1, JOY_RIGHT = 2, JOY_UP = 3, JOY_DOWN = 4;
-static uint8_t joyMap[4] = {JOY_RIGHT, JOY_LEFT, JOY_DOWN, JOY_UP};
+static uint8_t joyMap[4] = {JOY_LEFT, JOY_RIGHT, JOY_UP, JOY_DOWN};
 
 // The camera panel one step from `bay` towards `move` on the 2x2 grid (Bay 1 | Bay 2 over
 // Bay 3 | Bay 4); the edges stop it. Mirrors neighbour_bay() in mcu_bridge.py.
