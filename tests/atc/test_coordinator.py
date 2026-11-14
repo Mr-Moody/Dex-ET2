@@ -786,6 +786,7 @@ def test_conveyor_pauses_during_work_and_advances_seamless_pitch_loop_with_estop
             break
     assert co.in_routine(1)
     assert co.conveyor_status(1).mode == "paused"
+    assert not co.conveyor_status(1).resuming  # a routine pause between packs is not flagged
     assert co.conveyor_status(1).pack_dy_m == pytest.approx(0.0)
 
     # On clearance, belt_transfer advances the cleared pack continuously across PACK_PITCH_M.
@@ -813,8 +814,10 @@ def test_conveyor_pauses_during_work_and_advances_seamless_pitch_loop_with_estop
     for _ in range(15):
         co.tick()
     assert co.conveyor_status(1).mode == "estop"
+    assert not co.conveyor_status(1).resuming  # halted, not yet restarting
     assert co.conveyor_status(1).belt_dist_m == pytest.approx(dist_estop)
     assert co.conveyor_status(2).mode != "estop"
+    assert not co.conveyor_status(2).resuming
 
 
 def test_estop_power_cut_brakes_one_robot_and_resumes_its_cycle(rig: Rig) -> None:

@@ -1,66 +1,27 @@
-"""T-196: offline ACT evaluation gate (``teleop eval``) and ``validate_controller``."""
+"""T-196: the offline ACT gate (``teleop eval``) and the controller-generic validator.
+
+No torch, LeRobot or GPU: ``_load_policy`` is monkeypatched to a ``ReplayPolicy`` of a scripted
+flap rescue, the camera renderer to zeros, and the dataset reader to in-memory episodes.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from teleop.atc.coordinator import DEFAULT_REALISM, ROUTINE, AtcCoordinator, OperatorInput
-from teleop.atc.recovery import BaySignals, RecoveryCommand
-from teleop.atc.stage import RESCUE_PRESS, RESCUE_WAYPOINTS
-from teleop.atc.types import BOLT_CLEARED_M, BayState, ConsoleInputState
-from teleop.atc.validator import CONTROL_DT, BayRig, SkillValidator
 from teleop.compliance.protocol import ComplianceEvent
-from teleop.policy.act_runtime import ReplayPolicy
-from teleop.policy.manifest import GateManifest
-from teleop.policy.schema import (
-    CAMERAS,
-    FPS,
-    EpisodeMeta,
-    action_from_command,
-    lerobot_features,
-    observe,
-)
+from teleop.policy.schema import CAMERAS, IMAGE_HW, SCHEMA_VERSION
 from teleop.reasoning.protocol import ReasoningContext, ReasoningVerdict
 from teleop.sim.bays import PANDA_XML
-from teleop.sim.hands import HandSpec, load_hand
-from teleop.types import Pose
-from teleop.unoq.client import UnoQClient
-from teleop.unoq.dmp import quat_to_mat
-from teleop.unoq.server import UnoQServer
-
-HW = (32, 32)
-
-# Captured on main (2136247) before the validate_controller refactor.
-EXPECTED_DMP_PASSED = 19
-EXPECTED_DMP_MAX_TAU: tuple[float, ...] = (
-    1.2347783465622229,
-    1.601130144260064,
-    1.2976389381018814,
-    1.2663415431811123,
-    1.2345507669357823,
-    1.2288316538660504,
-    1.7265918713327866,
-    2.3345881516796063,
-    1.2681589725923104,
-    1.210370884724036,
-    1.261216001212686,
-    1.4101188520068444,
-    1.2248335273916635,
-    1.1946272048761908,
-    1.2315917737229516,
-    1.220959590604384,
-    1.2214651312238856,
-    1.2321467472680754,
-    1.2265235567524704,
-    1.2007754171473142,
-)
+from teleop.sim.hands import load_hand
 
 
 def _models_present() -> bool:
@@ -71,12 +32,19 @@ def _models_present() -> bool:
     return PANDA_XML.is_file() and right.is_file()
 
 
-pytestmark = pytest.mark.skipif(
+mj: Any = _mujoco
+
+needs_models = pytest.mark.skipif(
     not _models_present(), reason="Panda/Inspire MJCFs missing; run scripts/fetch_models.py"
 )
 
+# ``validate`` on the scripted flap rescue's DMP, captured on ``main`` before T-196 touched the
+# validator (SkillValidator(hand_spec, realism=DEFAULT_REALISM), seed 0, 20 rollouts).
+GOLDEN_DMP_N_PASSED = 20
+GOLDEN_DMP_MAX_TAU_NM = 1.4538941036760806
 
-class _QuietSink:
+
+class _Sink:
     def emit(self, event: ComplianceEvent) -> None:
         pass
 
@@ -84,7 +52,7 @@ class _QuietSink:
         pass
 
 
-class _QuietReasoner:
+class _Quiet:
     def submit(self, ctx: ReasoningContext) -> None:
         pass
 
@@ -95,308 +63,377 @@ class _QuietReasoner:
         pass
 
 
-class _InProcessUnoQ(UnoQClient):
-    """Transport-free UnoQClient backed directly by ``UnoQServer.handle``."""
-
+class ZeroRenderer:
     def __init__(self) -> None:
-        server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0, name="test-node")
-        super().__init__("127.0.0.1", local_server=server)
-        self._node = server
+        self.calls = 0
 
-    def request(self, message: Mapping[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-        reply = self._node.handle(message)
-        if not reply.get("ok"):
-            raise RuntimeError(str(reply.get("error", "request failed")))
-        return reply
+    def render(self, data: Any, bay_id: int) -> dict[str, NDArray[np.uint8]]:
+        self.calls += 1
+        return {c: np.zeros((*IMAGE_HW, 3), dtype=np.uint8) for c in CAMERAS}
 
     def close(self) -> None:
         pass
 
 
-@dataclass(frozen=True)
-class FlapDemo:
-    states: NDArray[np.float32]  # (T, 29) 30 fps
-    actions: NDArray[np.float32]  # (T, 12) 30 fps
-    signature: tuple[float, float, float, float]
-    skill: Any
+class _ActionRecorder:
+    """Observer: the latch-frame actions of one bay's operator rescue, one row per 60 Hz tick."""
 
-
-class _DemoObserver:
-    def __init__(self, bay_id: int) -> None:
-        self.bay_id = bay_id
-        self.states: list[NDArray[np.float64]] = []
-        self.actions: list[NDArray[np.float64]] = []
+    def __init__(self) -> None:
+        self.bay: int | None = None
+        self.rows: list[NDArray[np.float64]] = []
 
     def on_episode_start(self, bay_id: int, source: str, signature_id: Any, signature: Any) -> None:
         pass
 
     def on_tick(
-        self, bay_id: int, rig: BayRig, wrist_world: Any, fingers: Mapping[str, float]
+        self, bay_id: int, rig: Any, wrist_world: Any, fingers: Mapping[str, float]
     ) -> None:
-        if bay_id == self.bay_id:
-            self.states.append(observe(rig))
-            self.actions.append(action_from_command(rig.world_from_latch(), wrist_world, fingers))
+        from teleop.policy.schema import action_from_command
+
+        if bay_id == self.bay:
+            self.rows.append(action_from_command(rig.world_from_latch(), wrist_world, fingers))
 
     def on_episode_end(self, bay_id: int, success: bool, aborted_reason: str | None) -> None:
         pass
 
 
-@pytest.fixture(scope="module")
-def hand_spec() -> HandSpec:
-    return load_hand("inspire")
+@dataclass(frozen=True)
+class Demo:
+    actions: NDArray[np.float32]  # 30 fps latch-frame rows of one scripted flap rescue
+    signatures: dict[int, tuple[float, float, float, float]]
 
 
-@pytest.fixture(scope="module")
-def validator(hand_spec: HandSpec) -> SkillValidator:
-    return SkillValidator(hand_spec, realism=DEFAULT_REALISM)
+def build_demo() -> Demo:
+    """Jam both flaps and rescue the first queued bay with the scripted glove, recorded."""
+    from teleop.atc.coordinator import AtcCoordinator
+    from teleop.atc.stage import KEY_SPACE, EventTap, ReasonerTap, ScriptedGlove, StageController
+    from teleop.atc.types import BOLT_CLEARED_M
+    from teleop.unoq.client import UnoQClient
+    from teleop.unoq.server import UnoQServer
 
+    server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0, name="test-node").start()
+    unoq = UnoQClient("127.0.0.1", server.udp_port, server.tcp_port, local_server=server).connect()
+    recorder = _ActionRecorder()
+    events = EventTap(_Sink())
+    co = AtcCoordinator.build(unoq, events, _Quiet(), observer=recorder)
+    controller = StageController(co, events, ReasonerTap(_Quiet()), cycle_dwell_s=0.5)
 
-@pytest.fixture(scope="module")
-def flap_demo(hand_spec: HandSpec, validator: SkillValidator) -> FlapDemo:
-    """Run the canonical Bay 1 flap rescue; capture the fitted DMP skill and 30 fps episode rows."""
-    unoq = _InProcessUnoQ()
-    obs = _DemoObserver(bay_id=1)
-    co = AtcCoordinator.build(
-        unoq,
-        _QuietSink(),
-        _QuietReasoner(),
-        hand_spec=hand_spec,
-        validator=validator,
-        observer=obs,
-    )
+    def tick_until(pred: Any, op: Any = None, max_ticks: int = 3000) -> None:
+        for _ in range(max_ticks):
+            controller.tick(op.latest() if op is not None else None)
+            if pred():
+                return
+        raise AssertionError("condition never reached")
+
     try:
         co.start_cycle(1, flap_jammed=True)
-        for _ in range(1500):
-            if co.tick()[0].state in {BayState.RESCUE, BayState.OOD_ESCALATED, BayState.QUEUED}:
-                break
-        for _ in range(40):
-            co.tick()
-        bay_rig = co.rig(1)
-        hover = bay_rig.wrist_pose()
-        assert hover.position is not None
-        r_world = quat_to_mat(bay_rig.world_from_latch().orientation)
-        origin = np.asarray(hover.position)
-        base = dict(ROUTINE.fingers)
-        console = ConsoleInputState(selected_bay=1, clutch=True)
-        done = False
-        for i in range(1, len(RESCUE_WAYPOINTS)):
-            if done:
-                break
-            dur, p1, f1 = RESCUE_WAYPOINTS[i]
-            _, p0, f0 = RESCUE_WAYPOINTS[i - 1]
-            n = max(int(round(dur / CONTROL_DT)), 1)
-            for k in range(1, n + 1):
-                a = k / n
-                delta = np.asarray(p0) + a * (np.asarray(p1) - np.asarray(p0))
-                f = f0 + a * (f1 - f0)
-                q = {name: base[name] + f * v for name, v in RESCUE_PRESS.items()}
-                q_full = {**base, **q}
-                pos = origin + r_world @ delta
-                sample = OperatorInput(
-                    Pose(orientation=hover.orientation, position=(pos[0], pos[1], pos[2])),
-                    q_full,
-                )
-                snaps = co.tick(console, sample)
-                if snaps[0].x_bolt_m >= BOLT_CLEARED_M + 0.0015:
-                    done = True
-                    break
-        released = ConsoleInputState(selected_bay=1, clutch=False)
-        max_extra = round(co.config.gate_deadline_s / CONTROL_DT) + 60
-        for _ in range(max_extra):
-            co.tick(released, None)
-            if co.state(1) == BayState.NOMINAL:
-                break
-        skill = next(iter(co.library.values()))
-        sig = co.last_signature(1)
-        assert sig is not None
-        vec = tuple(float(v) for v in sig.as_vector())
-        assert len(vec) == 4
-        signature: tuple[float, float, float, float] = (vec[0], vec[1], vec[2], vec[3])
+        co.start_cycle(2, flap_jammed=True)
+        tick_until(
+            lambda: (
+                controller.rescue_bay() is not None
+                and all(co.last_signature(b) is not None for b in (1, 2))
+            )
+        )
+        bay = controller.rescue_bay()
+        assert bay is not None
+        recorder.bay = bay
+        glove = ScriptedGlove(controller)
+        controller.on_key(ord(str(bay)))
+        controller.on_key(KEY_SPACE)
+        rig = co.rig(bay)
+        tick_until(lambda: rig.bolt_x() >= BOLT_CLEARED_M + 0.002, glove)
+        for _ in range(15):
+            controller.tick(glove.latest())
+        sigs: dict[int, tuple[float, float, float, float]] = {}
+        for b in (1, 2):
+            z = co.last_signature(b)
+            assert z is not None
+            a, bb, c, d = (float(v) for v in z.as_vector())
+            sigs[b] = (a, bb, c, d)
     finally:
-        co.close()
+        controller.close()
         unoq.close()
-    states = np.asarray(obs.states[::2], dtype=np.float32)
-    actions = np.asarray(obs.actions[::2], dtype=np.float32)
-    return FlapDemo(states=states, actions=actions, signature=signature, skill=skill)
+    rows = np.asarray(recorder.rows[::2], dtype=np.float32)  # 60 Hz ticks -> 30 fps rows
+    assert len(rows) > 60
+    return Demo(rows, sigs)
 
 
-def _write_flap_dataset(root: Path, demo: FlapDemo) -> Path:
-    pytest.importorskip("lerobot")
-    from teleop.record.recorder import EpisodeRecorder
+def episode_of(demo: Demo, *, fault: str = "flap", source: str = "scripted") -> Any:
+    """The demo as an in-memory eval episode (what ``read_eval_episodes`` yields for a dataset)."""
+    from teleop.commands.eval import EvalEpisode
+    from teleop.policy.schema import _reference_rotation  # pyright: ignore[reportPrivateUsage]
+    from teleop.unoq.dmp import mat_to_quat, so3_exp
 
-    rec = EpisodeRecorder(f"local/{root.name}", root, FPS, lerobot_features(HW), "panda_inspire")
-    imgs = {cam: np.zeros((*HW, 3), dtype=np.uint8) for cam in CAMERAS}
-    rec.start_episode("recover latch: flap")
-    for st, act in zip(demo.states, demo.actions, strict=True):
-        rec.add_frame(st, act, imgs)
-    meta = EpisodeMeta(
-        source="scripted",
-        fault="flap",
-        bay=1,
-        signature_id="Jam_Sig_1",
-        signature=demo.signature,
-        latch_pose={"x": 0.5, "y": 0.0, "z": 0.0, "yaw_rad": 0.0},
+    a = demo.actions.astype(np.float64)
+    ref = _reference_rotation()
+    wrist = np.array([[*r[:3], *mat_to_quat(ref @ so3_exp(r[3:6]))] for r in a])
+    n = len(a)
+    return EvalEpisode(
+        fault=fault,
+        source=source,
         success=True,
-        bolt_x_final=0.054,
-        max_tau_hand_inf=1.6,
-        max_arm_ratio=0.35,
-        aborted_reason=None,
+        signature=demo.signatures[1],
+        t_s=np.arange(n, dtype=np.float64) / 30.0,
+        wrist_latch=wrist,
+        hand=a[:, 6:12],
+        tau_hand_inf=np.full(n, 0.2),
     )
-    rec.end_episode(meta.to_json())
-    rec.close()
-    return root
 
 
 @pytest.fixture(scope="module")
-def flap_dataset(tmp_path_factory: pytest.TempPathFactory, flap_demo: FlapDemo) -> Path:
-    return _write_flap_dataset(tmp_path_factory.mktemp("ds") / "flap", flap_demo)
+def demo() -> Demo:
+    if not _models_present():
+        pytest.skip("Panda/Inspire MJCFs missing; run scripts/fetch_models.py")
+    return build_demo()
 
 
-def test_validate_unchanged_for_dmp(validator: SkillValidator, flap_demo: FlapDemo) -> None:
-    report = validator.validate(flap_demo.skill)
-    assert report.n_passed == EXPECTED_DMP_PASSED
-    taus = [r.max_tau_ext_inf_nm for r in report.results]
-    assert taus == pytest.approx(EXPECTED_DMP_MAX_TAU, abs=1e-9)
+@pytest.fixture(scope="module")
+def validator() -> Iterator[Any]:
+    from teleop.atc.coordinator import DEFAULT_REALISM
+    from teleop.atc.validator import SkillValidator
+
+    if not _models_present():
+        pytest.skip("Panda/Inspire MJCFs missing; run scripts/fetch_models.py")
+    yield SkillValidator(load_hand("inspire"), realism=DEFAULT_REALISM)
 
 
-def test_pin_fault_uses_bolt_pinned(
-    validator: SkillValidator, monkeypatch: pytest.MonkeyPatch
+def write_checkpoint(path: Path) -> Path:
+    """A schema-correct ``config.json`` and stand-in weights (the policy itself is stubbed)."""
+    from teleop.policy.act_runtime import ACTION_KEY, IMAGE_KEY, STATE_KEY
+    from teleop.policy.schema import ACTION_NAMES, STATE_NAMES
+
+    path.mkdir(parents=True, exist_ok=True)
+    feats: dict[str, Any] = {STATE_KEY: {"type": "STATE", "shape": [len(STATE_NAMES)]}}
+    for cam in CAMERAS:
+        feats[IMAGE_KEY.format(cam)] = {"type": "VISUAL", "shape": [3, *IMAGE_HW]}
+    config = {
+        "input_features": feats,
+        "output_features": {ACTION_KEY: {"type": "ACTION", "shape": [len(ACTION_NAMES)]}},
+    }
+    (path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (path / "model.safetensors").write_bytes(b"weights")
+    return path
+
+
+# --------------------------------------------------------------------------- baseline
+
+
+@needs_models
+def test_validate_unchanged_for_dmp(validator: Any, demo: Demo) -> None:
+    from teleop.commands.eval import fit_dmp_for
+
+    skill = fit_dmp_for("flap", [episode_of(demo)])
+    assert skill is not None
+    report = validator.validate(skill)
+    assert report.n_passed == GOLDEN_DMP_N_PASSED
+    worst = max(r.max_tau_ext_inf_nm for r in report.results)
+    assert worst == pytest.approx(GOLDEN_DMP_MAX_TAU_NM, abs=1e-9)
+
+
+# --------------------------------------------------------------------------- teleop eval
+
+
+def _run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    actions: NDArray[np.float32],
+    episodes: list[Any],
+    *extra: str,
+) -> tuple[int, Path]:
+    from teleop.commands import eval as ev
+    from teleop.policy.act_runtime import ReplayPolicy
+
+    ckpt = write_checkpoint(tmp_path / "ckpt")
+    monkeypatch.setattr(ev, "_load_policy", lambda _c, _d: ReplayPolicy(actions))
+    monkeypatch.setattr(ev, "_make_renderer", lambda _m, _hw: ZeroRenderer())
+    monkeypatch.setattr(ev, "read_eval_episodes", lambda _root: episodes)
+    code = ev.main(
+        ["--checkpoint", str(ckpt), "--dataset", str(tmp_path / "ds"), "--device", "cpu", *extra]
+    )
+    return code, ckpt / "gate.json"
+
+
+@needs_models
+def test_eval_writes_manifest_with_passed_fault(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, demo: Demo
 ) -> None:
-    calls: list[tuple[bool, bool]] = []
-    orig_reset = validator.rig.reset_latch
+    from teleop.policy.manifest import GateManifest
 
-    def spy_reset(flap_jammed: bool = False, bolt_pinned: bool = False) -> None:
-        calls.append((flap_jammed, bolt_pinned))
-        orig_reset(flap_jammed=flap_jammed, bolt_pinned=bolt_pinned)
+    code, gate = _run_eval(
+        monkeypatch,
+        tmp_path,
+        demo.actions,
+        [episode_of(demo)],
+        "--faults",
+        "flap",
+        "--rollouts",
+        "4",
+        "--bar",
+        "3",
+    )
+    manifest = GateManifest.load(gate)
+    assert code == 0
+    assert manifest.schema_version == SCHEMA_VERSION
+    assert manifest.bar == (3, 4)
+    assert manifest.passed_faults() == ("flap",)
+    assert manifest.prototypes["flap"] == [demo.signatures[1]]
+    flap = manifest.results["flap"]
+    assert flap.rollouts == 4 and flap.passed_rollouts >= 3
+    assert flap.dmp_passed_rollouts is not None  # the DMP ran the same conditions
+    assert flap.mean_time_to_clear_s is not None and flap.mean_time_to_clear_s > 0.0
+    assert len(manifest.checkpoint_sha256) == 64
 
-    monkeypatch.setattr(validator.rig, "reset_latch", spy_reset)
 
-    class _ImmediateAbort:
-        name = "test"
+@needs_models
+def test_eval_fault_below_bar_not_passed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, demo: Demo
+) -> None:
+    from teleop.policy.manifest import GateManifest
 
-        def command(self, rig: BayRig, s: BaySignals) -> RecoveryCommand | None:
+    idle = np.repeat(demo.actions[:1], len(demo.actions), axis=0)
+    code, gate = _run_eval(
+        monkeypatch,
+        tmp_path,
+        idle,
+        [episode_of(demo)],
+        "--faults",
+        "flap",
+        "--rollouts",
+        "2",
+        "--bar",
+        "2",
+    )
+    manifest = GateManifest.load(gate)
+    assert code == 1
+    assert "flap" not in manifest.passed_faults()
+    assert "flap" not in manifest.prototypes  # prototypes exist only for passed faults
+    assert manifest.results["flap"].passed_rollouts < 2
+
+
+@needs_models
+def test_eval_no_data_fault(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, demo: Demo) -> None:
+    from teleop.policy.manifest import GateManifest
+
+    idle = np.repeat(demo.actions[:1], len(demo.actions), axis=0)
+    _, gate = _run_eval(
+        monkeypatch,
+        tmp_path,
+        idle,
+        [episode_of(demo)],
+        "--faults",
+        "flap,pin",
+        "--rollouts",
+        "2",
+        "--bar",
+        "2",
+    )
+    manifest = GateManifest.load(gate)
+    pin = manifest.results["pin"]
+    assert pin.note == "no data" and pin.rollouts == 0
+    assert "pin" not in manifest.passed_faults() and "pin" not in manifest.prototypes
+
+
+@needs_models
+def test_pin_fault_uses_bolt_pinned(validator: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from teleop.atc.recovery import BaySignals, RecoveryCommand
+
+    class Stop:
+        name = "stop"
+
+        def command(self, rig: Any, s: BaySignals) -> RecoveryCommand | None:
             return None
 
-        def check(self, rig: BayRig, s: BaySignals) -> str | None:
+        def check(self, rig: Any, s: BaySignals) -> str | None:
             return "stop"
 
         def close(self) -> None:
             pass
 
-    conds = validator.draw_conditions("pin")[:1]
-    report = validator.validate_controller(
-        lambda _rig: _ImmediateAbort(), fault="pin", conditions=conds
+    calls: list[dict[str, bool]] = []
+    real = validator.rig.reset_latch
+
+    def spy(**kw: bool) -> None:
+        calls.append(kw)
+        real(**kw)
+
+    monkeypatch.setattr(validator.rig, "reset_latch", spy)
+    cond = validator.draw_conditions("eval/pin")[:1]
+    for fault, expected in (
+        ("pin", {"flap_jammed": False, "bolt_pinned": True}),
+        ("flap", {"flap_jammed": True, "bolt_pinned": False}),
+    ):
+        calls.clear()
+        report = validator.validate_controller(lambda _rig: Stop(), fault=fault, conditions=cond)
+        assert calls == [expected]
+        assert report.results[0].abort_reason == "stop"
+        assert not report.results[0].passed
+
+
+@needs_models
+def test_controller_rollouts_restore_model_parameters(validator: Any) -> None:
+    from teleop.atc.recovery import BaySignals, RecoveryCommand
+
+    class Stop:
+        name = "stop"
+
+        def command(self, rig: Any, s: BaySignals) -> RecoveryCommand | None:
+            return None
+
+        def check(self, rig: Any, s: BaySignals) -> str | None:
+            return "stop"
+
+        def close(self) -> None:
+            pass
+
+    m = validator.model
+    before = m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy()
+    validator.validate_controller(
+        lambda _rig: Stop(), conditions=validator.draw_conditions("x")[:2]
     )
-    assert report.total == 1
-    assert calls == [(False, True)]
+    np.testing.assert_array_equal(m.geom_friction, before[0])
+    np.testing.assert_array_equal(m.jnt_stiffness, before[1])
+    np.testing.assert_array_equal(m.qpos_spring, before[2])
 
 
-def test_eval_writes_manifest_with_passed_fault(
-    tmp_path: Path,
-    flap_demo: FlapDemo,
-    flap_dataset: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_eval_refuses_checkpoint_of_another_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pytest.importorskip("lerobot")
-    from teleop.commands import eval as eval_cmd
+    from teleop.commands import eval as ev
 
-    ckpt = tmp_path / "ckpt"
+    ckpt = tmp_path / "old"
     ckpt.mkdir()
-    monkeypatch.setattr(eval_cmd, "_load_policy", lambda _p, _d: ReplayPolicy(flap_demo.actions))
+    (ckpt / "config.json").write_text(json.dumps({"input_features": {}, "output_features": {}}))
+    monkeypatch.setattr(ev, "read_eval_episodes", lambda _r: [])
+    code = ev.main(["--checkpoint", str(ckpt), "--dataset", str(tmp_path), "--device", "cpu"])
+    assert code == 2
+    assert "does not match the policy schema" in capsys.readouterr().err
+    assert not (ckpt / "gate.json").exists()
 
-    rc = eval_cmd.main(
-        [
-            "--checkpoint",
-            str(ckpt),
-            "--dataset",
-            str(flap_dataset),
-            "--faults",
-            "flap",
-            "--rollouts",
-            "4",
-            "--bar",
-            "3",
-        ]
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--faults", "wiggle"], ["--bar", "11"], ["--faults", ""], ["--rollouts", "3", "--bar", "0"]],
+)
+def test_eval_rejects_bad_arguments(argv: list[str], tmp_path: Path) -> None:
+    from teleop.commands import eval as ev
+
+    assert ev.main(["--checkpoint", str(tmp_path), "--dataset", str(tmp_path), *argv]) == 2
+
+
+def test_mirror_copies_joints_and_latch_placement() -> None:
+    from teleop.commands.eval import mirror_bay_state
+    from teleop.sim.bays import CANONICAL_LATCH, build_four_bay_scene, build_single_bay_scene
+
+    if not _models_present():
+        pytest.skip("Panda/Inspire MJCFs missing; run scripts/fetch_models.py")
+    src, dst = build_single_bay_scene(CANONICAL_LATCH), build_four_bay_scene()
+    sd, dd = mj.MjData(src), mj.MjData(dst)
+    j1 = src.joint("bay1/joint1")
+    sd.qpos[int(j1.qposadr[0])] = 0.37
+    latch = src.body("bay1/latch_base")
+    src.body_pos[int(latch.id)] += (0.01, -0.02, 0.0)
+    mirror_bay_state(src, sd, dst, dd)
+    assert dd.qpos[int(dst.joint("bay1/joint1").qposadr[0])] == pytest.approx(0.37)
+    np.testing.assert_allclose(
+        dst.body_pos[int(dst.body("bay1/latch_base").id)], src.body_pos[int(latch.id)]
     )
-    assert rc == 0
-    manifest = GateManifest.load(ckpt / "gate.json")
-    assert "flap" in manifest.passed_faults()
-    assert manifest.bar == (3, 4)
-    res = manifest.results["flap"]
-    assert res.rollouts == 4
-    assert res.passed_rollouts >= 3
-    assert res.mean_time_to_clear_s is not None and res.mean_time_to_clear_s > 0.0
-    assert res.dmp_passed_rollouts is not None and 0 <= res.dmp_passed_rollouts <= 4
-    assert manifest.prototypes.get("flap") == [flap_demo.signature]
-
-
-def test_eval_fault_below_bar_not_passed(
-    tmp_path: Path,
-    flap_demo: FlapDemo,
-    flap_dataset: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pytest.importorskip("lerobot")
-    from teleop.commands import eval as eval_cmd
-
-    ckpt = tmp_path / "ckpt"
-    ckpt.mkdir()
-    idle = np.repeat(flap_demo.actions[:1], 40, axis=0)
-    monkeypatch.setattr(eval_cmd, "_load_policy", lambda _p, _d: ReplayPolicy(idle))
-
-    rc = eval_cmd.main(
-        [
-            "--checkpoint",
-            str(ckpt),
-            "--dataset",
-            str(flap_dataset),
-            "--faults",
-            "flap",
-            "--rollouts",
-            "4",
-            "--bar",
-            "3",
-        ]
-    )
-    assert rc == 1
-    manifest = GateManifest.load(ckpt / "gate.json")
-    assert "flap" not in manifest.passed_faults()
-    assert manifest.results["flap"].passed_rollouts == 0
-    assert not manifest.prototypes.get("flap")
-
-
-def test_eval_no_data_fault(
-    tmp_path: Path,
-    flap_demo: FlapDemo,
-    flap_dataset: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pytest.importorskip("lerobot")
-    from teleop.commands import eval as eval_cmd
-
-    ckpt = tmp_path / "ckpt"
-    ckpt.mkdir()
-    monkeypatch.setattr(eval_cmd, "_load_policy", lambda _p, _d: ReplayPolicy(flap_demo.actions))
-
-    rc = eval_cmd.main(
-        [
-            "--checkpoint",
-            str(ckpt),
-            "--dataset",
-            str(flap_dataset),
-            "--faults",
-            "flap,pin",
-            "--rollouts",
-            "4",
-            "--bar",
-            "3",
-        ]
-    )
-    assert rc == 0
-    manifest = GateManifest.load(ckpt / "gate.json")
-    assert "flap" in manifest.passed_faults()
-    assert "pin" not in manifest.passed_faults()
-    assert manifest.results["pin"].note == "no data"
-    assert manifest.results["pin"].rollouts == 0
-    assert manifest.results["pin"].passed_rollouts == 0
-    assert "pin" not in manifest.prototypes

@@ -407,6 +407,7 @@ class _Bay:
     outcome: str = ""
     belt_mode: ConveyorMode = "paused"
     belt_transfer: bool = False
+    belt_resuming: bool = False  # paused after a halt, until the belt next feeds
     belt_dist_m: float = 0.0
     pack_dy_m: float = 0.0
     powered: bool = True  # False while the console E-stop has this robot's power cut
@@ -607,6 +608,7 @@ class AtcCoordinator:
             mode=bay.belt_mode,
             belt_dist_m=bay.belt_dist_m,
             pack_dy_m=bay.pack_dy_m,
+            resuming=bay.belt_resuming and bay.belt_mode == "paused",
         )
 
     def conveyors(self) -> tuple[ConveyorStatus, ...]:
@@ -756,9 +758,11 @@ class AtcCoordinator:
                 BayState.VALIDATING,
             ):
                 bay.belt_mode = "estop"
+                bay.belt_resuming = True
                 continue
             if bay.belt_transfer:
                 bay.belt_mode = "feeding"
+                bay.belt_resuming = False
                 bay.pack_dy_m += step
                 bay.belt_dist_m += step
                 if bay.pack_dy_m >= PACK_PITCH_M:

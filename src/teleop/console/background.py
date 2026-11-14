@@ -137,6 +137,7 @@ class BackgroundPlayer:
         self._maps: dict[int, list[tuple[int, int, int]]] = {}
         self._last_t: dict[int, float] = {}
         self._belt_dist: dict[int, float] = {}
+        self._resuming: set[int] = set()  # belts paused after a halt, until they next feed
         self._pause_s: dict[int, float] = {}  # replay time lost to E-stop freezes, per bay
         self._frozen_at: dict[int, float] = {}  # replay time a currently frozen bay holds
         self._shown_t: dict[int, float] = {}  # last replay time posed, where a cut freezes
@@ -240,11 +241,16 @@ class BackgroundPlayer:
                 pack_dy = tau * PACK_PITCH_M
                 belt_dist = (n_cycles + tau) * PACK_PITCH_M
             self._belt_dist[bay] = belt_dist
+            if stopped:
+                self._resuming.add(bay)
+            elif mode == "feeding":
+                self._resuming.discard(bay)
             out[bay] = ConveyorStatus(
                 bay_id=bay,
                 mode="estop" if stopped else mode,
                 belt_dist_m=belt_dist,
                 pack_dy_m=pack_dy,
+                resuming=not stopped and mode == "paused" and bay in self._resuming,
             )
         return out
 
