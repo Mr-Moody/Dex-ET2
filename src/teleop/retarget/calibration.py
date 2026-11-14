@@ -16,6 +16,8 @@ DEFAULT_CLOSED_PER_JOINT = 1.4
 
 
 def _default_range(fm: FlexMap) -> tuple[float, float]:
+    if fm.range is not None:
+        return (float(fm.range[0]), float(fm.range[1]))
     scale = sum(fm.weights) if fm.weights is not None else float(len(fm.joints))
     return (0.0, DEFAULT_CLOSED_PER_JOINT * scale)
 
@@ -52,13 +54,16 @@ def calibrate(
 ) -> Calibration:
     """Median flex per actuator in the open and closed poses, per side.
 
-    Sides without frames in either pose, and actuators with no data, use defaults.
+    Sides without frames in either pose, actuators with no data, and actuators with a fixed
+    ``range`` use defaults.
     """
     calib = Calibration.default(spec)
     for side in SIDES:
         of = [f for f in open_frames if f.side == side]
         cf = [f for f in closed_frames if f.side == side]
         for fm in spec.flex:
+            if fm.range is not None:
+                continue
             o = _median_flex(of, fm)
             c = _median_flex(cf, fm)
             if o is not None and c is not None:

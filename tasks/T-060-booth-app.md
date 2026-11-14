@@ -1,7 +1,7 @@
 ---
 id: T-060
 title: Booth app
-status: todo
+status: blocked
 owner: null
 branch: null
 depends_on: [T-050]

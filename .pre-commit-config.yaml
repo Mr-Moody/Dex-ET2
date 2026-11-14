@@ -10,4 +10,4 @@ repos:
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
-        args: [--scopes, "input,sim,retarget,record,train,cli,infra,docs,tasks,net", feat, fix, chore, docs, refactor, test, perf, build, ci, style, revert]
+        args: [--scopes, "input,sim,retarget,record,train,cli,infra,docs,tasks,net,atc,unoq", feat, fix, chore, docs, refactor, test, perf, build, ci, style, revert]

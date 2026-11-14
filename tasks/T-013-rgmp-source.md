@@ -1,7 +1,7 @@
 ---
 id: T-013
 title: Rokoko SDK RGMP/RCSP source (stretch)
-status: todo
+status: blocked
 owner: null
 branch: null
 depends_on: [T-012]

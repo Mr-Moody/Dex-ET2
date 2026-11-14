@@ -1,4 +1,4 @@
-"""Fetch third-party hand models into ``third_party/`` (idempotent, commit-pinned).
+"""Fetch third-party hand and arm models into ``third_party/`` (idempotent, commit-pinned).
 
 Needs only ``git``. Run from anywhere: ``uv run python scripts/fetch_models.py``.
 Sources, commits and licences are recorded in ``third_party/README.md``.
@@ -29,8 +29,12 @@ SOURCES = (
         dest="menagerie",
         url="https://github.com/google-deepmind/mujoco_menagerie",
         commit="370c43965323c0944b433b202aac5058b5f907a9",
-        sparse_dirs=("leap_hand",),
-        expect=("leap_hand/left_hand.xml", "leap_hand/right_hand.xml"),
+        sparse_dirs=("leap_hand", "franka_emika_panda"),
+        expect=(
+            "leap_hand/left_hand.xml",
+            "leap_hand/right_hand.xml",
+            "franka_emika_panda/panda_nohand.xml",
+        ),
     ),
     # Inspire RH56DFX MJCF (Correll Lab, arXiv 2603.08988), submodule pin of rh56_controller.
     Source(

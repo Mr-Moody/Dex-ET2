@@ -21,6 +21,9 @@ class FlexMap:
     axis: Literal["x", "y", "z"]
     invert: bool = False
     weights: list[float] | None = None
+    # Fixed (open, closed) glove range in rad. When set it replaces per-user calibration, for
+    # axes such as abduction that open/fist poses cannot calibrate.
+    range: list[float] | None = None
 
 
 @dataclass
