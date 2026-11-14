@@ -657,25 +657,66 @@ def test_main_applies_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert KEY not in out.getvalue()
 
 
-# -- advisory-only guard --------------------------------------------------------------------------
+# -- no-operator-control guard --------------------------------------------------------------------
+
+# The copilot may gate a skill (Tier 2) and publish ``copilot_audit`` cards (Tier 3), but it must
+# never drive the operator's controls: no coordinator/stage imports (only plain ATC types), no
+# ``.on_key(...)``, and no ``"key"`` console message, sent or built.
+_ATC_IMPORTS_ALLOWED = frozenset({"teleop.atc.types"})
+_SEND_ATTRS = frozenset({"send", "send_text", "put_text"})
 
 
-def test_copilot_never_imports_the_coordinator_or_sends_keys() -> None:
+def _control_violations(source: str, filename: str = "<src>") -> list[str]:
+    out: list[str] = []
+    for node in ast.walk(ast.parse(source, filename=filename)):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        line = getattr(node, "lineno", 0)
+        out += [
+            f"{line}: imports {n}"
+            for n in names
+            if n.startswith("teleop.atc") and n not in _ATC_IMPORTS_ALLOWED
+        ]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "on_key":
+                out.append(f"{node.lineno}: calls .on_key")
+            if node.func.attr in _SEND_ATTRS and any(
+                isinstance(sub, ast.Constant) and sub.value == "key" for sub in ast.walk(node)
+            ):
+                out.append(f"{node.lineno}: sends a 'key' message")
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values, strict=False):
+                if (
+                    isinstance(k, ast.Constant)
+                    and k.value == "type"
+                    and isinstance(v, ast.Constant)
+                    and v.value == "key"
+                ):
+                    out.append(f"{node.lineno}: builds a {{'type': 'key'}} message")
+    return out
+
+
+def test_copilot_never_drives_operator_controls() -> None:
     files = sorted(COPILOT_SRC.glob("*.py"))
     assert files, "copilot package not found"
     for path in files:
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                names = [node.module or ""]
-            else:
-                names = []
-            for name in names:
-                assert not name.startswith("teleop.atc"), f"{path.name} imports {name}"
-            if isinstance(node, ast.Constant):
-                assert node.value != "key", f"{path.name}:{node.lineno} has a 'key' message"
-            if isinstance(node, ast.Attribute) and path.name != "publish.py":
-                # publish.py is the one writer: display-only "copilot" messages (T-215)
-                assert node.attr not in ("send", "send_text"), f"{path.name}:{node.lineno} sends"
+        violations = _control_violations(path.read_text(), str(path))
+        assert violations == [], f"{path.name}: {violations}"
+
+
+@pytest.mark.parametrize(
+    ("snippet", "ok"),
+    [
+        ("from teleop.atc.types import BOLT_CLEARED_M", True),
+        ("ws.send(json.dumps({'type': 'copilot_audit', 'audit': {}}))", True),
+        ("from teleop.atc.coordinator import AtcCoordinator", False),
+        ("controller.on_key(32)", False),
+        ("ws.send(json.dumps({'type': 'key', 'key': 32}))", False),
+        ("msg = {'type': 'key'}", False),
+    ],
+)
+def test_control_guard_policy(snippet: str, ok: bool) -> None:
+    assert (_control_violations(snippet) == []) is ok
