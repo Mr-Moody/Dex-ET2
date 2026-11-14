@@ -161,6 +161,7 @@ def run_console(
         fps=fps,
         dummy_status=dummy.status_dict if dummy is not None else None,
     )
+    worker.set_view_state(view_box[0])
     worker.start()
     print(f"teleop atc: fleet ops console at {server.url}", flush=True)
     if open_browser:

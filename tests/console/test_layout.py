@@ -45,7 +45,7 @@ def test_pin_focus_and_camera_selection() -> None:
         3,
         "main",
     )
-    assert [s.camera for s in pinned[1:]] == [f"bay{k}/cctv" for k in (1, 2, 3, 4)]
+    assert [s.camera for s in pinned[1:]] == [f"bay{k}/cctv" for k in (1, 2, 4)]
 
     split = feed_layout(
         [1, 2, 3, 4], None, ViewState(mode="pin", pinned_bay=4, cameras={4: "split"})

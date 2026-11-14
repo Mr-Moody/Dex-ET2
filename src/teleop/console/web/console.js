@@ -377,13 +377,12 @@ function buildWall(t) {
   const order = (t.view && t.view.bay_order) || currentOrder();
   const mains = t.feeds.filter((x) => x.role === "main");
 
-  wall.classList.remove("is-rescue", "is-pin", "is-single-main");
+  wall.classList.remove("is-rescue", "is-pin");
 
   if (mains.length > 0) {
     const focusBay = mains[0].bay;
     const isRescueFocus = !!(t.rescue && t.rescue.bay === focusBay);
     wall.classList.add(isRescueFocus ? "is-rescue" : "is-pin");
-    if (mains.length === 1) wall.classList.add("is-single-main");
 
     const head = document.createElement("div");
     head.className = "takeover";
@@ -435,14 +434,33 @@ function buildWall(t) {
     head.append(unpin);
     wall.append(head);
 
+    const stage = document.createElement("div");
+    stage.className = `focus-stage ${mains.length > 1 ? "is-split" : "is-single"}`;
     for (const f of mains) {
       const el = feedTile(f.bay, f.camera, "main", bayMap.get(f.bay));
-      wall.append(el);
+      stage.append(el);
       registerSlot(f.slot, el);
     }
+    wall.append(stage);
+
     const strip = document.createElement("div");
     strip.className = "strip";
-    for (const bay of order) {
+    strip.addEventListener("dragover", (e) => {
+      if (ui.dragRole === "main") {
+        e.preventDefault();
+        strip.classList.add("is-drop-target");
+      }
+    });
+    strip.addEventListener("dragleave", () => strip.classList.remove("is-drop-target"));
+    strip.addEventListener("drop", (e) => {
+      if (ui.dragRole === "main") {
+        e.preventDefault();
+        strip.classList.remove("is-drop-target");
+        setLayoutMode("grid", null);
+      }
+    });
+    const otherBays = order.filter((b) => b !== focusBay);
+    for (const bay of otherBays) {
       const f = t.feeds.find((x) => x.role === "strip" && x.bay === bay);
       if (f) {
         const el = feedTile(bay, f.camera, "strip", bayMap.get(bay));

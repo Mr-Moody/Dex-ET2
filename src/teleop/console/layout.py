@@ -27,6 +27,7 @@ VALID_VIEWS = frozenset(
 
 TILE = (640, 360)
 MAIN = (960, 540)
+SPLIT_MAIN = (680, 540)
 STRIP = (384, 216)
 ZOOM_MIN, ZOOM_MAX = 0.5, 4.0
 PAN_LIMIT = 1.0
@@ -142,22 +143,24 @@ def feed_layout(
         if view_state is not None
         else default_focus_cam
     )
+    split_sz = SPLIT_MAIN if view_state is not None else MAIN
     if focus_cam == SPLIT_VIEW:
         mains: tuple[FeedSpec, ...] = (
-            _feed(0, focus_bay, TOP_SUFFIX, "main", MAIN, view_state),
-            _feed(1, focus_bay, SIDE_SUFFIX, "main", MAIN, view_state),
+            _feed(0, focus_bay, TOP_SUFFIX, "main", split_sz, view_state),
+            _feed(1, focus_bay, SIDE_SUFFIX, "main", split_sz, view_state),
         )
     elif focus_cam == WRIST_SPLIT_VIEW:
         mains = (
-            _feed(0, focus_bay, WRIST_SUFFIX, "main", MAIN, view_state),
-            _feed(1, focus_bay, TOP_SUFFIX, "main", MAIN, view_state),
+            _feed(0, focus_bay, WRIST_SUFFIX, "main", split_sz, view_state),
+            _feed(1, focus_bay, TOP_SUFFIX, "main", split_sz, view_state),
         )
     else:
         mains = (_feed(0, focus_bay, focus_cam, "main", MAIN, view_state),)
 
     base_slot = len(mains)
+    strip_bays = [b for b in ordered if b != focus_bay] if view_state is not None else list(ordered)
     strips = tuple(
         _feed(base_slot + i, b, CCTV_SUFFIX, "strip", STRIP, view_state)
-        for i, b in enumerate(ordered)
+        for i, b in enumerate(strip_bays)
     )
     return mains + strips
