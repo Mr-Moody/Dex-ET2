@@ -1,12 +1,12 @@
 ---
 id: T-176
 title: Fix teleop atc viewer freeze (set_texts called under viewer.lock)
-status: in_review
-owner: ethan
-branch: fix/atc-viewer-hud-deadlock
+status: done
+owner: null
+branch: null
 depends_on: [T-150]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md
-claimed_at: '2026-11-14T06:17:24+00:00'
+claimed_at: null
 ---
 
 `teleop atc` (viewer mode) freezes at 100% CPU seconds after start: `_run_viewer` calls
