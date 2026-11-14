@@ -279,3 +279,43 @@ def test_worker_survives_render_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert worker.stats.errors >= 2
     assert len(server.telemetry) >= 3  # telemetry keeps flowing while rendering fails
     assert server.frames == []
+
+
+class FlakyAdapter(TelemetryAdapter):
+    """Raises on the first ``fails`` builds, like a bug tripped by an odd HudView."""
+
+    def __init__(self, fails: int) -> None:
+        super().__init__((1, 2, 3, 4), (3, 4))
+        self.fails = fails
+
+    def build(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if self.fails > 0:
+            self.fails -= 1
+            raise ValueError("unexpected HudView value")
+        return super().build(*args, **kwargs)
+
+
+def test_worker_survives_telemetry_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("teleop.console.render.ERROR_BACKOFF_S", 0.05)
+    slot: LatestSlot[SimSnapshot] = LatestSlot()
+    slot.put(_snap())
+    server = FakeServer()
+    worker = RenderWorker(
+        object(),
+        slot,
+        server,
+        FlakyAdapter(fails=2),
+        (1, 2, 3, 4),
+        None,
+        fps=20,
+        renderer_factory=FakeRenderer,
+    )  # type: ignore[arg-type]
+    worker.start()
+    try:
+        time.sleep(0.8)
+        assert worker.is_alive(), "render thread died on a telemetry error"
+    finally:
+        worker.stop()
+        worker.join(timeout=5)
+    assert worker.stats.errors >= 1  # later failures may land in the back-off, also survived
+    assert server.telemetry and server.frames  # recovered and kept streaming
