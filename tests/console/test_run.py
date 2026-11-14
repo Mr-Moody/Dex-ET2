@@ -134,6 +134,7 @@ def test_run_console_ticks_and_streams(offscreen_render_ok: None, controller: An
                     body = json.loads(msg)
                     assert body["type"] == "telemetry"
                     assert [b["id"] for b in body["bays"]] == [1, 2, 3, 4]
+                    assert "health" not in body
                     got_telemetry = True
                 else:
                     assert msg[2:4] == b"\xff\xd8"
@@ -143,6 +144,51 @@ def test_run_console_ticks_and_streams(offscreen_render_ok: None, controller: An
     assert got_telemetry and got_frame
     assert result["stats"].steps == 240
     assert controller.coordinator.time_s == pytest.approx(4.0, abs=0.1)
+
+
+@needs_models
+def test_run_console_with_health_adds_strip_data(
+    offscreen_render_ok: None, controller: Any
+) -> None:
+    from teleop.console.run import run_console
+
+    class _Monitor:
+        def snapshot_dicts(self) -> list[dict[str, object]]:
+            return [{"name": "gloves", "level": "ok"}]
+
+        def request_reconnect(self, name: str) -> bool:
+            return True
+
+    port = _free_port()
+    t = threading.Thread(
+        target=lambda: run_console(
+            controller,
+            lambda: None,
+            port=port,
+            fps=10,
+            open_browser=False,
+            steps=120,
+            health=_Monitor(),  # type: ignore[arg-type]
+        )
+    )
+    t.start()
+    try:
+        for _ in range(50):
+            try:
+                ws = connect(f"ws://127.0.0.1:{port}/ws", max_size=None, open_timeout=1)
+                break
+            except OSError:
+                threading.Event().wait(0.1)
+        else:
+            pytest.fail("console server never came up")
+        with ws:
+            while True:
+                msg = ws.recv(timeout=10)
+                if isinstance(msg, str):
+                    assert json.loads(msg)["health"] == [{"name": "gloves", "level": "ok"}]
+                    break
+    finally:
+        t.join(timeout=60)
 
 
 @needs_models

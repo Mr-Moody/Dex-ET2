@@ -645,7 +645,10 @@ function connect() {
       } catch {
         return;
       }
-      if (msg.type === "telemetry") render(msg);
+      if (msg.type === "telemetry") {
+        render(msg);
+        document.dispatchEvent(new CustomEvent("telemetry", { detail: msg }));
+      }
     } else {
       onFrame(ev.data);
     }

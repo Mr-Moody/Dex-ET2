@@ -26,6 +26,15 @@ def test_index_references_only_local_assets() -> None:
         assert not re.search(r"https?://", _read(name)), f"{name} references the network"
 
 
+def test_health_strip_assets() -> None:
+    html, js = _read("index.html"), _read("health.js")
+    assert 'src="health.js"' in html and 'id="health"' in html
+    for token in ('"reconnect"', '"hotspot"', '"gloves"', '"panel"'):
+        assert token in js, token
+    assert not re.search(r"https?://", js)
+    assert "/* health strip */" in _read("console.css")
+
+
 def test_js_speaks_protocol() -> None:
     js = _read("console.js")
     for token in ('"/ws"', "layout_id", '"key"', "Signal lost", "arraybuffer"):
@@ -85,3 +94,43 @@ def test_frame_urls_are_always_revoked(tmp_path: Path) -> None:
     result = json.loads(out.stdout)
     assert sorted(result["revoked"]) == ["u1", "u2", "u4"]  # every superseded URL is freed
     assert result["url"] == "u3" and result["pending"] is None
+
+
+def test_health_strip_skips_rebuild_when_unchanged() -> None:
+    js = _read("health.js")
+    assert "JSON.stringify(list)" in js and "lastSig" in js
+
+
+_HEALTH_HARNESS = """
+const strip = { hidden: true, builds: 0, replaceChildren(...k) { this.builds++; } };
+const handlers = [];
+globalThis.document = {
+  getElementById: () => strip,
+  addEventListener: (_, f) => handlers.push(f),
+  createElement: () => ({ dataset: {}, append() {}, setAttribute() {}, addEventListener() {} }),
+};
+const toasts = [];
+globalThis.toast = (k, t) => toasts.push(t);
+%s
+const mk = (level) => [
+  { name: "gloves", level, summary: "s", detail: "", can_reconnect: true, busy: false },
+];
+const send = (health) => handlers[0]({ detail: { health } });
+send(mk("ok")); send(mk("ok")); send(mk("ok"));
+const same = strip.builds;
+send(mk("fail")); send(mk("fail"));
+send(undefined);
+const r = { same, after: strip.builds, toasts: toasts.length, hidden: strip.hidden };
+console.log(JSON.stringify(r));
+"""
+
+
+def test_health_strip_rebuilds_only_on_change() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    script = _HEALTH_HARNESS % _read("health.js")
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got == {"same": 1, "after": 2, "toasts": 1, "hidden": True}
