@@ -247,6 +247,11 @@ class UnoQClient:
         reply = self.request({"op": P.OP_REGISTER_SKILL, "skill": skill.to_dict()})
         return int(reply["signature_samples"])
 
+    def clear_skills(self, part_sku_id: str) -> int:
+        """Forget a SKU's skills and prototypes on the board; returns how many skills went."""
+        reply = self.request({"op": P.OP_CLEAR_SKILLS, "part_sku_id": part_sku_id})
+        return int(reply["removed"])
+
     def console_state(self) -> ConsoleInputState:
         return self.console_status()[0]
 

@@ -22,6 +22,7 @@ OP_FILTER_STEP = "filter_step"
 OP_CLASSIFY_STALL = "classify_stall"
 OP_FIT_DMP = "fit_dmp"
 OP_REGISTER_SKILL = "register_skill"
+OP_CLEAR_SKILLS = "clear_skills"
 OP_CONSOLE_STATE = "console_state"
 OP_SET_BAY_STATE = "set_bay_state"
 OP_JOYSTICK = "joystick"  # action: status | calibrate | abort | set (map) | raw (on)
@@ -33,6 +34,7 @@ TCP_OPS = frozenset(
         OP_CLASSIFY_STALL,
         OP_FIT_DMP,
         OP_REGISTER_SKILL,
+        OP_CLEAR_SKILLS,
         OP_CONSOLE_STATE,
         OP_SET_BAY_STATE,
         OP_JOYSTICK,

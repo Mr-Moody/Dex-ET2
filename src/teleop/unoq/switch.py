@@ -209,6 +209,15 @@ class SwitchableUnoQ:
 
         return self._call(op)
 
+    def clear_skills(self, part_sku_id: str) -> int:
+        def op(c: UnoQClient) -> int:
+            n = c.clear_skills(part_sku_id)
+            # under the pointer lock: a concurrent swap must not replay the cleared skills
+            self._skills[:] = [s for s in self._skills if s.part_sku_id != part_sku_id]
+            return n
+
+        return self._call(op)
+
     def filter_step(
         self,
         wrist: Pose | None,

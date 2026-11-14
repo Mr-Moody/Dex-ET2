@@ -88,6 +88,7 @@ class UnoQServer:
             P.OP_CLASSIFY_STALL: self._classify_stall,
             P.OP_FIT_DMP: self._fit_dmp,
             P.OP_REGISTER_SKILL: self._register_skill,
+            P.OP_CLEAR_SKILLS: self._clear_skills,
             P.OP_CONSOLE_STATE: self._console_state,
             P.OP_SET_BAY_STATE: self._set_bay_state,
             P.OP_JOYSTICK: self._joystick,
@@ -250,6 +251,15 @@ class UnoQServer:
         self.classifier.register_prototype(skill.part_sku_id, skill.signature_id, z)
         n = self.classifier.sample_count(skill.part_sku_id, skill.signature_id)
         return P.ok(skill_id=skill.skill_id, signature_samples=n)
+
+    def _clear_skills(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Forget one SKU's skills and stall prototypes (signature numbering restarts)."""
+        sku = str(req["part_sku_id"])
+        stale = [sid for sid, s in self.skills.items() if s.part_sku_id == sku]
+        for sid in stale:
+            del self.skills[sid]
+        self.classifier.clear(sku)
+        return P.ok(removed=len(stale))
 
     def _console_state(self, _: dict[str, Any]) -> dict[str, Any]:
         heard = self._last_heard_ns

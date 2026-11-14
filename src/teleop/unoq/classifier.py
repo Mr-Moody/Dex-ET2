@@ -90,6 +90,10 @@ class MahalanobisStallClassifier:
     def signatures(self, part_sku_id: str) -> tuple[str, ...]:
         return tuple(self._protos.get(part_sku_id, {}))
 
+    def clear(self, part_sku_id: str) -> int:
+        """Forget every prototype of one SKU; returns how many signatures were dropped."""
+        return len(self._protos.pop(part_sku_id, {}))
+
     def sample_count(self, part_sku_id: str, signature_id: str) -> int:
         return int(self._protos[part_sku_id][signature_id].samples.shape[0])
 
