@@ -51,6 +51,7 @@ def make_ctx(**overrides: object) -> ReasoningContext:
         "is_ood": True,
         "rollout_passed": None,
         "rollout_total": None,
+        "rollout_threshold": None,
     }
     base.update(overrides)
     return ReasoningContext(**base)  # type: ignore[arg-type]

@@ -1169,7 +1169,11 @@ class AtcCoordinator:
             },
         )
         self._submit_reasoning(
-            "VALIDATION_GATE", bay, rollout_passed=report.n_passed, rollout_total=report.total
+            "VALIDATION_GATE",
+            bay,
+            rollout_passed=report.n_passed,
+            rollout_total=report.total,
+            rollout_threshold=report.threshold,
         )
         if report.passed:
             self.unoq.register_skill(skill)
@@ -1213,6 +1217,7 @@ class AtcCoordinator:
         bay: _Bay,
         rollout_passed: int | None = None,
         rollout_total: int | None = None,
+        rollout_threshold: int | None = None,
     ) -> None:
         match = bay.match
         try:
@@ -1233,6 +1238,7 @@ class AtcCoordinator:
                     is_ood=True if match is None else match.is_ood,
                     rollout_passed=rollout_passed,
                     rollout_total=rollout_total,
+                    rollout_threshold=rollout_threshold,
                 )
             )
         except Exception:

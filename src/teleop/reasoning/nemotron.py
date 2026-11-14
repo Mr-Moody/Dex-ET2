@@ -136,14 +136,15 @@ def triage(ctx: ReasoningContext) -> tuple[str, str, str]:
         case "VALIDATION_GATE":
             passed = ctx.rollout_passed or 0
             total = ctx.rollout_total or 0
-            ok = total > 0 and passed == total
+            need = total if ctx.rollout_threshold is None else ctx.rollout_threshold
+            ok = total > 0 and passed >= need
             return (
                 f"{bay}: skill validation {passed}/{total} {'PASS' if ok else 'FAIL'}",
                 "Skill promoted to the fleet library."
                 if ok
                 else "Skill rejected; repeat the rescue with a cleaner motion.",
                 f"Headless sim gate cleared the bolt in {passed} of {total} perturbed "
-                f"rollouts for {ctx.part_sku_id}; "
+                f"randomized rollouts (pass at {need}) for {ctx.part_sku_id}; "
                 + ("deployment approved." if ok else "deployment withheld."),
             )
         case "RESCUE_LOGGED":
@@ -282,6 +283,7 @@ def context_to_dict(ctx: ReasoningContext) -> dict[str, Any]:
         "is_ood": bool(ctx.is_ood),
         "rollout_passed": ctx.rollout_passed,
         "rollout_total": ctx.rollout_total,
+        "rollout_threshold": ctx.rollout_threshold,
     }
 
 
