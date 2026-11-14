@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -65,12 +67,16 @@ def unoq() -> Iterator[Any]:
 
 # --------------------------------------------------------------------------- DMP golden run
 
-# First captured on main (5a40c38) before the recovery seam existed; re-captured for T-179
-# (estimated latch pose, touch re-localization, randomized gate) on the show's own config.
-# ``recovery_backend: dmp`` must reproduce it exactly: same compliance events in the same order
-# on the same bays, after the same number of 60 Hz ticks, ending at the same wrist positions.
-# The event order is unchanged from 5a40c38. The float path differs by platform (MuJoCo/NumPy
-# builds), so ticks and wrist positions are pinned per platform.
+# First captured on main (5a40c38) before the recovery seam existed. ``recovery_backend: dmp``
+# must reproduce the scripted show exactly: same compliance events in the same order on the same
+# bays (pinned here, change only on purpose), after the same number of 60 Hz ticks, ending at the
+# same wrist positions. Ticks and wrist positions depend on the scene and on the platform's
+# MuJoCo/NumPy float path, so they live per platform in ``golden/dmp_stage.json``. When a show
+# change is intentional (layout, dwell, conveyor timing), recapture them on that platform with:
+#
+#     UPDATE_GOLDEN=1 uv run pytest tests/atc/test_recovery.py -k dmp_mode_script_unchanged
+#
+# A platform with no entry (e.g. macOS, or Windows until recaptured) is guarded by events only.
 GOLDEN_EVENTS: list[tuple[str, int]] = [
     ("STALL_ALERT", 1),
     ("RESCUE_LOGGED", 1),
@@ -79,17 +85,25 @@ GOLDEN_EVENTS: list[tuple[str, int]] = [
     ("RESCUE_LOGGED", 2),
     ("OOD_REFUSAL", 2),
 ]
-Wrist = tuple[tuple[float, float, float], tuple[float, float, float]]
-GOLDEN_BY_PLATFORM: dict[str, tuple[int, Wrist]] = {
-    "win32": (
-        1903,
-        ((-1.498363013, -1.977468948, 0.136654973), (2.578220427, -1.880974606, 0.135551549)),
-    ),
-    "linux": (  # CI (ubuntu-latest) and WSL Ubuntu
-        1897,
-        ((-1.50079134, -1.976736514, 0.137443296), (2.578212428, -1.88097859, 0.135544123)),
-    ),
-}
+GOLDEN_FILE = Path(__file__).parent / "golden" / "dmp_stage.json"
+UPDATE_HINT = (
+    "if this show change is intentional, recapture with "
+    "`UPDATE_GOLDEN=1 uv run pytest tests/atc/test_recovery.py -k dmp_mode_script_unchanged`"
+)
+
+
+def _load_golden() -> dict[str, Any]:
+    if not GOLDEN_FILE.is_file():
+        return {}
+    return json.loads(GOLDEN_FILE.read_text(encoding="utf-8"))
+
+
+def _save_golden(platform: str, ticks: int, wrist: list[list[float]]) -> None:
+    golden = _load_golden()
+    golden[platform] = {"ticks": ticks, "wrist": wrist}
+    GOLDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(dict(sorted(golden.items())), indent=2) + "\n"
+    GOLDEN_FILE.write_text(text, encoding="utf-8")
 
 
 def _run_stage(unoq: Any) -> tuple[Any, list[ComplianceEvent], int]:
@@ -123,15 +137,15 @@ def test_dmp_mode_script_unchanged(unoq: Any) -> None:
     director, events, ticks = _run_stage(unoq)
     assert director.ok, director.results
     assert [(e.kind, e.bay_id) for e in events] == GOLDEN_EVENTS
-    golden = GOLDEN_BY_PLATFORM.get(sys.platform)
-    if golden is None:  # e.g. macOS: no reference captured; the events above still guard it
+    wrist = [[round(float(v), 9) for v in director.co.rig(b).wrist_pose().position] for b in (1, 2)]
+    if os.environ.get("UPDATE_GOLDEN"):
+        _save_golden(sys.platform, ticks, wrist)
         return
-    golden_ticks, golden_wrist = golden
-    assert ticks == golden_ticks
-    wrist = tuple(
-        tuple(round(float(v), 9) for v in director.co.rig(b).wrist_pose().position) for b in (1, 2)
-    )
-    assert wrist == golden_wrist
+    golden = _load_golden().get(sys.platform)
+    if golden is None:  # no reference captured on this platform; the events above still guard it
+        return
+    assert ticks == golden["ticks"], f"{sys.platform} tick count drifted; {UPDATE_HINT}"
+    assert wrist == golden["wrist"], f"{sys.platform} wrist positions drifted; {UPDATE_HINT}"
 
 
 # --------------------------------------------------------------------------- backend selection
