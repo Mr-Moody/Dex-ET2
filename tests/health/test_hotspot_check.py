@@ -169,3 +169,24 @@ def test_failed_status_read_is_fail_not_stale_ok(monkeypatch: pytest.MonkeyPatch
     h = check.status()
     assert h.level is Level.FAIL
     assert "winrt gone" in h.detail
+
+
+def test_build_backend_error_not_strict_is_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import teleop.app
+
+    def no_profile(*_: object, **__: object) -> HotspotWatchdog:
+        raise RuntimeError("no usable connection profile")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(teleop.app, "start_hotspot_watchdog", no_profile)
+    env = tmp_path / ".env"
+    env.write_text("HOTSPOT_PASSWORD=booth-pass-123\n")
+    check, wd = build_hotspot_check(True, env, strict=False)
+    assert wd is None
+    h = check.status()
+    assert h.level is Level.FAIL
+    assert "no usable connection profile" in h.detail
+    with pytest.raises(RuntimeError, match="connection profile"):
+        build_hotspot_check(True, env, strict=True)
