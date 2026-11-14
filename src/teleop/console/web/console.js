@@ -419,10 +419,9 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
       ${isOverview ? "" : `<div class="feed__power"><strong>E-STOP · Power cut</strong><span>Select Bay ${bayId} and press the E-stop again to restore</span></div>`}
     </div>`;
 
-  // Clicks on the tile's buttons never reach the tile, so they do not select the bay; a double
-  // click on a button is just two presses of it.
+  // Clicks on the tile's buttons never reach the tile, so they do not select the bay, and a fast
+  // double click on one is just two presses: it must not reach the tile's dblclick (pin / unpin).
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
-  // A fast double-click on a tile button must not reach the tile's dblclick (pin / unpin).
   const noDbl = (btn) => btn.addEventListener("dblclick", (ev) => ev.stopPropagation());
   const badge = el.querySelector(".feed__zoom");
   badge.addEventListener("click", stop(() => resetCamZoom(camera)));
@@ -464,9 +463,9 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
     tool("Focus", `Give Bay ${bayId} the stage (or double-click)`, () => setLayoutMode("pin", bayId), " ftool--gap");
   }
 
-  // Only a double click on the bare picture pins or unpins the pane; on the buttons, the zoom
-  // badge or the overlay text (name, state, C(t), bottom labels, signal/power notices) it does
-  // nothing beyond the clicks themselves.
+  // Only a double click on the bare picture pins or unpins the pane. The overlay text (name,
+  // state, C(t), bottom labels, signal/power notices) ignores it; buttons stop it above (noDbl)
+  // and onBarePicture() rejects them as well.
   const onDblClick = (run) => (e) => {
     e.stopPropagation();
     if (onBarePicture(e.target)) run();

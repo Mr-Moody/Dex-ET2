@@ -244,9 +244,6 @@ kbd {
   font-size: var(--t-xs);
   font-weight: 600;
   cursor: pointer;
-}
-.key__cap--wide { min-width: 4.2rem; }
-.key__cap {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -254,6 +251,7 @@ kbd {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
+.key__cap--wide { min-width: 4.2rem; }
 /* the cap is the key: its <kbd> takes no second border */
 .key__cap kbd { all: unset; font: inherit; }
 .key__sub { color: var(--muted); font-size: 0.85em; font-weight: 500; }
