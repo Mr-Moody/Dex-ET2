@@ -43,6 +43,7 @@ from enum import Enum
 from pathlib import Path
 from typing import IO, Literal, Protocol, Self, cast, get_args
 from urllib import request as urlrequest
+from urllib.error import HTTPError
 from urllib.parse import quote
 
 import numpy as np
@@ -334,11 +335,25 @@ class HttpJsonRpc:
             with urlrequest.urlopen(req, timeout=self.timeout_s) as resp:
                 raw = cast(bytes, resp.read())
             doc = _require_obj(json.loads(raw), method)
+        except HTTPError as exc:  # RPC errors often arrive as HTTP 4xx with a JSON-RPC body
+            raise RpcError(f"{method}: HTTP {exc.code}: {_http_error_message(exc)}") from exc
         except (OSError, ValueError) as exc:
             raise RpcError(f"{method}: {exc}") from exc
         if doc.get("error") is not None:
             raise RpcError(f"{method}: {_dumps(doc.get('error'))}")
         return doc.get("result")
+
+
+def _http_error_message(exc: HTTPError) -> str:
+    try:
+        doc: object = json.loads(exc.read())
+        if isinstance(doc, dict):
+            err = cast(JsonObject, doc).get("error")
+            if isinstance(err, dict) and isinstance(err.get("message"), str):
+                return str(err["message"])
+    except (OSError, ValueError):
+        pass
+    return str(exc.reason)
 
 
 def _require_obj(value: object, what: str) -> JsonObject:
@@ -1019,7 +1034,8 @@ def _cmd_airdrop(env: Mapping[str, str], sol: float) -> int:
     try:
         sig = anchor.request_airdrop(round(sol * LAMPORTS_PER_SOL))
     except RpcError as exc:
-        print(f"airdrop failed: {exc}\nThe public faucet is rate-limited; try faucet.solana.com")
+        print(f"airdrop failed: {exc}")
+        print(f"Request devnet SOL for {anchor.pubkey} at https://faucet.solana.com")
         return 1
     print(f"airdrop requested for {anchor.pubkey}: {explorer_url(sig, anchor.rpc_url)}")
     return 0
