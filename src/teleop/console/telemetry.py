@@ -144,7 +144,11 @@ class TelemetryAdapter:
         conv_dict = (
             None
             if conv is None
-            else {"mode": conv.mode, "pack_dy_cm": round(conv.pack_dy_m * 100.0, 2)}
+            else {
+                "mode": conv.mode,
+                "resuming": conv.resuming,
+                "pack_dy_cm": round(conv.pack_dy_m * 100.0, 2),
+            }
         )
         if k in snaps:
             s = snaps[k]

@@ -398,6 +398,22 @@ class EventTap:
             line += f" ({mode})"
         return line
 
+    def _station_url(self) -> str | None:
+        """Explorer page of the station key that signs and anchors the audit log.
+
+        The console links an entry here until its own transaction is confirmed, so every hash
+        opens a real page. ``None`` when no keypair is configured (nothing exists on-chain).
+        """
+        pubkey = getattr(self.inner, "pubkey", None)
+        if not isinstance(pubkey, str) or not pubkey:
+            return None
+        from teleop.compliance.solana import DEVNET_RPC_URL, explorer_url
+
+        rpc_url = getattr(self.inner, "rpc_url", "") or DEVNET_RPC_URL
+        _, _, query = explorer_url("x", rpc_url).partition("?")
+        base = f"https://explorer.solana.com/address/{pubkey}"
+        return f"{base}?{query}" if query else base
+
     def status_detail(self) -> dict[str, Any] | None:
         event = self.latest()
         if event is None:
@@ -439,6 +455,7 @@ class EventTap:
             "state": str(state),
             "tx_signature": str(tx_sig) if tx_sig else None,
             "explorer_url": str(url) if url else None,
+            "station_url": self._station_url(),
             "mode": str(mode) if mode else None,
             "summary": str(event.summary),
             "part_sku_id": str(event.part_sku_id),
@@ -450,6 +467,7 @@ class EventTap:
             return []
         mode = getattr(self.inner, "mode", None)
         rpc_url = getattr(self.inner, "rpc_url", "") or ""
+        station_url = self._station_url()
         recent_fn: Any = getattr(self.inner, "recent_status", None)
         statuses: list[Any] = []
         if callable(recent_fn):
@@ -481,6 +499,7 @@ class EventTap:
                         "state": str(getattr(st, "state", "local")),
                         "tx_signature": str(tx_sig) if tx_sig else None,
                         "explorer_url": str(url) if url else None,
+                        "station_url": station_url,
                         "mode": str(mode) if mode else None,
                     }
                 )
@@ -493,6 +512,7 @@ class EventTap:
                 "state": "local",
                 "tx_signature": None,
                 "explorer_url": None,
+                "station_url": station_url,
                 "mode": str(mode) if mode else None,
                 "summary": str(ev.summary),
                 "part_sku_id": str(ev.part_sku_id),

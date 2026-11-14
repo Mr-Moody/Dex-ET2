@@ -21,9 +21,9 @@ from __future__ import annotations
 import math
 import time
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
@@ -63,6 +63,9 @@ from teleop.unoq.dmp import (
     so3_log,
 )
 
+if TYPE_CHECKING:
+    from teleop.atc.recovery import RecoveryController
+
 mj: Any = _mujoco
 
 FloatArray = NDArray[np.float64]
@@ -97,6 +100,9 @@ PERTURBATIONS_DEG: tuple[tuple[float, float, float], ...] = (
 
 # Randomized gate (spec G3): N seeded rollouts, deploy at >= GATE_PASS_MIN passes.
 GATE_ROLLOUTS = 20
+PUSH_LEAD_LIMIT_M = 0.006  # the coordinator's routine lead clamp (CoordinatorConfig)
+ROUTINE_MAX_S = 12.0  # controller rollouts: routine push time allowed to reach the stall
+CONTROLLER_MAX_S = 15.0  # controller rollouts: recovery time allowed before it counts as a fail
 GATE_PASS_MIN = 18
 GATE_JITTER_XY_M = 0.01  # uniform extra latch offset on top of the spec-4.4 perturbation
 GATE_JITTER_YAW_DEG = 3.0
@@ -374,6 +380,18 @@ class BayRig:
         for name, value in (fingers or {}).items():
             self.data.ctrl[self._hand_act[name]] = value
 
+    def clip_fingers(self, fingers: Mapping[str, float]) -> dict[str, float]:
+        """Hand targets as MuJoCo applies them: clamped to each ctrl-limited actuator's range."""
+        out: dict[str, float] = {}
+        for name, value in fingers.items():
+            a = self._hand_act[name]
+            v = float(value)
+            if bool(self.model.actuator_ctrllimited[a]):
+                lo, hi = (float(x) for x in self.model.actuator_ctrlrange[a])
+                v = min(max(v, lo), hi)
+            out[name] = v
+        return out
+
 
 def step_physics(model: Any, data: Any, n: int = SUBSTEPS) -> None:
     for _ in range(n):
@@ -495,6 +513,10 @@ class RolloutResult:
     # outlier gate rejected it.
     touch_correction_m: float | None = None
     touch_rejected: bool = False
+    # Controller rollouts only: sim seconds from the controller's first command to bolt cleared,
+    # and why the controller (or the rollout) stopped without clearing.
+    time_to_clear_s: float | None = None
+    abort_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,6 +833,243 @@ class SkillValidator:
                 m.jnt_stiffness[:] = nominal[1]
                 m.qpos_spring[:] = nominal[2]
         return ValidationReport(tuple(results), time.perf_counter() - t0, self.pass_min)
+
+    def validate_controller(
+        self,
+        make: Callable[[BayRig], RecoveryController],
+        *,
+        fault: Literal["flap", "pin"] = "flap",
+        conditions: Sequence[RolloutConditions] | None = None,
+    ) -> ValidationReport:
+        """Gate any recovery controller from today's stall state, one rollout per condition.
+
+        Each rollout moves the latch under its conditions, arms ``fault`` (a jammed flap, or a
+        pinned bolt) and runs the live routine push with the coordinator's stall detector and
+        touch correction until the stall fires. Then ``make(rig)`` builds the controller, which
+        does its own pre-move (the DMP back-off, the ACT retract and settle) and is driven the
+        way the coordinator drives it: ``command``, physics, ``check``. Hand torque, arm torque
+        and joint limits are judged from that point on. ``conditions`` defaults to the seeded
+        ``draw_conditions`` set of this fault. ``validate`` keeps its own skill-replay start.
+        """
+        t0 = time.perf_counter()
+        conds = (
+            tuple(conditions)
+            if conditions is not None
+            else self.draw_conditions(f"controller/{fault}")
+        )
+        m = self.model
+        nominal = (m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy())
+        results: list[RolloutResult] = []
+        for cond in conds:
+            try:
+                results.append(self._controller_rollout(make, fault, cond))
+            finally:  # exact restore, even if the rollout raised
+                m.geom_friction[:] = nominal[0]
+                m.jnt_stiffness[:] = nominal[1]
+                m.qpos_spring[:] = nominal[2]
+        return ValidationReport(tuple(results), time.perf_counter() - t0, self.pass_min)
+
+    def _controller_rollout(
+        self,
+        make: Callable[[BayRig], RecoveryController],
+        fault: Literal["flap", "pin"],
+        cond: RolloutConditions,
+    ) -> RolloutResult:
+        # Lazy: the coordinator imports this module.
+        from teleop.atc.coordinator import (
+            ROUTINE,
+            StallDetector,
+            compute_confidence,
+        )
+        from teleop.atc.recovery import BaySignals
+
+        dx, dy, dyaw_deg = cond.perturbation
+        rig, m, d = self.rig, self.model, self.data
+        self._restore_snapshot()
+        m.jnt_stiffness[self._flap_jnt] *= cond.flap_stiffness_scale
+        m.qpos_spring[self._flap_qadr] = math.radians(cond.flap_springref_deg)
+        m.geom_friction[self.contact_geoms, 0] *= cond.friction_scale
+
+        true_latch = latch_world_pose(1, self.base_latch.offset(dx, dy, math.radians(dyaw_deg)))
+        ex, ey, eyaw = cond.est_error
+        c, s = math.cos(true_latch.yaw_rad), math.sin(true_latch.yaw_rad)
+        est_latch = true_latch.offset(c * ex - s * ey, s * ex + c * ey, eyaw)
+        # A fresh pallet's estimate: nothing touched yet, so the push axis is as uncertain as y.
+        estimate = LatchEstimate(
+            est_latch, GATE_EST_SIGMA_Y_M, GATE_EST_SIGMA_Y_M, GATE_EST_SIGMA_YAW_RAD
+        )
+        start = compose_pose(est_latch.as_pose(), ROUTINE.pose_at(0.0))
+        lift_z = est_latch.position[2] + LIFT_HEIGHT_M
+        fingers: dict[str, float] = {n: 0.0 for n in HAND_ACTUATORS} | dict(ROUTINE.fingers)
+
+        def result(
+            cleared: bool,
+            *,
+            max_tau: float = 0.0,
+            max_ratio: float = 0.0,
+            limits_ok: bool = True,
+            t_clear: float | None = None,
+            reason: str | None = None,
+        ) -> RolloutResult:
+            passed = (
+                cleared
+                and max_tau < self.tau_hard_max
+                and max_ratio < self.arm_margin
+                and limits_ok
+            )
+            return RolloutResult(
+                cond.perturbation,
+                rig.bolt_x(),
+                max_tau,
+                max_ratio,
+                limits_ok,
+                cleared,
+                passed,
+                cond,
+                time_to_clear_s=t_clear,
+                abort_reason=reason,
+            )
+
+        # Approach the routine start under IK, lifted clear while the latch is moved and armed.
+        rig.ik.reset()
+        m.opt.timestep = COARSE_FACTOR / PHYSICS_HZ
+        plan = ApproachPlan(
+            rig.wrist_pose(),
+            [lifted(rig.wrist_pose(), lift_z), lifted(start, lift_z), start],
+        )
+        latch_ready = False
+        settle_ticks = 0
+        while (
+            not plan.done
+            or not latch_ready
+            or (not rig.reached(start) and settle_ticks < SETTLE_MAX_TICKS)
+        ):
+            settle_ticks += 1 if plan.done else 0
+            if plan.index >= 1 and not latch_ready:
+                rig.set_world_latch(true_latch)  # the simulator's truth
+                rig.set_estimate(estimate)  # what control sees from here on
+                rig.reset_latch(flap_jammed=fault == "flap", bolt_pinned=fault == "pin")
+                latch_ready = True
+            rig.command(plan.step(), fingers)
+            step_physics(m, d, SUBSTEPS // COARSE_FACTOR)
+        m.opt.timestep = 1.0 / PHYSICS_HZ
+
+        # The routine push to the stall, sensed exactly as the coordinator senses it.
+        detector, touch = StallDetector(), TouchDetector()
+        v_act = 0.0
+        prev_pos: FloatArray | None = None
+        tau_inf, confidence = 0.0, 1.0
+        stalled = False
+        for k in range(int(ROUTINE_MAX_S / CONTROL_DT)):
+            wfl = rig.world_from_latch()
+            target = compose_pose(wfl, ROUTINE.pose_at((k + 1) * CONTROL_DT))
+            u = local_axis_world(wfl, 0)
+            lead = float(np.dot(pose_position(target) - pose_position(rig.wrist_pose()), u))
+            if lead > PUSH_LEAD_LIMIT_M:
+                target = translate_pose(target, -(lead - PUSH_LEAD_LIMIT_M) * u)
+            rig.command(target, fingers)
+            step_physics(m, d)
+            tau = rig.tau_ext()
+            tau_inf = rig.tau_hand_inf(tau)
+            pos = pose_position(rig.wrist_pose())
+            speed = 0.0 if prev_pos is None else float(np.linalg.norm(pos - prev_pos)) / CONTROL_DT
+            prev_pos = pos
+            v_act = 0.5 * v_act + 0.5 * speed
+            confidence = compute_confidence(
+                max(tau_inf, rig.tau_arm_inf(tau)), ROUTINE.speed, v_act
+            )
+            x_bolt = rig.bolt_x()
+            if touch.update(x_bolt, rig.wrist_push_torque()):
+                rig.set_estimate(touch_correct(rig.estimate, rig.index_tip_world(), x_bolt))
+            if x_bolt >= BOLT_CLEARED_M:
+                return result(False, reason="cleared before any stall")
+            if (
+                detector.update(confidence, x_bolt, tau_inf, tau[4:7], (k + 1) * CONTROL_DT)
+                is not None
+            ):
+                stalled = True
+                break
+        if not stalled:
+            return result(False, reason="no stall")
+        if touch.armed:  # the stall is itself a touch: correct before the controller starts
+            rig.set_estimate(touch_correct(rig.estimate, rig.index_tip_world(), rig.bolt_x()))
+
+        # Hand over to the controller, the way the coordinator drives it.
+        controller = make(rig)
+        max_tau = max_ratio = 0.0
+        limits_ok = True
+        hold = rig.wrist_pose()
+        prev_pos = pose_position(hold)
+        touch = TouchDetector()
+        touch.disarm()
+        armed_replay = False
+        t = 0.0
+        try:
+            for _ in range(int(CONTROLLER_MAX_S / CONTROL_DT)):
+                sig = BaySignals(rig.bay_id, t, tau_inf, confidence, fingers)
+                cmd = controller.command(rig, sig)
+                if cmd is not None:
+                    hold = cmd.wrist
+                    if cmd.fingers is not None:
+                        fingers = dict(cmd.fingers)
+                rig.command(hold, fingers)
+                step_physics(m, d)
+                t += CONTROL_DT
+                tau = rig.tau_ext()
+                tau_inf = rig.tau_hand_inf(tau)
+                max_tau = max(max_tau, tau_inf)
+                max_ratio = max(max_ratio, rig.arm_torque_ratio(tau))
+                limits_ok = limits_ok and rig.arm_in_limits()
+                x_bolt = rig.bolt_x()
+                if x_bolt >= BOLT_CLEARED_M:
+                    return result(
+                        True,
+                        max_tau=max_tau,
+                        max_ratio=max_ratio,
+                        limits_ok=limits_ok,
+                        t_clear=t,
+                    )
+                pos = pose_position(rig.wrist_pose())
+                speed = float(np.linalg.norm(pos - prev_pos)) / CONTROL_DT
+                prev_pos = pos
+                v_act = 0.5 * v_act + 0.5 * speed
+                confidence = compute_confidence(
+                    max(tau_inf, rig.tau_arm_inf(tau)),
+                    cmd.v_cmd if cmd is not None and cmd.v_cmd is not None else speed,
+                    v_act,
+                )
+                offset = getattr(controller, "touch_offset_m", None)
+                if getattr(controller, "in_replay", False) and offset is not None:
+                    if not armed_replay:  # backed off the hook: arm the replay's touch
+                        armed_replay = True
+                        touch.reset()
+                    if touch.update(x_bolt, None):
+                        est = touch_correct(
+                            rig.estimate, rig.index_tip_world(), x_bolt, float(offset)
+                        )
+                        rig.set_estimate(est)
+                        if est.rejected_correction_m is None:
+                            controller.rebase(rig.world_from_latch())  # pyright: ignore
+                reason = controller.check(
+                    rig, BaySignals(rig.bay_id, t, tau_inf, confidence, fingers)
+                )
+                if reason is not None:
+                    return result(
+                        False,
+                        max_tau=max_tau,
+                        max_ratio=max_ratio,
+                        limits_ok=limits_ok,
+                        reason=reason,
+                    )
+        finally:
+            controller.close()
+        return result(
+            False,
+            max_tau=max_tau,
+            max_ratio=max_ratio,
+            limits_ok=limits_ok,
+            reason="rollout timeout",
+        )
 
 
 __all__ = [

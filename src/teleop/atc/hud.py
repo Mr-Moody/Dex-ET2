@@ -27,6 +27,9 @@ class ConveyorStatus:
     mode: ConveyorMode = "paused"
     belt_dist_m: float = 0.0
     pack_dy_m: float = 0.0
+    # True while the belt is paused because it is restarting after a halt (a rescue, a skill
+    # gate, an E-stop), until it next feeds. A plain pause between two packs leaves this False.
+    resuming: bool = False
 
 
 STATE_LABELS: dict[BayState, str] = {

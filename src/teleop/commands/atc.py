@@ -33,6 +33,7 @@ import contextlib
 import dataclasses
 import importlib
 import logging
+import subprocess
 import threading
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
@@ -371,10 +372,11 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError, TypeError) as exc:
         print(f"teleop atc: bad config: {exc}")
         return 2
-    if ns.env_file.is_file():
+    env_file = _resolve_env_file(ns.env_file)
+    if env_file is not None:
         from dotenv import load_dotenv
 
-        load_dotenv(ns.env_file)
+        load_dotenv(env_file)
     if cfg.generate is not None and (not cfg.headless or cfg.record_episodes is None):
         print("teleop atc: --generate needs --headless and --record-episodes")
         return 2
@@ -416,6 +418,32 @@ def _start_hotspot(
     if watchdog is not None:
         stack.callback(watchdog.stop)
     return check
+
+
+def _resolve_env_file(env_file: Path) -> Path | None:
+    """The ``.env`` to load. A git worktree has none of its own, so the default ``.env`` falls
+    back to the main checkout's. Without this the Solana keys are missing there and the audit
+    trail silently drops to local hashing with no explorer link. An explicit path never falls back.
+    """
+    if env_file.is_file():
+        return env_file
+    if env_file != Path(".env"):
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    common = Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+    if common is None or common.name != ".git":
+        return None
+    main_env = common.parent / ".env"
+    return main_env if main_env.is_file() else None
 
 
 def _run_booth(

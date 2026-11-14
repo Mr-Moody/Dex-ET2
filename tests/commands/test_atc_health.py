@@ -353,3 +353,25 @@ def test_viewer_hud_shows_health(monkeypatch: pytest.MonkeyPatch) -> None:
         health=Monitor(),
     )
     assert seen and all(h == lights for h in seen)
+
+
+def test_default_env_file_falls_back_to_the_main_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teleop.commands import atc
+
+    main = tmp_path / "main"
+    (main / ".git").mkdir(parents=True)
+    (main / ".env").write_text("SOLANA_RPC_URL=x\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        return type("R", (), {"returncode": 0, "stdout": f"{main / '.git'}\n"})()
+
+    monkeypatch.setattr(atc.subprocess, "run", fake_run)
+    assert atc._resolve_env_file(Path(".env")) == main / ".env"  # pyright: ignore[reportPrivateUsage]
+    assert atc._resolve_env_file(tmp_path / "missing.env") is None  # pyright: ignore[reportPrivateUsage]
+    (work / ".env").write_text("")
+    assert atc._resolve_env_file(Path(".env")) == Path(".env")  # pyright: ignore[reportPrivateUsage]

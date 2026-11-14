@@ -43,7 +43,7 @@ const BAY_ZONE = {
 };
 const BELT_TEXT = {
   feeding: "Belt feeding",
-  paused: "Belt paused",
+  paused: "Belt paused",  // only shown while the belt restarts after a halt (conveyor.resuming)
   estop: "E-STOP · belt halted",
 };
 const AUDIT_KIND_TEXT = {
@@ -637,7 +637,10 @@ function updateWall(t) {
     const belt = el.querySelector(".feed__belt");
     if (belt) {
       const mode = b.conveyor && b.conveyor.mode;
-      belt.hidden = !mode;
+      // The routine pause between two packs says nothing. Yellow "paused" is kept for the belt
+      // restarting after a halt (rescue, skill gate, E-stop); red is the halt itself.
+      const quiet = mode === "paused" && !b.conveyor.resuming;
+      belt.hidden = !mode || quiet;
       if (mode) {
         belt.dataset.mode = mode;
         belt.textContent = BELT_TEXT[mode] || mode;
@@ -1258,7 +1261,12 @@ function render(t) {
   updateActions(t);
   updateCompliance(t);
   // One advisory line, shown only while the advisor has something to say.
-  const advice = (t.reasoning || "").trim();
+  // The line comes from the offline rule-based triage reasoner ("TRIAGE bay 1: Bay 1: ..."); the
+  // label already says Triage, so drop the repeated prefix.
+  const advice = (t.reasoning || "")
+    .trim()
+    .replace(/^TRIAGE\s+bay \d+:\s*(?=Bay \d+:)/i, "")
+    .replace(/^TRIAGE\s+/i, "");
   $("panel-advisor").hidden = !advice || /\bidle\b/i.test(advice);
   if ($("reasoning").textContent !== advice) $("reasoning").textContent = advice;
   $("live").title = t.unoq || "";
@@ -1303,11 +1311,18 @@ function buildAuditItem(comp) {
   const cleanHex = hex ? (hex.startsWith("0x") ? hex : "0x" + hex) : "0x" + "0".repeat(12);
   const shortHex = cleanHex.length > 18 ? `${cleanHex.slice(0, 8)}…${cleanHex.slice(-6)}` : cleanHex;
 
+  const stationUrl = comp.station_url || null;
   if (url) {
     hashEl.href = url;
     hashText.textContent = shortHex;
     hashEl.append(hashText, " Solana Explorer ↗");
     hashEl.title = `Open the on-chain transaction in Solana Explorer\nTx: ${txSig || url}\nDigest: ${digest || "N/A"}`;
+  } else if (stationUrl) {
+    // Not anchored yet: open the station account, where the transaction appears once confirmed.
+    hashEl.href = stationUrl;
+    hashText.textContent = shortHex;
+    hashEl.append(hashText, " Station on Explorer ↗");
+    hashEl.title = `Not anchored yet. Opens the station account in Solana Explorer; this entry's transaction is listed there once confirmed.\nDigest: ${digest || "N/A"}`;
   } else {
     hashText.textContent = shortHex;
     hashEl.append(hashText);
