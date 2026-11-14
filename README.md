@@ -11,32 +11,78 @@ See `PROJECT_BRIEF.md` for the pitch and
 
 ## How it works
 
-Everything runs locally in one Python process. MuJoCo does all the physics and all the 3D
-rendering. The browser is only a display and a keyboard.
+Everything runs locally on the laptop in one Python process. The only exception is an
+optional real UNO Q board on the network. MuJoCo does all the physics and all the 3D rendering.
+The browser is only a display and a keyboard.
 
+```mermaid
+flowchart LR
+    subgraph IN["Operator input"]
+        direction TB
+        GLOVES["Rokoko gloves<br/>(or synthetic / replay)"]
+        RET["Retargeting +<br/>relative clutch"]
+        GLOVES -->|"Studio JSON over UDP"| RET
+    end
+
+    subgraph MAIN["Main thread · 60 Hz"]
+        direction TB
+        STAGE["StageController<br/>(script, keys)"]
+        COORD["AtcCoordinator<br/>C(t) stalls · rescue queue · torque tube"]
+        PHYS[("MuJoCo physics<br/>Bays 1–2: Panda + LEAP")]
+        GATE["SkillValidator<br/>3 headless rollouts"]
+        STAGE --> COORD
+        COORD <--> PHYS
+        COORD --> GATE
+    end
+
+    subgraph SIDE["Off the control loop"]
+        direction TB
+        UNOQ["UNO Q edge node (or mock)<br/>1-Euro · Mahalanobis · RBF-DMP"]
+        SOL["Compliance sink<br/>hash-chained log → Solana"]
+        KIMI["Reasoner<br/>Verda · Kimi K3.1 Pro"]
+    end
+
+    subgraph VIEW["Display"]
+        direction TB
+        SNAP["SimSnapshot<br/>(latest-value slot)"]
+        REND["Render thread<br/>offscreen MuJoCo · CCTV → JPEG"]
+        SRV["Console server<br/>HTTP + WebSocket :8765"]
+        WEB["Browser console<br/>HTML · CSS · JS"]
+        SNAP --> REND --> SRV
+        SRV -->|"JPEG frames + telemetry"| WEB
+        WEB -->|"key presses"| SRV
+    end
+
+    RET -->|"operator input"| STAGE
+    COORD <-->|"UDP / TCP"| UNOQ
+    COORD -->|"events"| SOL
+    COORD -->|"contexts"| KIMI
+    COORD -->|"after each tick"| SNAP
+    SRV -->|"keys"| STAGE
 ```
- Rokoko gloves ──UDP──▶ Studio source ─▶ retarget + relative clutch ─┐
- (or synthetic/replay)                                               │ operator input
-                                                                     ▼
- ┌──────────────────────── main thread, 60 Hz ────────────────────────────────────┐
- │  StageController ─▶ AtcCoordinator ─▶ MuJoCo physics (Bays 1-2: Panda + LEAP)  │
- │                        │  C(t) stall detection, FIFO rescue queue, torque tube │
- │                        ├─▶ UNO Q (UDP/TCP, or in-process mock):                │
- │                        │     1-Euro filter, Mahalanobis stall classifier,      │
- │                        │     30-kernel RBF-DMP skill fit                       │
- │                        ├─▶ SkillValidator: 3 headless rollouts before deploy   │
- │                        ├─▶ compliance sink (thread) ─▶ hash-chained log/Solana │
- │                        └─▶ reasoner (worker threads) ─▶ Verda Kimi K3.1 Pro    │
- │  after each tick: SimSnapshot ─▶ latest-value slot                             │
- └──────────────────────────────────┬─────────────────────────────────────────────┘
-                                    ▼
- render thread: own copy of the MuJoCo model, posed from the snapshot
-                (Bays 3-4 from a canned background cycle), offscreen mujoco.Renderer
-                per-bay CCTV cameras ─▶ JPEG
-                                    ▼
- console server (127.0.0.1:8765): static page + WebSocket
-     ──▶ telemetry JSON and JPEG frames ──▶ browser
-     ◀── key presses (same handler as the MuJoCo viewer) ◀──
+
+The physics never waits on the side services or the display. The UNO Q, compliance sink and
+reasoner run on their own threads or devices and fall back to local modes when unavailable. The
+render thread draws from its own copy of the model, and Bays 3–4 replay a canned background
+cycle.
+
+How the coordinator handles a stall:
+
+```mermaid
+flowchart TD
+    RUN["Routine unlatching push"] --> STALL{"C(t) &lt; 0.3<br/>for 300 ms?"}
+    STALL -->|no| RUN
+    STALL -->|yes| CLS{"UNO Q classifies<br/>stall signature"}
+    CLS -->|"known, skill deployed"| AUTO["Replay skill inside<br/>torque tube"]
+    CLS -->|"unseen"| QUEUE["Retract to hover,<br/>join rescue queue"]
+    CLS -->|"out of distribution<br/>(Mahalanobis &gt; 3.0)"| REFUSE["Refuse and escalate<br/>to a human"]
+    QUEUE --> RESCUE["Operator rescues<br/>with gloves + clutch"]
+    RESCUE --> FIT["UNO Q fits RBF-DMP<br/>(&lt; 20 ms)"]
+    FIT --> VAL{"3/3 headless<br/>rollouts pass?"}
+    VAL -->|yes| LIB["Add to fleet library"]
+    VAL -->|no| WITHHOLD["Skill withheld"]
+    LIB -.->|"next matching stall,<br/>any bay"| AUTO
+    AUTO --> RUN
 ```
 
 ### A rescue, step by step
