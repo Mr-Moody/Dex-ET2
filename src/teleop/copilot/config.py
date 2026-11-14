@@ -13,8 +13,11 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from dotenv import dotenv_values
+
+from teleop.copilot.gemini import THINKING_LEVELS, ThinkingLevel
 
 DEFAULT_FAST_MODEL = "gemini-4-hydrogen"
 DEFAULT_REVIEW_MODEL = "gemini-4-argon"
@@ -23,6 +26,9 @@ DEFAULT_VOICE = "Kore"
 DEFAULT_LOCAL_MODEL = "gemma4:e4b"
 DEFAULT_CONSOLE_URL = "ws://127.0.0.1:8765/ws"
 DEFAULT_MAX_REVIEWS_PER_HOUR = 20
+# Lowest effort Gemini 4 accepts ("minimal" is HTTP 400). Measured faster; see docs/copilot.md.
+DEFAULT_FAST_THINKING: ThinkingLevel = "low"
+DEFAULT_REVIEW_THINKING: ThinkingLevel = "low"
 
 ENV_VARS = (
     "GEMINI_API_KEY",
@@ -34,6 +40,8 @@ ENV_VARS = (
     "COPILOT_LOCAL_MODEL",
     "COPILOT_CONSOLE_URL",
     "COPILOT_MAX_REVIEWS_PER_HOUR",
+    "COPILOT_FAST_THINKING",
+    "COPILOT_REVIEW_THINKING",
 )
 
 
@@ -50,6 +58,8 @@ class CopilotConfig:
     local_model: str = DEFAULT_LOCAL_MODEL
     console_url: str = DEFAULT_CONSOLE_URL
     max_reviews_per_hour: int = DEFAULT_MAX_REVIEWS_PER_HOUR
+    fast_thinking: ThinkingLevel = DEFAULT_FAST_THINKING
+    review_thinking: ThinkingLevel = DEFAULT_REVIEW_THINKING
     no_images: bool = False
     mute: bool = False
 
@@ -58,6 +68,14 @@ class CopilotConfig:
             raise ValueError(
                 f"COPILOT_MAX_REVIEWS_PER_HOUR must be at least 1, got {self.max_reviews_per_hour}"
             )
+        for name, level in (
+            ("COPILOT_FAST_THINKING", self.fast_thinking),
+            ("COPILOT_REVIEW_THINKING", self.review_thinking),
+        ):
+            if level not in THINKING_LEVELS:
+                raise ValueError(
+                    f"{name} must be one of {', '.join(THINKING_LEVELS)}, got {level!r}"
+                )
 
     @property
     def has_key(self) -> bool:
@@ -102,9 +120,21 @@ class CopilotConfig:
             local_model=get("COPILOT_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL,
             console_url=get("COPILOT_CONSOLE_URL") or DEFAULT_CONSOLE_URL,
             max_reviews_per_hour=max_reviews,
+            fast_thinking=_thinking(get("COPILOT_FAST_THINKING"), DEFAULT_FAST_THINKING),
+            review_thinking=_thinking(get("COPILOT_REVIEW_THINKING"), DEFAULT_REVIEW_THINKING),
             no_images=no_images,
             mute=mute,
         )
+
+
+def _thinking(raw: str | None, default: ThinkingLevel) -> ThinkingLevel:
+    if raw is None:
+        return default
+    level = raw.lower()
+    for known in THINKING_LEVELS:
+        if level == known:
+            return known
+    return cast(ThinkingLevel, level)  # rejected with a clear message in __post_init__
 
 
 def _layered_env(env_file: str | Path | None) -> dict[str, str]:

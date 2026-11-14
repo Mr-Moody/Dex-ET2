@@ -60,14 +60,16 @@ optional except the key.
 | Variable | Default | Used for |
 |---|---|---|
 | `GEMINI_API_KEY` | (none) | Every Gemini call. Never printed or logged. |
-| `COPILOT_FAST_MODEL` | `gemini-4-hydrogen` | Live call-outs, at thinking level `low` |
-| `COPILOT_REVIEW_MODEL` | `gemini-4-argon` | Deep reviews, at thinking level `high` |
+| `COPILOT_FAST_MODEL` | `gemini-4-hydrogen` | Live call-outs |
+| `COPILOT_REVIEW_MODEL` | `gemini-4-argon` | Deep reviews |
 | `COPILOT_TTS_MODEL` | `gemini-3.8-flash-lite-tts` | Speech |
 | `COPILOT_VOICE` | `Kore` | A prebuilt Gemini TTS voice (`Charon` is an alternative) |
 | `COPILOT_LOCAL_URL` | (none) | OpenAI-compatible local server for the Gemma fallback (`T-214`) |
 | `COPILOT_LOCAL_MODEL` | `gemma4:e4b` | Local fallback model (`T-214`) |
 | `COPILOT_CONSOLE_URL` | `ws://127.0.0.1:8765/ws` | The console stream to watch (`T-211`) |
 | `COPILOT_MAX_REVIEWS_PER_HOUR` | `20` | Review budget (`T-213`) |
+| `COPILOT_FAST_THINKING` | `low` | Thinking level for call-outs: `low`, `medium`, `high` or `xhigh` (`xhigh` on Hydrogen only) |
+| `COPILOT_REVIEW_THINKING` | `low` | Thinking level for reviews (Argon takes `low`, `medium` or `high`) |
 
 The flags `--no-images` and `--mute` become `CopilotConfig.no_images` and `CopilotConfig.mute`.
 
@@ -88,7 +90,7 @@ The flags `--no-images` and `--mute` become `CopilotConfig.no_images` and `Copil
 | Role | Model | Why |
 |---|---|---|
 | Live call-outs: telemetry plus one JPEG → JSON | `gemini-4-hydrogen`, thinking `low` | The fast Gemini 4 model, multimodal, with structured output. Thinking defaults to `high`, which is too slow for a call-out, so the client sends `low`. `minimal` and `thinkingBudget` are HTTP 400 on Gemini 4, so the client offers neither. Fallback: `gemini-3.8-flash`. |
-| Deep review: telemetry plus up to 6 JPEGs → JSON | `gemini-4-argon`, thinking `high` | The strongest Gemini 4 model for multi-frame spatial reasoning: telling a clean latch clearance from a fragile scrape or a pinned bolt. It runs off the critical path (90 s timeout, at most 20 reviews an hour), so the extra thinking costs nothing live. Paid tier only. The introductory price ends 30 Nov 2026. |
+| Deep review: telemetry plus up to 6 JPEGs → JSON | `gemini-4-argon`, thinking `low` | The strongest Gemini 4 model for multi-frame spatial reasoning: telling a clean latch clearance from a fragile scrape or a pinned bolt. It runs off the critical path (90 s timeout, at most 20 reviews an hour). Thinking is `low` for speed; set `COPILOT_REVIEW_THINKING=high` for harder cases. Paid tier only. The introductory price ends 30 Nov 2026. |
 | Speech | `gemini-3.8-flash-lite-tts`, voice `Kore` | The low-latency Gemini TTS tier, on the same key and client. It returns 24 kHz, 16-bit mono PCM, which the client wraps in a WAV. If speech takes more than 4 s, `T-212` falls back to the system voice. |
 | Offline backup (`T-214`) | `gemma4:e4b` | The largest multimodal Gemma that runs on this laptop's CPU and Iris Xe next to the simulation. Used for call-outs only, never for reviews. |
 
@@ -154,6 +156,7 @@ uv run python -m teleop.copilot probe --no-images
 | Call-out | `gemini-4-hydrogen`, thinking `low` | 7 | 3826, timeout (> 8 s), 5418, 5769, 4114, 3377, 2904 | 3970 (6 answered) |
 | Call-out | `gemini-3.8-flash`, thinking `low` | 7 | 6955, 3000, 3715, 4922, 3320, 3341, 2885 | 3341 |
 | Review | `gemini-4-argon`, thinking `high`, 3 frames | 2 | 23977, 84445 | — |
+| Review | `gemini-4-argon`, thinking `low`, 3 frames | 5 | 12423, 39679, 12621, 17834, 38445 | 17834 |
 | Speech | `gemini-3.8-flash-lite-tts`, Kore | 2 | 3914 (3.2 s of audio), 4271 (4.1 s of audio) | — |
 
 - **Neither fast model meets the 3 s call-out target reliably.**
@@ -168,7 +171,31 @@ uv run python -m teleop.copilot probe --no-images
 - With synthetic images, Argon correctly answered `insufficient_evidence`, which is the
   behaviour wanted.
 
-### Run 1: images on (verbatim)
+### Thinking levels
+
+Every text model now runs at thinking level `low`:
+
+- **The review moved from `high` to `low`.** Over five calls, Argon took 12–40 s (median 17.8 s),
+  against 24 s and 84 s at `high`. On these synthetic frames the verdict was the same
+  (`insufficient_evidence`) at both levels.
+- **The call-outs were already at `low`,** which is the lowest level Gemini 4 accepts
+  (`minimal` is HTTP 400).
+- **The TTS models have no effort setting.** A request with any thinking level gets HTTP 400:
+  "Thinking level is not supported for this model".
+
+In the two probe runs at `low` (images on), the calls were slower than earlier the same day:
+
+| Model | Earlier | At `low` |
+|---|---|---|
+| Hydrogen call-out | 2.9–5.8 s | 5.7 s, 5.7 s |
+| Flash call-out | 2.9–7.0 s | 7.7 s, 9.8 s |
+| Speech | 3.4–4.3 s | 12.6 s, 9.3 s |
+
+Speech does no thinking at all, so much of this delay is load on Google's side, not effort.
+Plan the call-out and speech paths (`T-212`) around the 1 s template and the system-voice
+fallback, not around the model's speed.
+
+### Run 1: images on (verbatim, review at `high` before the change)
 
 Images: on (synthetic 64x64 JPEGs). Times are wall-clock ms from `time.monotonic_ns()`.
 
@@ -203,7 +230,7 @@ COPILOT_TTS_MODEL=gemini-3.8-flash-lite-tts
 COPILOT_VOICE=Kore
 ```
 
-### Run 2: `--no-images` (timed calls, verbatim)
+### Run 2: `--no-images` (timed calls, verbatim, review at `high`)
 
 Listing and recommendations matched run 1.
 
