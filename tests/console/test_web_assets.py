@@ -344,3 +344,32 @@ def test_data_page_assets() -> None:
         assert token in js, token
     assert not re.search(r"https?://", js)
     assert "data page */" in _read("console.css")
+
+
+_COPILOT_HARNESS = """
+%s
+const m = (seq, bay, extra = {}) => ({ seq, bay, say: `s${seq}`, severity: "info", ...extra });
+let h = [];
+for (let i = 1; i <= 25; i++) h = copilotAdd(h, m(i, 1));
+const mixed = [m(1, 1), m(2, 2), m(3, 1, { verdict: "flag" }), m(4, 1), m(5, null), m(6, 2)];
+console.log(JSON.stringify({
+  kept: h.map((x) => x.seq),
+  rows: copilotRows(mixed).map((x) => x.seq),
+  empty: copilotRows([]),
+}));
+"""
+
+
+def test_copilot_panel_assets_and_row_selection() -> None:
+    html, js, css = _read("index.html"), _read("console.js"), _read("console.css")
+    assert 'id="panel-copilot"' in html and 'id="copilot-list"' in html
+    assert 'msg.type === "copilot"' in js and "updateCopilot()" in js
+    assert ".cop " in css and ".cop__verdict" in css
+    # server text is shown as text, never parsed as markup
+    block = js[js.index("function updateCopilot") : js.index("function syncViewBar")]
+    assert "innerHTML" not in block
+    got = _node_json(_COPILOT_HARNESS % _marked(js, "copilot"))
+    assert isinstance(got, dict)
+    assert got["kept"] == list(range(6, 26))  # the last 20
+    # newest first; per bay one call-out and one review (seq 3 is Bay 1's review)
+    assert got["rows"] == [6, 5, 4, 3] and got["empty"] == []
