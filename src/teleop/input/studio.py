@@ -311,8 +311,7 @@ class StudioSource(ThreadedSource):
         """Thread-safe, non-blocking snapshot of datagram arrival."""
         now = time.monotonic_ns()
         with self._live_lock:
-            while self._arrivals and now - self._arrivals[0] > _HZ_WINDOW_NS:
-                self._arrivals.popleft()
+            self._prune_arrivals(now)
             hz = float(len(self._arrivals))
             sock = self._sock
             port: int | None = None
@@ -329,6 +328,11 @@ class StudioSource(ThreadedSource):
                 last_right_frame_ns=self._last_right_ns,
                 datagram_hz=hz,
             )
+
+    def _prune_arrivals(self, now: int) -> None:
+        """Drop arrivals older than the rate window; caller holds ``_live_lock``."""
+        while self._arrivals and now - self._arrivals[0] > _HZ_WINDOW_NS:
+            self._arrivals.popleft()
 
     def bound_port(self) -> int:
         if self._sock is None:
@@ -359,6 +363,7 @@ class StudioSource(ThreadedSource):
             with self._live_lock:
                 self._last_datagram_ns = now
                 self._arrivals.append(now)
+                self._prune_arrivals(now)
             tee = self._tee
             if tee is not None:
                 rec = {
