@@ -328,3 +328,20 @@ def test_unoq_command_probes_and_falls_back(capsys: pytest.CaptureFixture[str]) 
     port = _dead_port()
     assert main(["--host", "127.0.0.1", "--udp-port", str(port), "--tcp-port", str(port)]) == 0
     assert "unoq-loopback answered via local loopback" in capsys.readouterr().out
+
+
+def test_skill_ids_are_content_addressed() -> None:
+    demo = synthetic_rescue()
+    a = fit_rbf_dmp(demo["t"], demo["wrist"], demo["fingers"], demo["tau"])
+    b = fit_rbf_dmp(demo["t"], demo["wrist"], demo["fingers"], demo["tau"])
+    assert a.skill_id == b.skill_id  # same demonstration, same id (seeds the gate)
+    prefix, suffix = a.skill_id.rsplit("/", 1)
+    assert prefix == "ev_latch_v1/Jam_Sig_1" and len(suffix) == 8
+    other = fit_rbf_dmp(demo["t"], demo["wrist"] + 0.001, demo["fingers"], demo["tau"])
+    assert other.skill_id != a.skill_id
+    assert (
+        fit_rbf_dmp(
+            demo["t"], demo["wrist"], demo["fingers"], demo["tau"], skill_id="given"
+        ).skill_id
+        == "given"
+    )
