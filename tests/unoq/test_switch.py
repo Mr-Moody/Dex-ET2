@@ -14,7 +14,7 @@ from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive, StallS
 from teleop.unoq.client import UnoQClient, UnoQError
 from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu
 from teleop.unoq.server import UnoQServer
-from teleop.unoq.switch import SwitchableUnoQ
+from teleop.unoq.switch import SwitchableUnoQ, start_loopback
 
 SKU = "ev_latch_v1"
 Z = StallSignature(0.035, 4.0, 8.0, 2.0)
@@ -224,3 +224,44 @@ def test_replace_hardware_closes_old_consoles() -> None:
     controller.replace_hardware([new])
     assert old.closed and not new.closed
     assert controller.consoles == [controller.keyboard, new]
+
+
+def test_loop_request_waits_for_panel_swap_to_loopback(board: UnoQServer) -> None:
+    """Both detectors fire: the panel is mid swap_to_loopback when the loop's request fails."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def gated_loopback() -> UnoQClient:
+        started.set()
+        release.wait(5.0)
+        return start_loopback()
+
+    unoq = SwitchableUnoQ(_client(board), loopback=gated_loopback)
+    errors: list[BaseException] = []
+    try:
+        panel = threading.Thread(target=unoq.swap_to_loopback)
+        panel.start()
+        assert started.wait(5.0)  # the panel holds the swap lock
+        board.stop()
+
+        def loop_request() -> None:
+            try:
+                unoq.classify_stall(SKU, Z)
+            except BaseException as exc:
+                errors.append(exc)
+
+        loop = threading.Thread(target=loop_request)
+        loop.start()
+        for _ in range(500):  # until the loop thread queues behind the panel's swap (or failed)
+            if unoq._loopback_intents == 2 or not loop.is_alive():  # pyright: ignore[reportPrivateUsage]
+                break
+            time.sleep(0.01)
+        release.set()
+        loop.join(5.0)
+        panel.join(5.0)
+        assert errors == []
+        assert unoq.is_mock is True
+    finally:
+        release.set()
+        unoq.close()

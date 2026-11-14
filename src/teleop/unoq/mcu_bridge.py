@@ -338,13 +338,17 @@ class McuConsoleBridge:
         if self._led.get(bay_id) == token:
             return
         line = format_bay_state(bay_id, state)
-        self._send(line)
-        self._led[bay_id] = token  # only after a successful write, so a failed one is retried
+        with self._write_lock:  # write + record atomically w.r.t. resend_bay_states
+            self._transport.write((line + "\n").encode("ascii"))
+            self._led[bay_id] = token  # only after a successful write: a failed one is retried
 
     def resend_bay_states(self) -> None:
         """Push every known LED state again, e.g. after the MCU reboots."""
-        for bay_id, token in sorted(list(self._led.items())):
-            self._send(f"CMD:BAY_STATE:{bay_id}:{token}")
+        # Under the write lock for the copy and the writes: a newer set_bay_state cannot be
+        # overwritten on the MCU by a stale resend (the lock is not reentrant: no _send here).
+        with self._write_lock:
+            for bay_id, token in sorted(list(self._led.items())):
+                self._transport.write(f"CMD:BAY_STATE:{bay_id}:{token}\n".encode("ascii"))
 
     def reset_rig(self) -> None:
         """Re-arm the physical fault rig for the next pallet cycle (sends CMD:RESET_RIG)."""

@@ -53,7 +53,9 @@ class SwitchableUnoQ:
         self._client = client
         self._loopback = loopback
         self._lock = threading.Lock()  # the client pointer and the request in flight on it
-        self._swap_lock = threading.Lock()  # one swap at a time (never taken by a request)
+        self._swap_lock = threading.Lock()  # one swap at a time
+        self._intent_lock = threading.Lock()
+        self._loopback_intents = 0  # threads inside _to_loopback (holding or awaiting the swap)
         self._skills: list[SkillPrimitive] = []
         self._closed = False
         self.on_swap: list[Callable[[SwitchableUnoQ], None]] = []
@@ -90,21 +92,36 @@ class SwitchableUnoQ:
     def _to_loopback(self, expected: UnoQClient | None) -> UnoQClient | None:
         """Swap to loopback (if current is still ``expected``); returns the old client.
 
-        With ``expected`` (the request path) it never waits: if another swap is running, or
-        already replaced ``expected``, the caller just retries on whatever is current.
+        With ``expected`` (the request path) it waits only behind another swap *to loopback*
+        (a local server start and a local replay, so cheap) and then sees ``expected`` replaced.
+        It never waits behind a swap to a board (network replay; only an explicit board-to-board
+        ``swap()`` can be in flight while ``expected`` is current): it returns at once and the
+        caller retries on whatever is current.
         """
         if expected is not None and self._client is not expected:
             return None
-        if not self._swap_lock.acquire(blocking=expected is None):
-            return None
+        with self._intent_lock:
+            self._loopback_intents += 1
         try:
-            current = self._client
-            if current.is_mock or (expected is not None and current is not expected):
-                return None
-            logger.warning("unoq: board lost; switching to the local loopback node")
-            return self._publish(self._loopback())
+            if expected is not None and not self._swap_lock.acquire(blocking=False):
+                with self._intent_lock:
+                    others = self._loopback_intents - 1
+                if others == 0:
+                    return None  # the swap in flight goes to a board and replaces ``expected``
+                self._swap_lock.acquire()  # another detector is swapping to loopback
+            elif expected is None:
+                self._swap_lock.acquire()
+            try:
+                current = self._client
+                if current.is_mock or (expected is not None and current is not expected):
+                    return None
+                logger.warning("unoq: board lost; switching to the local loopback node")
+                return self._publish(self._loopback())
+            finally:
+                self._swap_lock.release()
         finally:
-            self._swap_lock.release()
+            with self._intent_lock:
+                self._loopback_intents -= 1
 
     def _publish(self, new: UnoQClient) -> UnoQClient | None:
         """Replay skills on ``new`` outside the pointer lock, then swap; caller holds swap lock.

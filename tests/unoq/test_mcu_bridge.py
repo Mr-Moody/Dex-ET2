@@ -274,3 +274,26 @@ def test_reopen_during_led_writes_never_raises() -> None:
         th.join()
         bridge.close()
     assert errors == []
+
+
+def test_resend_never_leaves_a_stale_led() -> None:
+    import threading
+
+    mcu = SoftwareMcu()
+    bridge = McuConsoleBridge(mcu)
+    states = (BayState.STALLED, BayState.NOMINAL)
+    done = threading.Event()
+
+    def resender() -> None:
+        while not done.is_set():
+            bridge.resend_bay_states()
+
+    th = threading.Thread(target=resender)
+    th.start()
+    try:
+        for i in range(2000):
+            bridge.set_bay_state(1, states[i % 2])
+    finally:
+        done.set()
+        th.join()
+    assert mcu.led_states[1] == format_bay_state(1, states[1999 % 2]).rsplit(":", 1)[1]
