@@ -1,7 +1,7 @@
 ---
 id: T-162
 title: Switch Verda fleet reasoner to Kimi K3.1 Pro
-status: claimed
+status: in_review
 owner: ethan
 branch: feat/verda-kimi-reasoner
 depends_on: [T-161]
