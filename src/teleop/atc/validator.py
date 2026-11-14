@@ -21,9 +21,9 @@ from __future__ import annotations
 import math
 import time
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 import numpy as np
@@ -62,6 +62,9 @@ from teleop.unoq.dmp import (
     so3_exp,
     so3_log,
 )
+
+if TYPE_CHECKING:
+    from teleop.atc.recovery import RecoveryController
 
 mj: Any = _mujoco
 
@@ -507,6 +510,7 @@ class RolloutResult:
     # outlier gate rejected it.
     touch_correction_m: float | None = None
     touch_rejected: bool = False
+    elapsed_s: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -775,7 +779,9 @@ class SkillValidator:
         touch_shift: float | None = None
         touch_rejected = False
         cleared = False
-        for k in range(int(math.ceil(replay.total_s / CONTROL_DT))):
+        ticks = int(math.ceil(replay.total_s / CONTROL_DT))
+        elapsed_s = replay.total_s
+        for k in range(ticks):
             cmd = replay.command(k * CONTROL_DT)
             rig.command(cmd.wrist, cmd.fingers)
             step_physics(m, d)
@@ -783,6 +789,7 @@ class SkillValidator:
             x_bolt = rig.bolt_x()
             if x_bolt >= BOLT_CLEARED_M:
                 cleared = True
+                elapsed_s = (k + 1) * CONTROL_DT
                 break
             if touch.update(x_bolt, None):
                 est = touch_correct(
@@ -807,22 +814,231 @@ class SkillValidator:
             cond,
             touch_shift,
             touch_rejected,
+            elapsed_s,
         )
 
-    def validate(self, skill: SkillPrimitive) -> ValidationReport:
+    def _rollout_controller(
+        self,
+        make: Callable[[BayRig], RecoveryController],
+        fault: Literal["flap", "pin"],
+        cond: RolloutConditions,
+    ) -> RolloutResult:
+        """One rollout of a generic :class:`RecoveryController` from the fault's stall state."""
+        from teleop.atc.coordinator import ROUTINE, compute_confidence
+        from teleop.atc.recovery import BaySignals, DmpRecovery
+
+        dx, dy, dyaw_deg = cond.perturbation
+        rig, m, d = self.rig, self.model, self.data
+        self._restore_snapshot()
+        m.jnt_stiffness[self._flap_jnt] *= cond.flap_stiffness_scale
+        m.qpos_spring[self._flap_qadr] = math.radians(cond.flap_springref_deg)
+        m.geom_friction[self.contact_geoms, 0] *= cond.friction_scale
+
+        true_latch = latch_world_pose(1, self.base_latch.offset(dx, dy, math.radians(dyaw_deg)))
+        ex, ey, eyaw = cond.est_error
+        c, s = math.cos(true_latch.yaw_rad), math.sin(true_latch.yaw_rad)
+        est_latch = true_latch.offset(c * ex - s * ey, s * ex + c * ey, eyaw)
+        estimate = LatchEstimate(
+            est_latch, GATE_EST_SIGMA_Y_M, GATE_EST_SIGMA_X_M, GATE_EST_SIGMA_YAW_RAD, True
+        )
+        est_wfl = est_latch.as_pose()
+        stall_t = 1.0 if fault == "flap" else 0.35
+        pre = compose_pose(est_wfl, ROUTINE.pose_at(stall_t))
+        lift_z = est_latch.position[2] + LIFT_HEIGHT_M
+        above = lifted(pre, lift_z)
+
+        max_tau = 0.0
+        max_ratio = 0.0
+        limits_ok = True
+
+        def monitor() -> None:
+            nonlocal max_tau, max_ratio, limits_ok
+            tau = rig.tau_ext()
+            max_tau = max(max_tau, rig.tau_hand_inf(tau))
+            max_ratio = max(max_ratio, rig.arm_torque_ratio(tau))
+            limits_ok = limits_ok and rig.arm_in_limits()
+
+        latch_ready = False
+        rig.ik.reset()
+        m.opt.timestep = COARSE_FACTOR / PHYSICS_HZ
+        for waypoints, target in (([lifted(rig.wrist_pose(), lift_z), above], above), ([pre], pre)):
+            plan = ApproachPlan(rig.wrist_pose(), waypoints)
+            settle_ticks = 0
+            while (
+                not plan.done
+                or not latch_ready
+                or (not rig.reached(target) and settle_ticks < SETTLE_MAX_TICKS)
+            ):
+                settle_ticks += 1 if plan.done else 0
+                if plan.index >= 1 and not latch_ready:
+                    rig.set_world_latch(true_latch)
+                    rig.set_estimate(estimate)
+                    rig.reset_latch(flap_jammed=(fault == "flap"), bolt_pinned=(fault == "pin"))
+                    if fault == "flap":
+                        rig.set_bolt_x(0.034)
+                    latch_ready = True
+                rig.command(plan.step(), ROUTINE.fingers)
+                step_physics(m, d, SUBSTEPS // COARSE_FACTOR)
+                monitor()
+
+        m.opt.timestep = 1.0 / PHYSICS_HZ
+        controller = make(rig)
+        touch = TouchDetector()
+        touch_shift: float | None = None
+        touch_rejected = False
+        cleared = False
+        fingers = dict(ROUTINE.fingers)
+        hold_pose = rig.wrist_pose()
+        prev_cmd_pos: FloatArray | None = None
+        prev_wrist_pos: FloatArray | None = None
+        v_act = 0.0
+        v_cmd = 0.0
+        max_ticks = round(10.0 / CONTROL_DT)
+        elapsed_s = max_ticks * CONTROL_DT
+        try:
+            for k in range(max_ticks):
+                tau = rig.tau_ext()
+                tau_inf = rig.tau_hand_inf(tau)
+                tau_full = max(tau_inf, rig.tau_arm_inf(tau))
+                pos = pose_position(rig.wrist_pose())
+                speed = (
+                    0.0
+                    if prev_wrist_pos is None
+                    else float(np.linalg.norm(pos - prev_wrist_pos)) / CONTROL_DT
+                )
+                prev_wrist_pos = pos
+                v_act = 0.5 * v_act + 0.5 * speed
+                conf = compute_confidence(tau_full, v_cmd, v_act)
+                sig = BaySignals(rig.bay_id, k * CONTROL_DT, tau_inf, conf, fingers)
+                cmd = controller.command(rig, sig)
+                if cmd is None:
+                    rig.command(hold_pose, fingers)
+                    v_cmd = 0.0
+                else:
+                    if cmd.fingers is not None:
+                        fingers.update(cmd.fingers)
+                    rig.command(cmd.wrist, fingers)
+                    hold_pose = cmd.wrist
+                    cpos = pose_position(cmd.wrist)
+                    v_cmd = (
+                        cmd.v_cmd
+                        if cmd.v_cmd is not None
+                        else (
+                            0.0
+                            if prev_cmd_pos is None
+                            else float(np.linalg.norm(cpos - prev_cmd_pos)) / CONTROL_DT
+                        )
+                    )
+                    prev_cmd_pos = cpos
+                step_physics(m, d)
+                monitor()
+                x_bolt = rig.bolt_x()
+                if x_bolt >= BOLT_CLEARED_M:
+                    cleared = True
+                    elapsed_s = (k + 1) * CONTROL_DT
+                    break
+                if (
+                    isinstance(controller, DmpRecovery)
+                    and controller.in_replay
+                    and controller.touch_offset_m is not None
+                    and touch.update(x_bolt, None)
+                ):
+                    est = touch_correct(
+                        rig.estimate, rig.index_tip_world(), x_bolt, controller.touch_offset_m
+                    )
+                    rig.set_estimate(est)
+                    touch_rejected = est.rejected_correction_m is not None
+                    touch_shift = (
+                        est.rejected_correction_m if touch_rejected else est.last_correction_m
+                    )
+                    if not touch_rejected:
+                        controller.rebase(rig.world_from_latch())
+                sig_after = BaySignals(
+                    rig.bay_id, (k + 1) * CONTROL_DT, rig.tau_hand_inf(), conf, fingers
+                )
+                if controller.check(rig, sig_after) is not None:
+                    elapsed_s = (k + 1) * CONTROL_DT
+                    break
+        finally:
+            controller.close()
+
+        passed = (
+            cleared and max_tau < self.tau_hard_max and max_ratio < self.arm_margin and limits_ok
+        )
+        return RolloutResult(
+            cond.perturbation,
+            rig.bolt_x(),
+            max_tau,
+            max_ratio,
+            limits_ok,
+            cleared,
+            passed,
+            cond,
+            touch_shift,
+            touch_rejected,
+            elapsed_s,
+        )
+
+    def validate_controller(
+        self,
+        make: Callable[[BayRig], RecoveryController],
+        *,
+        fault: Literal["flap", "pin"] = "flap",
+        conditions: Sequence[RolloutConditions] | None = None,
+    ) -> ValidationReport:
         t0 = time.perf_counter()
-        cache: dict[int, tuple[Pose, dict[str, float], float]] = {}
+        conds = self.draw_conditions(fault) if conditions is None else tuple(conditions)
         m = self.model
         nominal = (m.geom_friction.copy(), m.jnt_stiffness.copy(), m.qpos_spring.copy())
         results: list[RolloutResult] = []
-        for cond in self.draw_conditions(skill.skill_id):
+        for cond in conds:
             try:
-                results.append(self._rollout(skill, cond, cache))
+                if isinstance(make, _DmpGateMaker):
+                    results.append(self._rollout(make.skill, cond, make.cache))
+                else:
+                    results.append(self._rollout_controller(make, fault, cond))
             finally:  # exact restore, even if the rollout raised
                 m.geom_friction[:] = nominal[0]
                 m.jnt_stiffness[:] = nominal[1]
                 m.qpos_spring[:] = nominal[2]
         return ValidationReport(tuple(results), time.perf_counter() - t0, self.pass_min)
+
+    def validate(self, skill: SkillPrimitive) -> ValidationReport:
+        cache: dict[int, tuple[Pose, dict[str, float], float]] = {}
+        return self.validate_controller(
+            _DmpGateMaker(skill, cache, self.tau_hard_max),
+            fault="flap",
+            conditions=self.draw_conditions(skill.skill_id),
+        )
+
+
+class _DmpGateMaker:
+    """Callable ``make(rig) -> DmpRecovery`` carrying the skill and cache for ``validate``."""
+
+    def __init__(
+        self,
+        skill: SkillPrimitive,
+        cache: dict[int, tuple[Pose, dict[str, float], float]],
+        tau_hard_max: float,
+    ) -> None:
+        self.skill = skill
+        self.cache = cache
+        self.tau_hard_max = tau_hard_max
+
+    def __call__(self, rig: BayRig) -> RecoveryController:
+        from teleop.atc.recovery import DmpRecovery
+
+        return DmpRecovery(
+            self.skill,
+            rig,
+            backoff_m=0.01,
+            backoff_s=0.25,
+            blend_s=0.2,
+            hold_s=0.2,
+            tau_margin=TAU_MARGIN_NM,
+            tau_hard_max=self.tau_hard_max,
+            timeout_s=0.5,
+        )
 
 
 __all__ = [
