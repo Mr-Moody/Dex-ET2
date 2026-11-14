@@ -1,12 +1,12 @@
 ---
 id: T-140
 title: ATC Fleet Coordinator — C(t), FIFO queue, Bay 2 SE(3) replay, torque tube & 3-rollout gate
-status: todo
-owner: null
-branch: null
+status: in_review
+owner: claude
+branch: feat/atc-fleet-coordinator
 depends_on: [T-110, T-120, T-130]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-140-atc-fleet-coordinator--ct-fifo-queue-bay-2-se3-replay-additive-torque-tube-3-rollout-gate--negative-control
-claimed_at: null
+claimed_at: '2026-11-14T02:24:05+00:00'
 ---
 
 **P0/P1 Fleet Coordinator & Validation Gate integration. Zero observation of `flap_hinge` `qpos` permitted. Edit only `src/teleop/atc/{coordinator,validator}.py` and `tests/atc/test_coordinator.py`.**
