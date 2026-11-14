@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from teleop.atc.types import LatchPose
+from teleop.sim.latch import add_latch_skin
 
 mj: Any = _mujoco
 
@@ -156,7 +157,14 @@ def _axis_quat_x() -> list[float]:
     return [s, 0.0, s, 0.0]
 
 
+# The latch frame (top of its track) sits this far above a pack's frame: the same offset the
+# bay's real latch has over its pack, so a pack looks identical on the belt and under the arm.
+PACK_LATCH_Z = 0.02
+BELT_UNLATCHED_BOLT_X = 0.052  # packs leaving the bay have their bolt slid clear
+
+
 def _add_battery_module(
+    spec: Any,
     parent: Any,
     prefix: str,
     pos_xy: tuple[float, float],
@@ -242,7 +250,13 @@ def _add_battery_module(
                     )
                 )
     if with_dummy_latch:
-        bolt_dx = 0.052 if disassembled else 0.0
+        # Packs riding the belt wear the same printed-rig skin as the latch under the arm, so
+        # nothing changes appearance when a pack reaches the bay. Visual only, no joints.
+        bolt_dx = BELT_UNLATCHED_BOLT_X if disassembled else 0.0
+        skin = holder.add_body(name=f"{prefix}_latch_skin", pos=[0.0, 0.0, PACK_LATCH_Z])
+        if add_latch_skin(spec, skin, f"{prefix}_", bolt_x=bolt_dx):
+            return
+        # Mesh files missing: the plain three-box stand-in.
         _visual(
             holder.add_geom(
                 name=f"{prefix}_q_track",
@@ -384,7 +398,7 @@ def _add_conveyor_machine(
         )
 
 
-def _add_bay_conveyor(world: Any, bay_id: int) -> None:
+def _add_bay_conveyor(spec: Any, world: Any, bay_id: int) -> None:
     """Add one independent segmented conveyor belt + infeed/outfeed machines for ``bay_id``."""
     bx, by, _ = _bases()[bay_id]
     lx = bx + (0.54 if bay_id == 2 else 0.50)
@@ -512,6 +526,7 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
 
     yaw = math.radians(35.0) if bay_id == 2 else 0.0
     _add_battery_module(
+        spec,
         conv,
         f"conveyor_{tag}_in2",
         (0.0, -2.0 * PACK_PITCH_M),
@@ -520,6 +535,7 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
         with_dummy_latch=True,
     )
     _add_battery_module(
+        spec,
         conv,
         f"conveyor_{tag}_in",
         (0.0, -PACK_PITCH_M),
@@ -528,6 +544,7 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
         with_dummy_latch=True,
     )
     _add_battery_module(
+        spec,
         conv,
         f"conveyor_{tag}_out",
         (0.0, PACK_PITCH_M),
@@ -1054,7 +1071,7 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
     # Four independent segmented conveyor belts (one per bay), all inside the same warehouse.
     active_conveyors = (1, 2, 3, 4) if include_background else (1, 2)
     for bay_id in active_conveyors:
-        _add_bay_conveyor(world, bay_id)
+        _add_bay_conveyor(spec, world, bay_id)
 
     # Two directional daylight/bounce lights keep total scene lights <= 7 (under MuJoCo's 8-light
     # OpenGL shader limit including headlight) while evenly illuminating every wall and conveyor.
@@ -1150,6 +1167,7 @@ def add_cell(spec: Any, bay_id: int, latch: LatchPose) -> None:
     # EV waste battery module + pallet sitting on the conveyor belt beneath the bay's latch.
     lx, ly, _ = latch.position
     _add_battery_module(
+        spec,
         cell,
         f"{p}cell_jig",
         (lx - cx, ly - cy),
