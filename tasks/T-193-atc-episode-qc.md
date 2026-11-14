@@ -1,12 +1,12 @@
 ---
 id: T-193
 title: ATC cleaning, trimming and labelling in teleop process
-status: in_review
-owner: claude-code
-branch: feat/atc-episode-qc
+status: done
+owner: null
+branch: null
 depends_on: [T-190]
 plan: docs/superpowers/plans/2026-11-14-act-recovery-plan.md
-claimed_at: '2026-11-14T17:29:42+00:00'
+claimed_at: null
 ---
 
 `teleop process` detects ATC datasets and drops/trims/labels recovery episodes, filters by
