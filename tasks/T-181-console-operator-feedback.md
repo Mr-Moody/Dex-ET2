@@ -1,12 +1,12 @@
 ---
 id: T-181
 title: Fleet ops console operator feedback (key acks, next-step banner, key bar)
-status: in_review
-owner: ethan
-branch: feat/console-operator-feedback
+status: done
+owner: null
+branch: null
 depends_on: [T-174, T-175]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md
-claimed_at: '2026-11-14T07:17:54+00:00'
+claimed_at: null
 ---
 
 Browser key presses reach the stage but the page never says what happened. Make the console

@@ -319,3 +319,42 @@ def test_worker_survives_telemetry_error(monkeypatch: pytest.MonkeyPatch) -> Non
         worker.join(timeout=5)
     assert worker.stats.errors >= 1  # later failures may land in the back-off, also survived
     assert server.telemetry and server.frames  # recovered and kept streaming
+
+
+def test_rescue_feeds_render_the_full_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No feed hides geometry: the rescue close-ups show the hand attached to the Panda."""
+    from teleop.console import render as render_mod
+    from teleop.console.layout import FeedSpec
+
+    calls: list[dict[str, Any]] = []
+
+    class RecordingRenderer:
+        def __init__(self, model: Any, height: int, width: int) -> None:
+            self.shape = (height, width, 3)
+
+        def update_scene(self, data: Any, camera: str, **kwargs: Any) -> None:
+            calls.append({"camera": camera, **kwargs})
+
+        def render(self) -> np.ndarray:
+            return np.zeros(self.shape, dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(render_mod.mj, "Renderer", RecordingRenderer)
+    xml = """<mujoco><worldbody>
+      <camera name="bay1/top_ortho" pos="0 0 1"/><camera name="bay1/side_ortho" pos="1 0 0"/>
+      <body><freejoint/><geom size="0.1"/></body></worldbody></mujoco>"""
+    model = _mujoco.MjModel.from_xml_string(xml)
+    feeds = [
+        FeedSpec(0, "bay1/top_ortho", 1, "main", 64, 48),
+        FeedSpec(1, "bay1/side_ortho", 1, "main", 64, 48),
+    ]
+    r = FeedRenderer(model, None)
+    try:
+        frames, _ = r.render(SimSnapshot.capture(_mujoco.MjData(model), _view(1), 0.0), feeds, 0.0)
+    finally:
+        r.close()
+    assert len(frames) == 2
+    assert [c["camera"] for c in calls] == ["bay1/top_ortho", "bay1/side_ortho"]
+    assert all(c.get("scene_option") is None for c in calls)
