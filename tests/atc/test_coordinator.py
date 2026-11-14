@@ -37,6 +37,7 @@ from teleop.atc.validator import (
     GATE_ROLLOUTS,
     PERTURBATIONS_DEG,
     ApproachPlan,
+    BayRig,
     RolloutConditions,
     RolloutResult,
     SkillReplay,
@@ -503,6 +504,7 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_20_rollouts_and_bay2_clears_35de
     # 2.2 s push, wall-clock jitter under load), so assert a regression ceiling with a ~2x margin
     # rather than a target. It runs in a worker now; the sim-time deadline bounds the apply.
     assert report.elapsed_s < 20.0, f"validation gate took {report.elapsed_s:.3f}s"
+    assert report.elapsed_s < co.config.gate_deadline_s  # the gate beats its sim-time deadline
 
     # Bay 2 sits at +12 cm / +35 deg relative to Bay 1's latch frame.
     l1, l2 = co.rig(1).true_world_latch(), co.rig(2).true_world_latch()  # scene layout
@@ -795,19 +797,50 @@ def test_control_uses_estimate_not_truth(unoq, hand_spec, validator):
 
 def test_zero_sigma_reproduces_true_frame_cycles(unoq, hand_spec, validator):
     cfg = CoordinatorConfig(pose_sigma_xy_m=0.0, pose_sigma_yaw_rad=0.0)
-    co = AtcCoordinator.build(
-        unoq,
-        RecordingSink(),
-        RecordingReasoner(),
-        hand_spec=hand_spec,
-        validator=validator,
-        config=cfg,
-    )
-    for bay in (1, 2):
-        co.start_cycle(bay)
-    for _ in range(600):
-        co.tick()
-    assert co.outcome(1) == co.outcome(2) == "cleared"
+    rig = Rig(unoq, hand_spec, validator, config=cfg)  # the rig fixture closes the coordinator
+    co = rig.co
+    for _ in range(3):
+        for bay in (1, 2):
+            co.start_cycle(bay)
+        for _ in range(600):
+            co.tick()
+            if co.outcome(1) and co.outcome(2):
+                break
+        assert co.outcome(1) == co.outcome(2) == "cleared"
+        for bay in (1, 2):
+            touch = co.last_touch(bay)
+            assert touch is not None and touch.last_correction_m is not None
+            assert abs(touch.last_correction_m) < 0.0005  # exact frame: nothing to correct
+
+
+def test_same_seed_stall_rescue_gate_is_deterministic(
+    hand_spec: HandSpec, validator: SkillValidator
+) -> None:
+    def run() -> tuple[Any, Any, Any]:
+        # A fresh UNO Q node per run: its prototype library is stateful (Jam_Sig_N).
+        server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0, name="det-node").start()
+        client = UnoQClient(
+            "127.0.0.1", server.udp_port, server.tcp_port, local_server=server
+        ).connect()
+        try:
+            return _run_once(client)
+        finally:
+            client.close()
+
+    def _run_once(client: UnoQClient) -> tuple[Any, Any, Any]:
+        r = Rig(client, hand_spec, validator)
+        _rescued_rig(r)
+        report = r.co.last_report
+        assert report is not None
+        events = [(e.kind, e.bay_id, e.summary) for e in r.sink.events]
+        results = [(x.passed, x.conditions) for x in report.results]
+        return events, results, np.array(r.co.data.qpos)
+
+    ev_a, res_a, q_a = run()
+    ev_b, res_b, q_b = run()
+    assert ev_a == ev_b
+    assert res_a == res_b
+    np.testing.assert_array_equal(q_a, q_b)
 
 
 # --------------------------------------------------------------------------- touch re-localization
@@ -914,11 +947,50 @@ def test_routine_touch_target_jump_is_bounded_by_lead_plus_correction(rig: Rig) 
     assert worst <= co.config.push_lead_limit_m + abs(touch.last_correction_m)
 
 
-def test_pinned_bolt_touch_via_wrist_still_escalates(rig: Rig) -> None:  # Review Focus 3
+def _spy_stall_entry(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> list[tuple[bool, int]]:
+    """Record (touch already taken, armed) at the entry of every ``_on_stall``."""
+    co = rig.co
+    seen: list[tuple[bool, int]] = []
+    orig = co._on_stall  # pyright: ignore[reportPrivateUsage]
+
+    def spy(bay: Any, trigger: Any) -> None:
+        seen.append((co.last_touch(1) is not None, len(co.touch_events())))
+        orig(bay, trigger)
+
+    monkeypatch.setattr(co, "_on_stall", spy)
+    return seen
+
+
+def test_pinned_bolt_touch_via_wrist_still_escalates(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:  # Review Focus 3
     _rescued_rig(rig)  # a known jam prototype, so the pinned signature is refused as OOD
+    seen = _spy_stall_entry(rig, monkeypatch)
     rig.stall_bay(1, bolt_pinned=True)
     assert rig.co.state(1) == BayState.OOD_ESCALATED
-    assert rig.co.last_touch(1) is not None
+    assert seen and seen[0][0], "the wrist path must fire before the stall tick"
+    touch = rig.co.last_touch(1)
+    assert touch is not None and touch.last_correction_m is not None
+    assert touch.rejected_correction_m is None
+    assert abs(touch.last_correction_m) < 0.004  # bolt pinned at x ~ 0: a small correction
+    assert abs(rig.co.rig(1).bolt_x()) < 0.002
+
+
+def test_stall_is_itself_a_touch_when_the_wrist_never_fired(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rescued_rig(rig)
+    monkeypatch.setattr(BayRig, "wrist_push_torque", lambda self: 0.0)
+    # The pinned bolt also creeps enough to trip the encoder path; silence it so only the
+    # stall-as-touch fallback in _on_stall (still armed) can correct the estimate.
+    monkeypatch.setattr(TouchDetector, "update", lambda self, x, w: False)
+    seen = _spy_stall_entry(rig, monkeypatch)
+    rig.stall_bay(1, bolt_pinned=True)
+    assert rig.co.state(1) == BayState.OOD_ESCALATED
+    assert seen and not seen[0][0], "no touch before the stall: the wrist path is disabled"
+    touch = rig.co.last_touch(1)
+    assert touch is not None, "the stall-as-touch fallback must correct the estimate"
+    assert len(rig.co.touch_events()) > seen[0][1]
 
 
 def test_routine_standoff_clears_hook_at_3_sigma() -> None:

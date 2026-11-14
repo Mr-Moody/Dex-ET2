@@ -194,7 +194,8 @@ class BaySnapshot:
     queue_position: int | None = None  # 0 = next in the FIFO rescue queue
     active_skill_id: str | None = None
     last_match: StallMatch | None = None
-    pose_sigma_mm: float | None = None  # latch-pose estimate 1-sigma in x/y (display)
+    pose_sigma_mm: float | None = None  # push-axis 1-sigma: x/y until touched, then x (display)
+    pose_sigma_yaw_deg: float | None = None  # latch-pose estimate yaw 1-sigma (display)
     touch_correction_mm: float | None = None  # |last accepted touch correction| this cycle
 
     def __post_init__(self) -> None:

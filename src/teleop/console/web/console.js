@@ -295,7 +295,10 @@ function updateSparks(t) {
     s.row.classList.toggle("is-low", !standby && b.confidence < t.threshold);
     s.val.textContent = standby ? "–" : b.confidence.toFixed(2);
     const parts = [];
-    if (b.pose_sigma_mm != null) parts.push(`Pose est. ±${Math.round(b.pose_sigma_mm)} mm`);
+    if (b.pose_sigma_mm != null) {
+      const yaw = b.pose_sigma_yaw_deg != null ? `/±${b.pose_sigma_yaw_deg.toFixed(1)}°` : "";
+      parts.push(`Pose est. ±${Math.round(b.pose_sigma_mm)} mm${yaw}`);
+    }
     if (b.touch_correction_mm != null) parts.push(`touch-corrected ${b.touch_correction_mm.toFixed(1)} mm`);
     s.pose.textContent = parts.join(", ");
     drawSpark(s.canvas, b.history, t.threshold, css(STATE_COLOR[b.state] || "--nominal"));

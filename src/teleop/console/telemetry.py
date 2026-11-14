@@ -154,6 +154,7 @@ class TelemetryAdapter:
                 "x_bolt_cm": round(s.x_bolt_m * 100.0, 2),
                 "fault": faults.get(k),
                 "pose_sigma_mm": _finite_or_none(s.pose_sigma_mm),
+                "pose_sigma_yaw_deg": _finite_or_none(s.pose_sigma_yaw_deg),
                 "touch_correction_mm": _finite_or_none(s.touch_correction_mm),
             }
         if k in self.background:
@@ -173,6 +174,7 @@ class TelemetryAdapter:
                 "x_bolt_cm": None,
                 "fault": None,
                 "pose_sigma_mm": None,
+                "pose_sigma_yaw_deg": None,
                 "touch_correction_mm": None,
             }
         return {
@@ -188,6 +190,7 @@ class TelemetryAdapter:
             "x_bolt_cm": None,
             "fault": None,
             "pose_sigma_mm": None,
+            "pose_sigma_yaw_deg": None,
             "touch_correction_mm": None,
         }
 

@@ -273,7 +273,11 @@ def fit_rbf_dmp(
 
 
 def _content_hash(weights: FloatArray, y0: FloatArray, y_goal: FloatArray, duration: float) -> str:
-    """8-hex content address of a fit: the same demonstration always gets the same skill id."""
+    """8-hex content address of a fit: the same demonstration always gets the same skill id.
+
+    Hashes the little-endian float64 bytes of ``weights``, ``y0``, ``y_goal`` and ``duration``
+    (in that order), via SHA-1 truncated to 8 hex characters.
+    """
     h = hashlib.sha1(usedforsecurity=False)
     for arr in (weights, y0, y_goal, np.array([duration])):
         h.update(np.ascontiguousarray(arr, dtype="<f8").tobytes())

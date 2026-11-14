@@ -511,7 +511,8 @@ class AtcCoordinator:
             queue_position=queue_position,
             active_skill_id=bay.skill_id if bay.state == BayState.AUTONOMOUS_SKILL else None,
             last_match=bay.match,
-            pose_sigma_mm=bay.rig.estimate.sigma_xy_m * 1e3,
+            pose_sigma_mm=bay.rig.estimate.sigma_x_m * 1e3,
+            pose_sigma_yaw_deg=math.degrees(bay.rig.estimate.sigma_yaw_rad),
             touch_correction_mm=self._touch_mm(bay),
         )
 
@@ -585,7 +586,11 @@ class AtcCoordinator:
         bay.move = None
         bay.auto = None
         bay.buffer = None
-        bay.gate = None  # a gate still running in the worker is simply never applied
+        # A gate still running in the worker is simply never applied. It is deliberately not
+        # cancelled: whether cancel() succeeds depends on wall-clock timing (queued vs running),
+        # and the validator's state carries over between gates, so cancelling would make the
+        # next gate's result nondeterministic.
+        bay.gate = None
         bay.clutch_held = False
         bay.refused = False
         bay.match = None
@@ -828,7 +833,8 @@ class AtcCoordinator:
 
         if bay.state == BayState.NOMINAL and bay.routine_active:
             # The routine target is recomposed from the estimate every tick, so a correction
-            # lands through the push-lead clamp without an extra blend.
+            # lands through the push-lead clamp without an extra blend. The target may therefore
+            # step backward by up to the correction size in one tick (plan-sanctioned).
             if bay.touch.update(x_bolt, rig.wrist_push_torque()):
                 self._apply_touch(bay, x_bolt)
             if x_bolt >= BOLT_CLEARED_M:

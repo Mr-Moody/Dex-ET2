@@ -109,6 +109,8 @@ def _match_text(snap: BaySnapshot) -> str:
 def format_bay_row(snap: BaySnapshot) -> tuple[str, str]:
     skill = f"  {snap.active_skill_id}" if snap.active_skill_id else ""
     pose = f"  pose ±{snap.pose_sigma_mm:.0f} mm" if snap.pose_sigma_mm is not None else ""
+    if pose and snap.pose_sigma_yaw_deg is not None:
+        pose += f"/±{snap.pose_sigma_yaw_deg:.1f}°"
     touch = (
         f"  touch {snap.touch_correction_mm:.1f} mm" if snap.touch_correction_mm is not None else ""
     )

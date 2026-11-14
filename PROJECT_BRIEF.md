@@ -105,11 +105,12 @@ For the experts in the audience. One line each:
   with the latch and correct the pose by touch (about 1 mm). Replay uses a touch offset
   calibrated from the demonstration.
 - **Randomized gate:** a learned skill must pass at least 18 of 20 rollouts with randomized
-  latch pose, estimate error, flap stiffness and rest angle, friction (plus or minus 25%) and
-  jam, before it is shared with the fleet.
+  latch pose, estimate error, flap stiffness and rest angle (the jam is varied through the
+  rest angle and stiffness) and friction (plus or minus 25%), before it is shared with the fleet.
 
 Honesty note: the scripted show runs at the fixed `STAGE_SEED` 0 and passes its gate 18/20
 there. Only 1 of seeds 0-9 passes the full show config, which is why the seed is pinned. The
-scripted demo skill's pooled per-rollout pass rate is about 70% across seeds 0-9, so the
+scripted demo skill's pooled per-rollout pass rate is about 65% (103 of 160 rollouts over
+the 8 seeds that reach the gate; 2 of 10 seeds fail before it), so the
 robustness claim is "every deployed skill passed at least 18/20 randomized trials", not "every
 demo passes".

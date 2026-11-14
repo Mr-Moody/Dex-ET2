@@ -597,6 +597,11 @@ class SkillValidator:
                 ids.append(g)
         return np.asarray(ids, dtype=np.int64)
 
+    @property
+    def nominal_springref_deg(self) -> float:
+        """The flap's unrandomized rest angle (deg); the gate draws offsets around it."""
+        return self._nominal_springref_deg
+
     def draw_conditions(self, skill_id: str) -> tuple[RolloutConditions, ...]:
         """The gate's randomized conditions, seeded by ``(seed, crc32(skill_id))``."""
         rng = np.random.default_rng((self.seed, zlib.crc32(skill_id.encode("utf-8"))))
@@ -649,7 +654,8 @@ class SkillValidator:
 
         Restores the dynamic state (``qpos``, ``qvel``, ``act``, ``ctrl``, the warmstart, the
         equality toggles and the time) captured after the ready move, re-derives everything
-        else with ``mj_forward`` and resets the IK's commanded-joint memory.
+        else with ``mj_forward`` and resets the IK's commanded-joint memory. The latch body pose
+        is not part of this state: ``set_world_latch`` sets it per rollout.
         """
         m, d = self.model, self.data
         for f, v in self._ready_state.items():

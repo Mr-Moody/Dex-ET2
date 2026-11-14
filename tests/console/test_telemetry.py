@@ -238,9 +238,18 @@ def test_armed_faults_and_bolt_travel_per_bay() -> None:
 
 def test_telemetry_bay_carries_pose_estimate_fields() -> None:
     snap = BaySnapshot(
-        1, BayState.NOMINAL, 0.9, 0.0, 0.0, SKU, pose_sigma_mm=3.0, touch_correction_mm=4.2
+        1,
+        BayState.NOMINAL,
+        0.9,
+        0.0,
+        0.0,
+        SKU,
+        pose_sigma_mm=3.0,
+        pose_sigma_yaw_deg=1.5,
+        touch_correction_mm=4.2,
     )
     entry = _adapter()._bay_entry(1, {1: snap}, {})
+    assert entry["pose_sigma_yaw_deg"] == 1.5
     assert entry["pose_sigma_mm"] == 3.0 and entry["touch_correction_mm"] == 4.2
 
 
@@ -254,11 +263,11 @@ def test_touch_and_gate_lines_reach_the_event_log() -> None:
         total=20,
         ok=False,
         elapsed_s=2.0,
-        conditions="randomized pose, friction, spring, jam",
+        conditions="randomized pose, friction, flap spring and rest angle",
         worst_failure="failed at +23% friction, 2.8 mm y error",
     )
     msg = a.build(_view(touched, gate=gate), 3.0, GRID, {})
     texts = [e["text"] for e in msg["events"]]  # type: ignore[index]
     assert "Bay 1 touched latch: pose corrected 3.1 mm" in texts
     assert any("17/20" in t and "failed at +23% friction, 2.8 mm y error" in t for t in texts)
-    assert msg["gate"]["conditions"] == "randomized pose, friction, spring, jam"  # type: ignore[index]
+    assert msg["gate"]["conditions"] == "randomized pose, friction, flap spring and rest angle"  # type: ignore[index]

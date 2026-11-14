@@ -388,18 +388,21 @@ class ReasonerTap:
 # --------------------------------------------------------------------------- controller
 
 
-GATE_CONDITIONS = "randomized pose, friction, spring, jam"
+GATE_CONDITIONS = "randomized pose, friction, flap spring and rest angle"
 
 # Half-range of each randomized condition, to rank which failing rollout condition was the most
 # extreme: friction +-25%, flap stiffness +-20%, springref +-3 deg, y error 3 mm, yaw 1.5 deg.
 _COND_SCALE = (0.25, 0.20, 3.0, 3.0, 1.5)
 
 
-def worst_failure(report: ValidationReport | None) -> str | None:
+def worst_failure(
+    report: ValidationReport | None, nominal_springref_deg: float = 0.0
+) -> str | None:
     """Plain-words most extreme condition across the failed rollouts, or ``None`` if none failed.
 
     Deterministic: ranks each condition by its value over the randomized half-range and takes
-    the largest (first one wins a tie), e.g. ``"failed at +23% friction, 2.8 mm y error"``.
+    the largest (first one wins a tie), e.g. ``"failed at +23% friction, 2.8 mm y error"``. The
+    flap rest angle is ranked by its offset from ``nominal_springref_deg`` (the model's rest angle).
     """
     if report is None:
         return None
@@ -411,7 +414,7 @@ def worst_failure(report: ValidationReport | None) -> str | None:
         parts = (
             (c.friction_scale - 1.0) * 100.0,
             (c.flap_stiffness_scale - 1.0) * 100.0,
-            c.flap_springref_deg,
+            c.flap_springref_deg - nominal_springref_deg,
             abs(c.est_error[1]) * 1e3,
             abs(math.degrees(c.est_error[2])),
         )
@@ -718,7 +721,9 @@ class StageController:
                 elapsed_s=float(meta.get("elapsed_s", math.nan)),
                 ok=bool(meta.get("passed")),
                 conditions=GATE_CONDITIONS,
-                worst_failure=worst_failure(self.coordinator.last_report),
+                worst_failure=worst_failure(
+                    self.coordinator.last_report, self.coordinator.validator.nominal_springref_deg
+                ),
             )
         if self.audio is not None:
             self.audio.on_event(event)

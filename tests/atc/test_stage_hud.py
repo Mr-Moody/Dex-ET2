@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -24,8 +25,10 @@ from teleop.atc.stage import (
     AudioCues,
     StageAction,
     merge_console,
+    worst_failure,
 )
 from teleop.atc.types import BaySnapshot, BayState, ConsoleInputState, StallMatch
+from teleop.atc.validator import RolloutConditions, RolloutResult, ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, make_event
 from teleop.reasoning.protocol import ReasoningContext, ReasoningVerdict
 from teleop.sim.bays import PANDA_XML
@@ -310,6 +313,32 @@ def test_atc_command_headless_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert rc == 0
 
 
+def _report(*rollouts: tuple[bool, RolloutConditions]) -> ValidationReport:
+    results = tuple(
+        RolloutResult((0.0, 0.0, 0.0), 0.03, 1.0, 0.1, True, ok, ok, cond) for ok, cond in rollouts
+    )
+    return ValidationReport(results, 1.0)
+
+
+def test_worst_failure_ranks_offset_from_nominal_not_absolute_rest_angle() -> None:
+    nominal = 35.0
+    cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0029, 0.0), 1.0, nominal, 1.0)
+    stiff = dataclasses.replace(cond, flap_stiffness_scale=1.24)
+    for c, want in ((stiff, "+24% flap stiffness"), (cond, "2.9 mm y error")):
+        got = worst_failure(_report((False, c)), nominal)
+        assert got is not None and want in got and "rest angle" not in got
+    both = dataclasses.replace(cond, flap_stiffness_scale=1.24)
+    got = worst_failure(_report((False, both)), nominal)
+    assert got is not None and ("stiffness" in got or "y error" in got)
+
+
+def test_worst_failure_none_without_failures() -> None:
+    cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
+    assert worst_failure(_report((True, cond)), 35.0) is None
+    assert worst_failure(_report(), 35.0) is None
+    assert worst_failure(None, 35.0) is None
+
+
 def test_format_gate_shows_randomized_pass_count() -> None:
     g = GateStatus(
         fit_ms=12.0,
@@ -317,9 +346,9 @@ def test_format_gate_shows_randomized_pass_count() -> None:
         total=20,
         elapsed_s=3.1,
         ok=True,
-        conditions="randomized pose, friction, spring, jam",
+        conditions="randomized pose, friction, flap spring and rest angle",
     )
-    assert "19/20 PASS (randomized pose, friction, spring, jam)" in format_gate(g)
+    assert "19/20 PASS (randomized pose, friction, flap spring and rest angle)" in format_gate(g)
 
 
 def test_bay_row_shows_pose_sigma_and_touch_correction() -> None:
@@ -331,10 +360,11 @@ def test_bay_row_shows_pose_sigma_and_touch_correction() -> None:
         0.0,
         "ev_latch_v1",
         pose_sigma_mm=3.0,
+        pose_sigma_yaw_deg=1.5,
         touch_correction_mm=4.2,
     )
     _, value = format_bay_table(HudView(bays=(snap,), queue=()))
-    assert "pose ±3 mm" in value and "touch 4.2 mm" in value
+    assert "pose ±3 mm/±1.5°" in value and "touch 4.2 mm" in value
     bare = BaySnapshot(1, BayState.NOMINAL, 0.9, 0.0, 0.0, "ev_latch_v1", pose_sigma_mm=3.0)
     _, value = format_bay_table(HudView(bays=(bare,), queue=()))
     assert "pose ±3 mm" in value and "touch" not in value
