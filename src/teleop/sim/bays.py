@@ -29,13 +29,13 @@ mj: Any = _mujoco
 
 PANDA_XML = REPO_ROOT / "third_party" / "menagerie" / "franka_emika_panda" / "panda_nohand.xml"
 
-# 4 m apart on a 2x2 grid: each bay sits in its own walled cell (``teleop.sim.cells``), so no
-# bay's CCTV camera can see another bay.
+# Spread across the recycling warehouse on a 6.4 m x 6.8 m grid so each bay sits on its own
+# segmented conveyor line with dedicated infeed/outfeed machines and wide logistics aisles.
 BAY_BASES: dict[int, tuple[float, float, float]] = {
-    1: (-2.0, -2.0, 0.0),
-    2: (2.0, -2.0, 0.0),
-    3: (-2.0, 2.0, 0.0),
-    4: (2.0, 2.0, 0.0),
+    1: (-3.2, -3.4, 0.0),
+    2: (3.2, -3.4, 0.0),
+    3: (-3.2, 3.4, 0.0),
+    4: (3.2, 3.4, 0.0),
 }
 ACTIVE_BAYS = (1, 2)
 BACKGROUND_BAYS = (3, 4)
@@ -166,7 +166,7 @@ def _new_spec(name: str) -> Any:
     world.add_geom(
         name="floor",
         type=mj.mjtGeom.mjGEOM_PLANE,
-        size=[7.0, 7.0, 0.1],
+        size=[14.0, 14.0, 0.1],
         rgba=[0.32, 0.34, 0.38, 1.0],
         friction=[1.0, 0.005, 0.0001],
     )
@@ -276,9 +276,9 @@ def _add_bay(spec: Any, bay_id: int, local_latch: LatchPose, *, collide: bool) -
 
 
 def _add_overview_camera(spec: Any, include_background: bool) -> None:
-    """Elevated mezzanine view across the battery-recycling warehouse and twin conveyors."""
-    target = (0.45, 0.15 if include_background else -1.8, -0.05)
-    pos = (0.45, -5.85, 3.45 if include_background else 2.65)
+    """Elevated mezzanine view across the battery-recycling warehouse and 4 conveyor cells."""
+    target = (0.45, 0.20 if include_background else -3.0, -0.05)
+    pos = (0.45, -8.25, 4.35 if include_background else 3.20)
     spec.worldbody.add_camera(
         name=OVERVIEW_CAMERA, pos=list(pos), xyaxes=look_at_xyaxes(pos, target), fovy=56.0
     )

@@ -32,29 +32,30 @@ mj: Any = _mujoco
 
 CELL_HALF_M = 1.5
 CELL_OFFSET_X_M = 0.3
-WALL_HEIGHT_M = 4.60
+WALL_HEIGHT_M = 5.00
 
 WAREHOUSE_FLOOR_Z = -0.75
-WAREHOUSE_ROOF_Z = 4.60
-WAREHOUSE_BOUNDS: tuple[float, float, float, float] = (-5.80, 6.60, -6.40, 6.40)
+WAREHOUSE_ROOF_Z = 5.00
+WAREHOUSE_BOUNDS: tuple[float, float, float, float] = (-8.80, 9.40, -8.80, 8.80)
 
 CONVEYOR_BAYS: tuple[int, ...] = (1, 2, 3, 4)
-# Dedicated segmented conveyor belt X position per bay (aligned under each bay's latch).
-BAY_CONVEYOR_X: dict[int, float] = {1: -1.50, 2: 2.54, 3: -1.50, 4: 2.54}
-CONVEYOR_HALF_LEN_M = 1.48  # 2.96 m per independent belt segment; clear 1.04 m aisle between S/N
+CONVEYOR_HALF_LEN_M = 1.96  # belt runs between the feeder (-2.12..-1.12) and extractor (+1.12..+2.12)
 CONVEYOR_BED_HALF_W_M = 0.27
 CONVEYOR_TOP_Z = -0.052
 CONVEYOR_CLEAT_PITCH_M = 0.28
-CONVEYOR_SPEED_M_S = 0.08
-CONVEYOR_FEED_TRAVEL_M = 0.14  # incoming pack travel before arm descends onto the station
+PACK_PITCH_M = 0.84  # exact 3x cleat pitch -> seamless modular conveyor loop
+CONVEYOR_SPEED_M_S = 0.22  # calm ~0.22 m/s indexing speed (3.8 s per full pack pitch)
+CONVEYOR_FEED_TRAVEL_M = PACK_PITCH_M
 BEACON_FEED_RGBA = (0.18, 0.86, 0.45, 1.0)
 BEACON_PAUSE_RGBA = (0.95, 0.72, 0.08, 1.0)
 BEACON_ESTOP_RGBA = (0.94, 0.16, 0.16, 1.0)
 
 CCTV_SUFFIX = "cctv"
-CCTV_POS_M = (1.30, -1.32, 0.96)
-CCTV_TARGET_M = (0.28, 0.18, 0.20)
-CCTV_FOVY_DEG = 55.0
+# Balanced workstation framing: full Panda headroom + both feeder & extractor mouths on the belt,
+# with arm, hand and latch as the clear foreground focus.
+CCTV_POS_M = (1.18, -1.28, 0.94)
+CCTV_TARGET_M = (0.36, 0.02, 0.22)
+CCTV_FOVY_DEG = 54.0
 
 CONCRETE_RGB1 = (0.43, 0.47, 0.45)
 CONCRETE_RGB2 = (0.38, 0.42, 0.40)
@@ -271,10 +272,122 @@ def _add_battery_module(
         )
 
 
+def _add_conveyor_machine(
+    conv: Any,
+    tag: str,
+    role: str,
+    y_center: float,
+    mouth_dir: float,
+    bed_w: float,
+) -> None:
+    """Hollow industrial feeder (role='feeder') or extractor (role='extractor') machine box."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    cyl = mj.mjtGeom.mjGEOM_CYLINDER
+    z0 = WAREHOUSE_FLOOR_Z
+    half_len = 0.50
+    wall_w = 0.06
+    inner_x = bed_w + 0.055
+    outer_x = inner_x + 2 * wall_w
+    top_z = 0.48 if role == "feeder" else 0.54
+    mouth_y = y_center + mouth_dir * half_len
+    back_y = y_center - mouth_dir * (half_len - 0.03)
+    body_rgba = [0.22, 0.27, 0.28, 1.0] if role == "extractor" else [0.23, 0.34, 0.30, 1.0]
+
+    base_top = CONVEYOR_TOP_Z - 0.05
+    _visual(
+        conv.add_geom(
+            name=f"conveyor_{tag}_{role}_base",
+            type=box,
+            size=[outer_x, half_len, 0.5 * (base_top - z0)],
+            pos=[0.0, y_center, 0.5 * (base_top + z0)],
+            rgba=list(STEEL_DARK_RGBA),
+        )
+    )
+    side_hz = 0.5 * (top_z - base_top)
+    side_cz = 0.5 * (top_z + base_top)
+    for s_tag, sx in (("l", -1.0), ("r", 1.0)):
+        _visual(
+            conv.add_geom(
+                name=f"conveyor_{tag}_{role}_side_{s_tag}",
+                type=box,
+                size=[wall_w, half_len, side_hz],
+                pos=[sx * (inner_x + wall_w), y_center, side_cz],
+                rgba=body_rgba,
+            )
+        )
+    _visual(
+        conv.add_geom(
+            name=f"conveyor_{tag}_{role}_back",
+            type=box,
+            size=[outer_x, 0.03, side_hz],
+            pos=[0.0, back_y, side_cz],
+            rgba=body_rgba,
+        )
+    )
+    hood_bot = 0.14
+    _visual(
+        conv.add_geom(
+            name=f"conveyor_{tag}_{role}_hood",
+            type=box,
+            size=[outer_x, half_len, 0.5 * (top_z - hood_bot)],
+            pos=[0.0, y_center, 0.5 * (top_z + hood_bot)],
+            rgba=body_rgba,
+        )
+    )
+    _visual(
+        conv.add_geom(
+            name=f"conveyor_{tag}_{role}_trim",
+            type=box,
+            size=[outer_x + 0.01, 0.025, 0.045],
+            pos=[0.0, mouth_y, top_z - 0.05],
+            rgba=list(ECO_BRIGHT_RGBA if role == "feeder" else BIN_BLUE_RGBA),
+        )
+    )
+    _visual(
+        conv.add_geom(
+            name=f"conveyor_{tag}_{role}_lintel",
+            type=box,
+            size=[inner_x + 0.02, 0.018, 0.016],
+            pos=[0.0, mouth_y, hood_bot - 0.01],
+            rgba=list(STEEL_BRUSHED_RGBA),
+        )
+    )
+    for c_i, cx in enumerate(np.linspace(-bed_w + 0.04, bed_w - 0.04, 5)):
+        _visual(
+            conv.add_geom(
+                name=f"conveyor_{tag}_{role}_curtain_{c_i}",
+                type=box,
+                size=[0.038, 0.004, 0.042],
+                pos=[float(cx), mouth_y - mouth_dir * 0.01, 0.092],
+                rgba=[0.14, 0.17, 0.18, 0.88],
+            )
+        )
+    if role == "extractor":
+        _visual(
+            conv.add_geom(
+                name=f"conveyor_{tag}_extractor_duct",
+                type=cyl,
+                size=[0.075, 0.18, 0.0],
+                pos=[0.0, y_center + 0.08, top_z + 0.18],
+                rgba=list(STEEL_BRUSHED_RGBA),
+            )
+        )
+    for b_tag, sx in (("l", -1.0), ("r", 1.0)):
+        _visual(
+            conv.add_geom(
+                name=f"conveyor_{tag}_{role}_bollard_{b_tag}",
+                type=cyl,
+                size=[0.032, 0.24, 0.0],
+                pos=[sx * (outer_x + 0.08), back_y - mouth_dir * 0.08, z0 + 0.24],
+                rgba=list(SAFETY_YELLOW),
+            )
+        )
+
+
 def _add_bay_conveyor(world: Any, bay_id: int) -> None:
-    """Add one independent segmented conveyor belt dedicated to ``bay_id``."""
+    """Add one independent segmented conveyor belt + infeed/outfeed machines for ``bay_id``."""
     bx, by, _ = _bases()[bay_id]
-    lx = BAY_CONVEYOR_X[bay_id]
+    lx = bx + (0.54 if bay_id == 2 else 0.50)
     box = mj.mjtGeom.mjGEOM_BOX
     cyl = mj.mjtGeom.mjGEOM_CYLINDER
     tag = f"bay{bay_id}"
@@ -311,7 +424,7 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
             conv.add_geom(
                 name=f"conveyor_{tag}_rail_{side_tag}",
                 type=box,
-                size=[0.024, half_y + 0.04, 0.032],
+                size=[0.024, half_y, 0.032],
                 pos=[sx * rail_dx, 0.0, CONVEYOR_TOP_Z - 0.014],
                 rgba=list(ECO_GREEN_RGBA),
             )
@@ -320,13 +433,12 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
             conv.add_geom(
                 name=f"conveyor_{tag}_stripe_{side_tag}",
                 type=box,
-                size=[0.003, half_y + 0.04, 0.007],
+                size=[0.003, half_y, 0.007],
                 pos=[sx * (rail_dx + 0.025), 0.0, CONVEYOR_TOP_Z - 0.008],
                 rgba=list(SAFETY_YELLOW),
             )
         )
 
-    # Motor housing + E-stop / feeding status beacon mounted on the outer conveyor rail.
     beacon_sx = -1.0 if bx < 0.0 else 1.0
     beacon_x = beacon_sx * (rail_dx + 0.065)
     _visual(
@@ -358,24 +470,13 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
     )
 
     q_x = _axis_quat_x()
-    for end_tag, ey in (("south", -half_y), ("north", half_y)):
-        _visual(
-            conv.add_geom(
-                name=f"conveyor_{tag}_drum_{end_tag}",
-                type=cyl,
-                size=[0.036, bed_w + 0.02, 0.0],
-                pos=[0.0, ey, CONVEYOR_TOP_Z - 0.018],
-                quat=q_x,
-                rgba=list(STEEL_BRUSHED_RGBA),
-            )
-        )
-    for r_i, ry in enumerate(np.linspace(-half_y + 0.35, half_y - 0.35, 5)):
+    for r_i, ry in enumerate((-0.90, -0.45, 0.0, 0.45, 0.90)):
         _visual(
             conv.add_geom(
                 name=f"conveyor_{tag}_roller_{r_i}",
                 type=cyl,
                 size=[0.018, bed_w - 0.01, 0.0],
-                pos=[0.0, float(ry), CONVEYOR_TOP_Z - 0.044],
+                pos=[0.0, ry, CONVEYOR_TOP_Z - 0.044],
                 quat=q_x,
                 rgba=list(STEEL_BRUSHED_RGBA),
             )
@@ -384,7 +485,7 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
     leg_top = CONVEYOR_TOP_Z - 0.046
     leg_hz = 0.5 * (leg_top - WAREHOUSE_FLOOR_Z)
     leg_cz = 0.5 * (leg_top + WAREHOUSE_FLOOR_Z)
-    for l_i, ly in enumerate((-half_y + 0.20, 0.0, half_y - 0.20)):
+    for l_i, ly in enumerate((-0.88, 0.0, 0.88)):
         for side_tag, sx in (("l", -1.0), ("r", 1.0)):
             _visual(
                 conv.add_geom(
@@ -405,12 +506,23 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
             )
         )
 
-    # Upstream queued pack & downstream disassembled pack riding this bay's segmented belt.
-    yaw = 0.25 if bay_id == 2 else 0.0
+    # Upstream Feeder Machine (belt comes out) and downstream Extractor Machine (belt goes in).
+    _add_conveyor_machine(conv, tag, "feeder", -1.62, 1.0, bed_w)
+    _add_conveyor_machine(conv, tag, "extractor", 1.62, -1.0, bed_w)
+
+    yaw = math.radians(35.0) if bay_id == 2 else 0.0
+    _add_battery_module(
+        conv,
+        f"conveyor_{tag}_in2",
+        (0.0, -2.0 * PACK_PITCH_M),
+        yaw,
+        disassembled=False,
+        with_dummy_latch=True,
+    )
     _add_battery_module(
         conv,
         f"conveyor_{tag}_in",
-        (0.0, -0.92),
+        (0.0, -PACK_PITCH_M),
         yaw,
         disassembled=False,
         with_dummy_latch=True,
@@ -418,7 +530,7 @@ def _add_bay_conveyor(world: Any, bay_id: int) -> None:
     _add_battery_module(
         conv,
         f"conveyor_{tag}_out",
-        (0.0, 0.92),
+        (0.0, PACK_PITCH_M),
         yaw,
         disassembled=True,
         with_dummy_latch=True,
@@ -636,7 +748,7 @@ def _add_warehouse_shell(spec: Any, wh: Any) -> None:
         )
     )
 
-    for tag, lx in (("w", -1.50), ("e", 2.54)):
+    for tag, lx in (("w", -2.70), ("e", 3.74)):
         for ptag, py in (("infeed", y0 + 0.02), ("outfeed", y1 - 0.02)):
             _visual(
                 wh.add_geom(
@@ -658,6 +770,108 @@ def _add_warehouse_shell(spec: Any, wh: Any) -> None:
             )
 
 
+def _add_pallet_rack(parent: Any, prefix: str, rx: float, ry: float) -> None:
+    """Multi-tier industrial warehouse storage rack stocked with battery crates & eco-totes."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    z0 = WAREHOUSE_FLOOR_Z
+    rack_h = 2.50
+    half_x, half_y = 0.42, 1.15
+    for u_i, (ux, uy) in enumerate(
+        ((-half_x, -half_y), (-half_x, half_y), (half_x, -half_y), (half_x, half_y))
+    ):
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_upright_{u_i}",
+                type=box,
+                size=[0.035, 0.035, 0.5 * rack_h],
+                pos=[rx + ux, ry + uy, z0 + 0.5 * rack_h],
+                rgba=[0.18, 0.30, 0.42, 1.0],
+            )
+        )
+    crate_colors = (BATTERY_CASE_RGBA, BIN_GREEN_RGBA, BIN_BLUE_RGBA, BIN_AMBER_RGBA)
+    for tier_i, tz in enumerate((z0 + 0.14, z0 + 1.02, z0 + 1.90)):
+        for b_tag, sx in (("l", -half_x), ("r", half_x)):
+            _visual(
+                parent.add_geom(
+                    name=f"{prefix}_beam_{tier_i}_{b_tag}",
+                    type=box,
+                    size=[0.025, half_y, 0.04],
+                    pos=[rx + sx, ry, tz],
+                    rgba=[0.90, 0.46, 0.10, 1.0],
+                )
+            )
+        _visual(
+            parent.add_geom(
+                name=f"{prefix}_deck_{tier_i}",
+                type=box,
+                size=[half_x - 0.02, half_y - 0.04, 0.015],
+                pos=[rx, ry, tz + 0.03],
+                rgba=list(TIMBER_RGBA),
+            )
+        )
+        for slot_i, sy in enumerate((-0.58, 0.58)):
+            _visual(
+                parent.add_geom(
+                    name=f"{prefix}_crate_{tier_i}_{slot_i}",
+                    type=box,
+                    size=[0.30, 0.38, 0.22],
+                    pos=[rx, ry + sy, tz + 0.26],
+                    rgba=list(crate_colors[(tier_i + slot_i) % len(crate_colors)]),
+                )
+            )
+
+
+def _add_agv_cart(parent: Any, prefix: str, ax: float, ay: float) -> None:
+    """Low-profile warehouse AGV / pallet jack carrying a spent EV battery crate."""
+    box = mj.mjtGeom.mjGEOM_BOX
+    z0 = WAREHOUSE_FLOOR_Z
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_chassis",
+            type=box,
+            size=[0.38, 0.56, 0.075],
+            pos=[ax, ay, z0 + 0.11],
+            rgba=[0.18, 0.22, 0.23, 1.0],
+        )
+    )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_bumper",
+            type=box,
+            size=[0.395, 0.575, 0.022],
+            pos=[ax, ay, z0 + 0.06],
+            rgba=list(SAFETY_YELLOW),
+        )
+    )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_pallet",
+            type=box,
+            size=[0.34, 0.46, 0.03],
+            pos=[ax, ay, z0 + 0.215],
+            rgba=list(TIMBER_RGBA),
+        )
+    )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_load",
+            type=box,
+            size=[0.30, 0.40, 0.16],
+            pos=[ax, ay, z0 + 0.405],
+            rgba=list(BATTERY_CASE_RGBA),
+        )
+    )
+    _visual(
+        parent.add_geom(
+            name=f"{prefix}_led",
+            type=box,
+            size=[0.24, 0.012, 0.015],
+            pos=[ax, ay - 0.57, z0 + 0.14],
+            rgba=list(ECO_BRIGHT_RGBA),
+        )
+    )
+
+
 def add_warehouse(spec: Any, include_background: bool = True) -> None:
     """Build the shared sustainable battery-recycling warehouse and twin conveyor lines."""
     world = spec.worldbody
@@ -675,13 +889,13 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
     wh = world.add_body(name="warehouse/shell", pos=[0.0, 0.0, 0.0])
     _add_warehouse_shell(spec, wh)
 
-    for c_i, col_y in enumerate((-5.6, -1.9, 1.9, 5.6)):
-        for side_tag, col_x in (("w", x0 + 0.12), ("e", x1 - 0.12)):
+    for c_i, col_y in enumerate((-7.2, -2.4, 2.4, 7.2)):
+        for side_tag, col_x in (("w", x0 + 0.14), ("e", x1 - 0.14)):
             _visual(
                 wh.add_geom(
                     name=f"warehouse/timber_col_{side_tag}_{c_i}",
                     type=box,
-                    size=[0.11, 0.11, 0.5 * wall_h],
+                    size=[0.12, 0.12, 0.5 * wall_h],
                     pos=[col_x, col_y, wall_cz],
                     rgba=list(TIMBER_RGBA),
                 )
@@ -690,7 +904,7 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
             wh.add_geom(
                 name=f"warehouse/timber_beam_{c_i}",
                 type=box,
-                size=[hx, 0.09, 0.14],
+                size=[hx, 0.10, 0.15],
                 pos=[cx, col_y, z_roof - 0.22],
                 rgba=list(TIMBER_RGBA),
             )
@@ -699,8 +913,8 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
             wh.add_geom(
                 name=f"warehouse/skylight_{c_i}",
                 type=box,
-                size=[hx * 0.82, 0.55, 0.02],
-                pos=[cx, col_y + 0.9, z_roof - 0.05],
+                size=[hx * 0.84, 0.62, 0.02],
+                pos=[cx, col_y + 1.0, z_roof - 0.05],
                 rgba=list(SKYLIGHT_RGBA),
             )
         )
@@ -708,24 +922,23 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
             wh.add_geom(
                 name=f"warehouse/solar_pv_{c_i}",
                 type=box,
-                size=[hx * 0.72, 0.36, 0.02],
-                pos=[cx, col_y - 0.85, z_roof - 0.03],
+                size=[hx * 0.74, 0.40, 0.02],
+                pos=[cx, col_y - 0.95, z_roof - 0.03],
                 rgba=list(SOLAR_PV_RGBA),
             )
         )
 
-    for g_i, gx in enumerate((-3.8, 0.42, 4.5)):
+    for g_i, gx in enumerate((-5.6, 0.42, 6.2)):
         _add_living_green_wall(
-            wh, f"warehouse/greenwall_n_{g_i}", (gx, y1 - 0.04, 1.25), (1.05, 0.03, 0.72)
+            wh, f"warehouse/greenwall_n_{g_i}", (gx, y1 - 0.04, 1.35), (1.35, 0.03, 0.82)
         )
-    # Sunlit mullioned eco-windows flanking the living walls on North and East walls.
-    for w_i, wx in enumerate((-1.65, 2.45)):
+    for w_i, wx in enumerate((-2.6, 3.3)):
         _visual(
             wh.add_geom(
                 name=f"warehouse/window_n_{w_i}_frame",
                 type=box,
-                size=[0.66, 0.03, 0.62],
-                pos=[wx, y1 - 0.03, 1.85],
+                size=[0.90, 0.03, 0.72],
+                pos=[wx, y1 - 0.03, 1.95],
                 rgba=list(TIMBER_RGBA),
             )
         )
@@ -733,18 +946,18 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
             wh.add_geom(
                 name=f"warehouse/window_n_{w_i}_glass",
                 type=box,
-                size=[0.60, 0.035, 0.56],
-                pos=[wx, y1 - 0.04, 1.85],
+                size=[0.82, 0.035, 0.64],
+                pos=[wx, y1 - 0.04, 1.95],
                 rgba=list(SKYLIGHT_RGBA),
             )
         )
-    for w_i, wy in enumerate((-1.9, 1.9)):
+    for w_i, wy in enumerate((-2.6, 2.6)):
         _visual(
             wh.add_geom(
                 name=f"warehouse/window_e_{w_i}_frame",
                 type=box,
-                size=[0.03, 0.66, 0.62],
-                pos=[x1 - 0.03, wy, 1.85],
+                size=[0.03, 0.90, 0.72],
+                pos=[x1 - 0.03, wy, 1.95],
                 rgba=list(TIMBER_RGBA),
             )
         )
@@ -752,35 +965,41 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
             wh.add_geom(
                 name=f"warehouse/window_e_{w_i}_glass",
                 type=box,
-                size=[0.035, 0.60, 0.56],
-                pos=[x1 - 0.04, wy, 1.85],
+                size=[0.035, 0.82, 0.64],
+                pos=[x1 - 0.04, wy, 1.95],
                 rgba=list(SKYLIGHT_RGBA),
             )
         )
-    # Circular-economy green recycling emblem flanking the central North green wall.
     for s_i, (ang_deg, dx, dz) in enumerate(
-        ((0.0, 0.0, 2.38), (60.0, -0.26, 2.68), (-60.0, 0.26, 2.68))
+        ((0.0, 0.0, 2.55), (60.0, -0.28, 2.86), (-60.0, 0.28, 2.86))
     ):
         rad = math.radians(ang_deg)
         _visual(
             wh.add_geom(
                 name=f"warehouse/eco_emblem_{s_i}",
                 type=box,
-                size=[0.24, 0.025, 0.055],
+                size=[0.26, 0.025, 0.06],
                 pos=[aisle_x + dx, y1 - 0.03, dz],
                 quat=[math.cos(0.5 * rad), 0.0, math.sin(0.5 * rad), 0.0],
                 rgba=list(ECO_BRIGHT_RGBA),
             )
         )
-    for g_i, gy in enumerate((-3.8, 0.0, 3.8)):
+    for g_i, gy in enumerate((-5.8, 0.0, 5.8)):
         _add_living_green_wall(
-            wh, f"warehouse/greenwall_e_{g_i}", (x1 - 0.04, gy, 1.25), (0.03, 1.05, 0.72)
+            wh, f"warehouse/greenwall_e_{g_i}", (x1 - 0.04, gy, 1.35), (0.03, 1.20, 0.80)
         )
         _add_living_green_wall(
-            wh, f"warehouse/greenwall_w_{g_i}", (x0 + 0.04, gy, 1.25), (0.03, 0.95, 0.68)
+            wh, f"warehouse/greenwall_w_{g_i}", (x0 + 0.04, gy, 1.35), (0.03, 1.15, 0.76)
         )
 
-    for p_i, py in enumerate((-4.4, 4.4)):
+    # Perimeter industrial storage racking + central logistics AGVs & sorting islands.
+    for r_i, ry in enumerate((-4.8, 4.8)):
+        _add_pallet_rack(wh, f"warehouse/rack_w_{r_i}", x0 + 0.85, ry)
+        _add_pallet_rack(wh, f"warehouse/rack_e_{r_i}", x1 - 0.85, ry)
+    _add_agv_cart(wh, "warehouse/agv_s", aisle_x + 0.85, -5.2)
+    _add_agv_cart(wh, "warehouse/agv_n", aisle_x - 0.85, 5.2)
+
+    for p_i, py in enumerate((-6.2, 6.2)):
         _visual(
             wh.add_geom(
                 name=f"warehouse/planter_box_{p_i}",
@@ -809,10 +1028,10 @@ def add_warehouse(spec: Any, include_background: bool = True) -> None:
             )
         )
 
-    _add_recycling_bins(wh, "warehouse/island_s", aisle_x, -2.1)
-    _add_recycling_bins(wh, "warehouse/island_n", aisle_x, 2.1)
+    _add_recycling_bins(wh, "warehouse/island_s", aisle_x, -3.4)
+    _add_recycling_bins(wh, "warehouse/island_n", aisle_x, 3.4)
 
-    for b_i, by in enumerate((-2.0, 2.0)):
+    for b_i, by in enumerate((-1.4, 1.4)):
         _visual(
             wh.add_geom(
                 name=f"warehouse/bess_cab_{b_i}",
@@ -955,10 +1174,10 @@ def add_cell(spec: Any, bay_id: int, latch: LatchPose) -> None:
         exponent=1.6,
     )
 
-    # Angle West-line cameras (bx < 0) inward (+X/+Y) and East-line cameras (bx > 0) inward (-X/+Y)
-    # so every station camera frames its own arm + conveyor in front and the wider warehouse behind.
-    cam_offset = (-0.98, -1.28, 0.94) if bx < 0.0 else CCTV_POS_M
-    tgt_offset = (0.38, 0.16, 0.18) if bx < 0.0 else CCTV_TARGET_M
+    # Tight workstation camera framing: arm, hand, latch and conveyor belt stay the foreground
+    # hero focus while the feeder/extractor machines and wider warehouse fill the background.
+    cam_offset = (-0.94, -1.28, 0.92) if bx < 0.0 else CCTV_POS_M
+    tgt_offset = (0.38, 0.02, 0.22) if bx < 0.0 else CCTV_TARGET_M
     cam_pos = np.array([bx, by, bz]) + np.array(cam_offset)
     cam_target = np.array([bx, by, bz]) + np.array(tgt_offset)
     spec.worldbody.add_camera(

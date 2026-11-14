@@ -44,12 +44,12 @@ def scene() -> tuple[Any, Any]:
     return model, data
 
 
-def test_bays_are_four_metres_apart() -> None:
+def test_bays_are_spread_across_warehouse() -> None:
     assert BAY_BASES == {
-        1: (-2.0, -2.0, 0.0),
-        2: (2.0, -2.0, 0.0),
-        3: (-2.0, 2.0, 0.0),
-        4: (2.0, 2.0, 0.0),
+        1: (-3.2, -3.4, 0.0),
+        2: (3.2, -3.4, 0.0),
+        3: (-3.2, 3.4, 0.0),
+        4: (3.2, 3.4, 0.0),
     }
 
 
@@ -75,10 +75,15 @@ def test_warehouse_has_conveyors_battery_packs_and_sustainable_elements(
     for k in CONVEYOR_BAYS:
         assert f"warehouse/conveyor_bay{k}" in body_names
         assert f"conveyor_bay{k}_belt" in geom_names
+        assert f"conveyor_bay{k}_feeder_hood" in geom_names
+        assert f"conveyor_bay{k}_extractor_hood" in geom_names
+        assert f"conveyor_bay{k}_extractor_duct" in geom_names
         assert any(g.startswith(f"conveyor_cleat_bay{k}_") for g in geom_names)
         assert f"bay{k}/conveyor_beacon" in geom_names
         assert f"bay{k}/cell_pedestal_col" in geom_names
         assert f"bay{k}/cell_jig_housing" in geom_names
+    assert any("rack_w_" in g for g in geom_names)
+    assert any("agv_" in g for g in geom_names)
     assert any("greenwall" in g for g in geom_names)
     assert any("planter_bush" in g for g in geom_names)
     assert any("bin_cells" in g for g in geom_names)
