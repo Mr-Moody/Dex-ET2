@@ -41,6 +41,19 @@ def test_calibrate_median():
     assert c.ranges["left"]["idx"] == (0.0, 2.8)  # no left data -> default
 
 
+def test_fixed_range_skips_calibration():
+    spec = HandSpec(
+        "syn",
+        {"left": Path("l.xml"), "right": Path("r.xml")},
+        False,
+        "base",
+        [FlexMap("rot", ["a"], "x", range=[-0.5, 0.5])],
+    )
+    assert Calibration.default(spec).ranges["right"]["rot"] == (-0.5, 0.5)
+    c = calibrate(spec, [fr(0.0)], [fr(0.3)])
+    assert c.ranges["right"]["rot"] == (-0.5, 0.5)
+
+
 def test_calibration_json_roundtrip(tmp_path: Path):
     c = calibrate(SPEC, [fr(0.0)], [fr(0.5)])
     p = tmp_path / "c.json"

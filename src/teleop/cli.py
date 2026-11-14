@@ -17,6 +17,8 @@ COMMANDS: dict[str, str] = {
     "replay": "teleop.commands.replay",
     "process": "teleop.commands.process",
     "eval": "teleop.commands.eval",
+    "atc": "teleop.commands.atc",
+    "unoq": "teleop.commands.unoq",
 }
 
 

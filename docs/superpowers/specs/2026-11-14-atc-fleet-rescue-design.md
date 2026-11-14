@@ -195,6 +195,7 @@ ComplianceKind = Literal[
     "OOD_REFUSAL",
 ]
 
+
 @dataclass(frozen=True, slots=True)
 class ComplianceEvent:
     kind: ComplianceKind
@@ -204,6 +205,7 @@ class ComplianceEvent:
     payload_sha256: str
     summary: str
     metadata: Mapping[str, Any]
+
 
 @runtime_checkable
 class ComplianceSink(Protocol):
@@ -231,6 +233,7 @@ class ReasoningContext:
     rollout_passed: int | None = None
     rollout_total: int | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class ReasoningVerdict:
     headline: str
@@ -238,6 +241,7 @@ class ReasoningVerdict:
     compliance_rationale: str
     model: str
     latency_ms: float
+
 
 @runtime_checkable
 class FleetReasoner(Protocol):

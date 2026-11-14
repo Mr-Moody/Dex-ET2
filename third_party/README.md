@@ -5,7 +5,7 @@ needs only `git`). Everything except this README is gitignored; nothing is redis
 
 | Dir | Source | Pinned commit | Licence |
 | --- | --- | --- | --- |
-| `menagerie/` (sparse: `leap_hand`) | https://github.com/google-deepmind/mujoco_menagerie | `370c43965323c0944b433b202aac5058b5f907a9` | MIT (Ananye Agarwal 2023, `leap_hand/LICENSE`) |
+| `menagerie/` (sparse: `leap_hand`, `franka_emika_panda`) | https://github.com/google-deepmind/mujoco_menagerie | `370c43965323c0944b433b202aac5058b5f907a9` | MIT (Ananye Agarwal 2023, `leap_hand/LICENSE`); Apache-2.0 (`franka_emika_panda/LICENSE`) |
 | `inspire/` (sparse: `inspire/` assets + MJCF) | https://github.com/correlllab/h1_mujoco | `fa8795a1ce1c2be418e8d87b72761c3a452efcd6` | MIT (Correll Robotics Lab, `LICENSE`) |
 
 ## Inspire RH56DFX provenance
@@ -30,3 +30,10 @@ builder (T-021) must be prepared to drop when attaching.
 Menagerie `leap_hand` ships `left_hand.xml` and `right_hand.xml` (16 position actuators,
 3 fingers + thumb, no little finger). Menagerie is MIT as a whole; each model keeps its own
 licence file.
+
+## Franka Emika Panda
+
+Menagerie `franka_emika_panda` provides the 7-DoF arm used by the ATC bays (T-110). Only
+`panda_nohand.xml` is used: the LEAP hand is attached to `link7` instead of the Franka gripper.
+The model is derived from Franka's `franka_ros` description and keeps its own Apache-2.0
+`LICENSE` file.

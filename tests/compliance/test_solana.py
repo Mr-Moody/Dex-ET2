@@ -234,7 +234,7 @@ def test_local_mode_writes_a_verifiable_hash_chain(tmp_path: Path) -> None:
     assert all(e.signature is None for e in entries)
     results = verify_audit_log(audit)
     assert all(r.ok for r in results) and all(r.onchain_ok is None for r in results)
-    assert [s.state for s in sink.recent()] == ["local"] * 4
+    assert [s.state for s in sink.recent_status()] == ["local"] * 4
 
 
 def test_signed_local_fallback_when_rpc_unset(tmp_path: Path, keypair: Keypair) -> None:
@@ -286,15 +286,20 @@ def test_emit_never_raises_and_ignores_events_after_close(tmp_path: Path) -> Non
     assert isinstance(meta, dict) and meta["arr"] == [0.0, 0.0, 0.0]
 
 
-def test_placeholder_ring_buffer_keeps_newest(tmp_path: Path) -> None:
-    sink = SolanaCompliancePlaceholder(capacity=3)
-    for bay in range(1, 6):
-        sink.emit(make_event(bay=bay))
-    sink.close()
-    assert [e.bay_id for e in sink.recent_events(10)] == [3, 4, 5]
-    assert [s.bay_id for s in sink.recent(10)] == [3, 4, 5]
-    latest = sink.latest()
-    assert latest is not None and latest.seq == 5
+def test_real_sink_matches_placeholder_hud_api(tmp_path: Path) -> None:
+    """events()/latest() behave the same on both sinks, so the HUD can take either."""
+    real = SolanaComplianceSink(audit_path=tmp_path / "a.jsonl", anchors_path=None, capacity=3)
+    placeholder = SolanaCompliancePlaceholder(capacity=3)
+    events = [make_event(bay=bay) for bay in range(1, 6)]
+    for sink in (real, placeholder):
+        for event in events:
+            sink.emit(event)
+        sink.close()
+        assert [e.bay_id for e in sink.events()] == [3, 4, 5]
+        assert sink.latest() == events[-1]
+    assert [s.bay_id for s in real.recent_status(10)] == [3, 4, 5]
+    status = real.latest_status()
+    assert status is not None and status.seq == 5
 
 
 # ── real-time guarantee ──
@@ -337,8 +342,8 @@ def test_anchors_each_digest_in_a_signed_memo_transaction(tmp_path: Path, keypai
         ix = tx.message.instructions[0]
         assert tx.message.account_keys[ix.program_id_index] == MEMO_PROGRAM_ID
         assert memo_digest(bytes(ix.data).decode()) == entry.digest
-    assert [s.state for s in sink.recent()] == ["anchored", "anchored"]
-    latest = sink.latest()
+    assert [s.state for s in sink.recent_status()] == ["anchored", "anchored"]
+    latest = sink.latest_status()
     assert latest is not None and latest.explorer_url is not None
     assert latest.explorer_url.endswith("?cluster=devnet")
     anchor = sink.anchor
