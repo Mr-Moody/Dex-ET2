@@ -45,6 +45,7 @@ from teleop.copilot.prompts import (
     parse_callout,
     template_callout,
 )
+from teleop.copilot.speech import Spoken
 
 logger = logging.getLogger(__name__)
 
@@ -158,13 +159,16 @@ class CalloutService:
         with self._lock:
             if self._closed:
                 return
-            old = self._current.pop(bay, None)
-            if old is not None and not old.done:
-                old.done = True
-                old.stop_timers()
+            uses_model = self._client is not None and event.kind in MODEL_EVENTS
+            if uses_model:  # a newer model event supersedes the older one's pending answer;
+                # a templated event (say a clutch flip right after a stall) lets it finish
+                old = self._current.pop(bay, None)
+                if old is not None and not old.done:
+                    old.done = True
+                    old.stop_timers()
             if self._speaker is not None:
                 self._speaker.cancel_bay(bay)  # a newer event supersedes unspoken lines
-            if self._client is None or event.kind not in MODEL_EVENTS:
+            if not uses_model:
                 self._emit_template(event, template, sha, "")
                 return
             if bay in self._busy:
@@ -363,6 +367,13 @@ class CopilotOutputs:
             "to": event.state,
             "frame_sha256": frame.sha256 if frame is not None else None,
         }
+        with self._lock:
+            self._append(record, now)
+
+    def spoken(self, spoken: Spoken) -> None:
+        """Log how a line was spoken (Gemini TTS, system voice, dropped) and the TTS time."""
+        now = datetime.now()
+        record = {"type": "speech", "t": now.isoformat(timespec="milliseconds")} | asdict(spoken)
         with self._lock:
             self._append(record, now)
 

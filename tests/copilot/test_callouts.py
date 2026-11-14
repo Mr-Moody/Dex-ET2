@@ -367,3 +367,29 @@ def test_format_line_matches_the_plan() -> None:
     )
     line = format_line(callout, datetime(2026, 11, 14, 12, 1, 7)).splitlines()[0]
     assert line == "[12:01:07] BAY 1 ALARM     Bay 1 stalled on a flap jam. Rescue needed."
+
+
+def test_a_templated_event_does_not_drop_a_pending_model_answer() -> None:
+    """Live run: "clutch engaged" ~1 s after a stall used to discard the stall's model line."""
+    gate = threading.Event()
+    model, speaker = FakeModel(gate=gate), FakeSpeaker()
+    svc, out = service(model, speaker, template_after_s=0.05)
+    svc.handle(first(EventKind.STALL))
+    wait_for(lambda: len(out) == 1)
+    svc.handle(first(EventKind.RESCUE_STARTED))
+    gate.set()
+    wait_for(lambda: len(out) == 3)
+    assert [c.source for c in out] == ["template", "template", "model"]
+    assert out[2].event == "stall"
+    svc.close()
+
+
+def test_speech_outcomes_are_logged(tmp_path: Path) -> None:
+    from teleop.copilot.speech import Spoken
+
+    outputs = CopilotOutputs(io.StringIO(), tmp_path)
+    outputs.spoken(Spoken(3, "Bay 1 stalled.", "system", None, "TTS slower than 4 s"))
+    log = outputs.log_path()
+    assert log is not None
+    record = json.loads(log.read_text(encoding="utf-8"))
+    assert record["type"] == "speech" and record["route"] == "system"

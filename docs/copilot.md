@@ -362,5 +362,20 @@ call-out 2–3 ms after the event record, in stage order: the Bay 1 stall, the c
 release, validating, the gate (20 of 20), Bay 2's autonomous start and finish, and the Bay 2
 refusal. The JSONL log held only frame hashes.
 
-Still to measure with a key: the model's spoken stall call-out (target about 3 s after `F`) and
-how often Gemini TTS beats the 4 s cut-off. Run without `--mute` and add the numbers here.
+### Live run with a key (2026-11-14, scripted stage, images on)
+
+| Event | Template spoken | Hydrogen answer | Outcome |
+|---|---|---|---|
+| Bay 1 stall | at the event (model > 1 s) | 5.5 s | printed as an update |
+| Bay 1 gate result | at the event | 4.2 s | printed as an update |
+| Bay 2 autonomous finished | at the event | 3.8 s | replaced the queued template |
+| Bay 2 refused | at the event | 6.2 s | printed as an update |
+
+- **Hydrogen never beat 1 s,** so in practice the operator hears the template and reads the model's
+  line. It answered every time, within the 8 s limit.
+- **Gemini TTS missed the 4 s cut-off on every line** (5 of 5), so the system voice spoke them all.
+  Because each fallback first waits the full 4 s, spoken lines trailed their events by 4–9 s.
+- **A clutch flip about 1 s after a stall** used to cancel the stall's pending model request. Now
+  templated events let a pending model answer finish; only a newer model event supersedes it.
+- `runs/copilot/*.jsonl` now also has a `speech` record per line (`route`: `tts`, `system`,
+  `dropped_stale` or `muted`, plus the TTS time), so the TTS hit rate can be measured.

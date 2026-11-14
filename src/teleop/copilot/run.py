@@ -95,7 +95,13 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
             file=sys.stderr,
         )
     outputs = CopilotOutputs(stdout, Path(args.log_dir))
-    speaker = Speaker(client, tts_model=cfg.tts_model, voice=cfg.voice, mute=cfg.mute)
+    speaker = Speaker(
+        client,
+        tts_model=cfg.tts_model,
+        voice=cfg.voice,
+        mute=cfg.mute,
+        on_spoken=outputs.spoken,
+    )
     outputs.note(
         f"copilot watching {url}: call-outs {cfg.fast_model if client else 'templates only'}, "
         f"speech {'muted' if cfg.mute else cfg.tts_model + '/' + cfg.voice}, "
