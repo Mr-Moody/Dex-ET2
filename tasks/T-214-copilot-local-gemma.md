@@ -1,12 +1,12 @@
 ---
 id: T-214
 title: Copilot local Gemma fallback
-status: todo
-owner: null
-branch: null
+status: in_review
+owner: cline
+branch: feat/copilot-local-gemma
 depends_on: [T-212]
 plan: docs/superpowers/plans/2026-11-14-operator-copilot-plan.md#t-214-local-gemma-fallback
-claimed_at: null
+claimed_at: '2026-11-14T22:28:34+00:00'
 ---
 
 OpenAI-compatible local Gemma 4 client as the call-out fallback when Gemini is unreachable.

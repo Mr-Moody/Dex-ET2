@@ -32,6 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
+from teleop.copilot.config import DEFAULT_LOCAL_MODEL
 from teleop.copilot.events import CopilotEvent
 from teleop.copilot.frames import StoredFrame, downscale_jpeg
 from teleop.copilot.gemini import GeminiError, Part, ThinkingLevel
@@ -90,7 +91,7 @@ class Callout:
     say: str
     detail: str
     severity: Severity
-    source: str  # "model" or "template"
+    source: str  # "model", "local" or "template"
     model: str | None = None
     latency_ms: float | None = None
     frame_sha256: str | None = None
@@ -123,6 +124,8 @@ class CalloutService:
         *,
         model: str,
         sink: Callable[[Callout], None],
+        local_client: JsonModel | None = None,
+        local_model: str = DEFAULT_LOCAL_MODEL,
         speaker: SpeechQueue | None = None,
         frame_for: Callable[[int], StoredFrame | None] | None = None,
         thinking_level: ThinkingLevel | None = "low",
@@ -133,6 +136,8 @@ class CalloutService:
     ) -> None:
         self._client = client
         self._model = model
+        self._local_client = local_client
+        self._local_model = local_model
         self._sink = sink
         self._speaker = speaker
         self._frame_for = frame_for
@@ -159,7 +164,8 @@ class CalloutService:
         with self._lock:
             if self._closed:
                 return
-            uses_model = self._client is not None and event.kind in MODEL_EVENTS
+            has_model = self._client is not None or self._local_client is not None
+            uses_model = has_model and event.kind in MODEL_EVENTS
             if uses_model:  # a newer model event supersedes the older one's pending answer;
                 # a templated event (say a clutch flip right after a stall) lets it finish
                 old = self._current.pop(bay, None)
@@ -189,32 +195,74 @@ class CalloutService:
     # -- worker and timers ------------------------------------------------------------------
 
     def _work(self, req: _Request) -> None:
-        assert self._client is not None
+        assert self._client is not None or self._local_client is not None
         try:
             jpeg: bytes | None = None
             if req.frame is not None and not self._no_images:
                 jpeg = downscale_jpeg(req.frame.jpeg)
-            answer = self._client.generate_json(
-                self._model,
-                CALLOUT_SYSTEM,
-                callout_parts(req.event, jpeg),
-                CALLOUT_SCHEMA,
-                self._hard_timeout_s,
-                thinking_level=self._thinking,
-            )
-            text = parse_callout(answer, req.template)
-        except (GeminiError, ValueError, OSError) as exc:
-            self._finish(req, None, str(exc))
+            parts = callout_parts(req.event, jpeg)
+            errors: list[str] = []
+            if self._client is not None:
+                try:
+                    answer = self._client.generate_json(
+                        self._model,
+                        CALLOUT_SYSTEM,
+                        parts,
+                        CALLOUT_SCHEMA,
+                        self._hard_timeout_s,
+                        thinking_level=self._thinking,
+                    )
+                    text = parse_callout(answer, req.template)
+                except (GeminiError, ValueError, OSError) as exc:
+                    errors.append(str(exc))
+                else:
+                    self._finish(req, text, "", source="model", model=self._model)
+                    return
+            if self._local_client is not None and not req.done:
+                remaining_s = self._hard_timeout_s - (self._clock() - req.started_ns) / 1e9
+                if remaining_s <= 0:
+                    errors.append(f"local skipped: {self._hard_timeout_s:g} s budget exhausted")
+                else:
+                    try:
+                        answer = self._local_client.generate_json(
+                            self._local_model,
+                            CALLOUT_SYSTEM,
+                            parts,
+                            CALLOUT_SCHEMA,
+                            remaining_s,
+                        )
+                        text = parse_callout(answer, req.template)
+                    except (GeminiError, ValueError, OSError) as exc:
+                        errors.append(f"local: {exc}")
+                    else:
+                        note = f"gemini failed ({errors[0]})" if errors else ""
+                        self._finish(
+                            req,
+                            text,
+                            "",
+                            source="local",
+                            model=self._local_model,
+                            fallback_note=note,
+                        )
+                        return
+            self._finish(req, None, "; ".join(errors) or "no model available")
         except Exception as exc:  # a call-out must never take the copilot down
             logger.exception("copilot call-out failed")
             self._finish(req, None, f"{type(exc).__name__}: {exc}")
-        else:
-            self._finish(req, text, "")
         finally:
             with self._lock:
                 self._busy.discard(req.event.bay)
 
-    def _finish(self, req: _Request, text: CalloutText | None, error: str) -> None:
+    def _finish(
+        self,
+        req: _Request,
+        text: CalloutText | None,
+        error: str,
+        *,
+        source: str = "model",
+        model: str | None = None,
+        fallback_note: str = "",
+    ) -> None:
         latency_ms = (self._clock() - req.started_ns) / 1e6
         with self._lock:
             if req.done:
@@ -239,10 +287,11 @@ class CalloutService:
                 text.say,
                 text.detail,
                 text.severity,
-                "model",
-                self._model,
+                source,
+                model if model is not None else self._model,
                 latency_ms,
                 sha,
+                note=fallback_note,
             )
             if not req.template_emitted:
                 self._emit(callout)
@@ -250,8 +299,11 @@ class CalloutService:
             replaced = False
             if self._speaker is not None and req.template_token is not None:
                 replaced = self._speaker.replace(req.template_token, text.say, text.severity)
-            note = "replaced the queued template" if replaced else "template already spoken"
-            self._sink(_with(callout, spoken=replaced, note=note))
+            template_note = (
+                "replaced the queued template" if replaced else "template already spoken"
+            )
+            combined_note = f"{template_note}; {fallback_note}" if fallback_note else template_note
+            self._sink(_with(callout, spoken=replaced, note=combined_note))
 
     def _template_due(self, req: _Request) -> None:
         with self._lock:

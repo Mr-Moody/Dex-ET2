@@ -396,3 +396,56 @@ the call-out was made (0.0 s); one waited 1.3 s behind the line before it. Sayin
 went from 4.7 s to 3.6 s and the refusal from 6.7 s to 5.3 s. With `--gemini-tts` and the 1.5 s cut-off, every line had
 started 1.5 s late (4.2 s for one that queued). Each `speech` record now has `start_ms` (queued
 to speaking) and `speak_ms`.
+
+## Local Gemma fallback (T-214)
+
+When Google's API is unreachable (booth Wi-Fi drop, rate limit, or no `GEMINI_API_KEY`), the
+copilot can ask a local Gemma 4 server (`teleop.copilot.local.LocalModelClient`) over any
+OpenAI-compatible `/v1/chat/completions` endpoint.
+
+### Fallback order
+
+- **Call-outs:** fast Gemini (`COPILOT_FAST_MODEL`) -> local Gemma (`COPILOT_LOCAL_URL` +
+  `COPILOT_LOCAL_MODEL`) -> deterministic telemetry template. The 1 s template timer and 8 s
+  wall-clock cut-off still apply across the whole attempt, so a slow local model never delays the
+  first spoken warning: the operator hears the template after 1 s and sees/hears local Gemma's
+  refinement if it finishes within 8 s (`source: "local"` in the terminal and JSONL log).
+- **Reviews (`T-213`):** Gemini review model (`COPILOT_REVIEW_MODEL`) only. Reviews **never** fall
+  back to local Gemma; if Gemini is unset or unreachable they report `"review unavailable"`
+  (`ReviewUnavailableError`). A small quantized local model is useful for one-sentence call-outs
+  but is not trusted for multi-frame rescue verdicts.
+
+### Running Gemma 4 locally (Ollama)
+
+1. Install [Ollama](https://ollama.com) (or any OpenAI-compatible server such as `llama-server` or
+   vLLM) and pull the Gemma 4 build that fits your machine:
+
+   ```bash
+   # CPU / integrated-GPU laptop (e.g. Intel Iris Xe, >= 8 GB RAM): ~3.3 GB download
+   ollama pull gemma4:e4b
+
+   # Workstation or laptop with a >= 16 GB NVIDIA GPU: ~8 GB download, stronger vision + JSON
+   ollama pull gemma4:12b
+   ```
+
+2. Point the copilot at the local server in `.env` (either the server root or `/v1` works):
+
+   ```dotenv
+   COPILOT_LOCAL_URL=http://127.0.0.1:11434
+   COPILOT_LOCAL_MODEL=gemma4:e4b   # or gemma4:12b on a >= 16 GB GPU
+   ```
+
+3. Run the copilot as usual:
+
+   ```bash
+   uv run python -m teleop.copilot run
+   uv run python -m teleop.copilot run --no-images   # faster on CPU: skips vision encoding
+   ```
+
+### Expected speed: CPU vs 16 GB GPU
+
+| Hardware | Recommended model | Text-only (`--no-images`) | With 512 px camera frame | Practical behaviour in `run` |
+|---|---|---|---|---|
+| CPU / Intel Iris Xe laptop | `gemma4:e4b` (4-bit) | ~2–5 s (~15–30 tok/s) | ~5–12 s (vision prefill dominates) | The 1 s template is spoken first; text-only calls usually land inside the 8 s budget as an `(update)`, while image calls on CPU may hit the 8 s cut-off. Prefer `--no-images` on CPU. |
+| >= 16 GB NVIDIA GPU (e.g. RTX 4080 / A4000) | `gemma4:12b` (4-bit) or `gemma4:e4b` | ~0.3–0.8 s (~80–140 tok/s) | ~0.7–1.8 s | `e4b` often answers inside 1 s directly; `12b` answers in ~1–2 s, replacing queued templates or printing right after speech starts, well inside the 8 s budget. |
+
