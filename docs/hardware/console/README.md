@@ -130,5 +130,29 @@ differs:
 A single-plate prototype (203 × 158 mm, printed face-up without supports in roughly 2.5-3.5 h on
 a Bambu P2S). Each module slides into rails on the plate. The UNO Q sits on four standoffs with
 its LED matrix facing up and USB-C at the left edge. The clutch and E-stop caps twist-lock into
-collars so they can't be pulled off. The CAD is in Fusion and not yet in this repo. Module board
-sizes in the CAD are estimates until measured.
+collars so they can't be pulled off. Module board sizes in the CAD are estimates until measured.
+
+### Print files
+
+All three fit on one P2S plate. PLA, 0.2 mm layers, no supports.
+
+| File | Qty | Orientation on the bed |
+|---|---|---|
+| [`cad/console_plate.stl`](cad/console_plate.stl) | 1 | As exported (flat base down) |
+| [`cad/console_cap_clutch.stl`](cad/console_cap_clutch.stl) | 1 | Flip so the flat top is on the bed |
+| [`cad/console_cap_estop.stl`](cad/console_cap_estop.stl) | 1 | Flip so the flat top is on the bed |
+
+The STLs are in millimetres and exported in their assembled position, so use Bambu Studio's
+**Lay on Face** (F) on the caps' top face.
+
+### Assembly
+
+1. Slide each module into its rails from the back, header pins facing away from the operator.
+   The joystick drops into its pocket from above.
+2. Seat the UNO Q on the four pegs, USB-C toward the left edge.
+3. Push each cap into its collar with the two tabs lined up with the notches, then turn it 90°
+   until it stops. To remove a cap, turn it back to the notches and lift.
+
+Estimated module sizes used in the CAD (measure yours before printing if you can): small KY
+boards 15 × 18.5 mm, joystick board 34 × 26 mm, KY-004 switch height 5 mm (the caps allow up to
+2.5 mm taller).
