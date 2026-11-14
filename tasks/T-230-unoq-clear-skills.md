@@ -1,5 +1,5 @@
 ---
-id: T-220
+id: T-230
 title: Board clear_skills op to forget a SKU's skills and prototypes
 status: todo
 owner: null

@@ -45,10 +45,10 @@ See `docs/superpowers/specs/2026-11-14-act-recovery-policy-design.md` and `docs/
 - **Then:** `T-192` (scripted generator) and `T-195` (ACT runtime) after `T-191`; `T-196` (offline gate, `teleop eval`) after `T-195`; `T-197` (console/HUD + README) after `T-196`.
 - **Release:** `T-198` is operational. It is run by whoever holds the Verda credits on the hardware laptop.
 
-## Active Track (2026-11-14): Console Pages and Data Collection (`T-220`–`T-224`)
+## Active Track (2026-11-14): Console Pages and Data Collection (`T-230`–`T-234`)
 
 See `docs/superpowers/specs/2026-11-14-console-pages-and-data-collection-design.md` and `docs/superpowers/plans/2026-11-14-console-pages-data-collection.md`.
 
-- **Parallel now:** `T-220` (board `clear_skills` op, then redeploy the UNO Q), `T-223` (console page split).
-- **Then:** `T-221` (skill library on disk) after `T-220`; `T-222` (default recording, switches, pile totals) after `T-191`.
-- **Last:** `T-224` (Data & training page) after `T-221`, `T-222`, `T-223`.
+- **Parallel now:** `T-230` (board `clear_skills` op, then redeploy the UNO Q), `T-233` (console page split).
+- **Then:** `T-231` (skill library on disk) after `T-230`; `T-232` (default recording, switches, pile totals) after `T-191`.
+- **Last:** `T-234` (Data & training page) after `T-231`, `T-232`, `T-233`.

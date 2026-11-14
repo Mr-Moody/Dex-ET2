@@ -38,17 +38,17 @@
 
 | Task | Files |
 |---|---|
-| T-220 | `src/teleop/unoq/{protocol,server,classifier,client,switch}.py`, `tests/unoq/test_clear_skills.py` |
-| T-221 | new `src/teleop/atc/skill_store.py`, `src/teleop/atc/coordinator.py` (hook + reset only), `src/teleop/commands/atc.py` (skills flags), `tests/atc/test_skill_store.py` |
-| T-222 | `src/teleop/atc/episodes.py`, new `src/teleop/record/pile.py`, `src/teleop/commands/atc.py` (recording defaults), `tests/atc/test_episodes.py`, `tests/record/test_pile.py` |
-| T-223 | `src/teleop/console/web/{index.html,console.js,console.css,health.js}`, `tests/console/test_web_assets.py` |
-| T-224 | new `src/teleop/atc/data_controls.py`, new `src/teleop/console/web/data.js`, `src/teleop/console/{server,run,telemetry}.py`, `src/teleop/commands/atc.py` (wiring only), `tests/console/*`, `tests/atc/test_data_controls.py` |
+| T-230 | `src/teleop/unoq/{protocol,server,classifier,client,switch}.py`, `tests/unoq/test_clear_skills.py` |
+| T-231 | new `src/teleop/atc/skill_store.py`, `src/teleop/atc/coordinator.py` (hook + reset only), `src/teleop/commands/atc.py` (skills flags), `tests/atc/test_skill_store.py` |
+| T-232 | `src/teleop/atc/episodes.py`, new `src/teleop/record/pile.py`, `src/teleop/commands/atc.py` (recording defaults), `tests/atc/test_episodes.py`, `tests/record/test_pile.py` |
+| T-233 | `src/teleop/console/web/{index.html,console.js,console.css,health.js}`, `tests/console/test_web_assets.py` |
+| T-234 | new `src/teleop/atc/data_controls.py`, new `src/teleop/console/web/data.js`, `src/teleop/console/{server,run,telemetry}.py`, `src/teleop/commands/atc.py` (wiring only), `tests/console/*`, `tests/atc/test_data_controls.py` |
 
-T-221 and T-222 both touch `commands/atc.py` argument parsing; whichever merges second rebases. T-197 and T-215 (pending console tasks) build on T-223's pages: recovery chip on Operate, copilot call-outs on Operate, reviews on Data.
+T-231 and T-232 both touch `commands/atc.py` argument parsing; whichever merges second rebases. T-197 and T-215 (pending console tasks) build on T-233's pages: recovery chip on Operate, copilot call-outs on Operate, reviews on Data.
 
 ---
 
-### Task 1 (T-220): Board `clear_skills` op
+### Task 1 (T-230): Board `clear_skills` op
 
 **Files:**
 - Modify: `src/teleop/unoq/protocol.py`, `server.py`, `classifier.py`, `client.py`, `switch.py`
@@ -92,10 +92,10 @@ def test_old_firmware_raises_unoq_error(server_without_clear_op):
 - [ ] **Step 2: Run** `uv run pytest tests/unoq/test_clear_skills.py -v` → FAIL (`OP_CLEAR_SKILLS` / `clear_skills` missing).
 - [ ] **Step 3: Implement.** Add the op to `protocol.py` and its TCP op set. `classifier.clear` drops `self._protos[part_sku_id]` and returns how many signatures went. `server._clear_skills` removes every `self.skills` entry with that SKU, calls `classifier.clear`, replies `P.ok(removed=n)`. `client.clear_skills` sends `{"op": OP_CLEAR_SKILLS, "part_sku_id": sku}` and returns `int(reply["removed"])`. `switch.clear_skills` runs through `_call` and, under the same pointer lock as `register_skill`, removes that SKU's skills from `self._skills`.
 - [ ] **Step 4: Run** `uv run pytest tests/unoq -v` → PASS.
-- [ ] **Step 5: Commit** `feat(unoq): clear_skills op to forget a SKU's skills and prototypes (T-220)`.
+- [ ] **Step 5: Commit** `feat(unoq): clear_skills op to forget a SKU's skills and prototypes (T-230)`.
 - [ ] **Step 6 (hardware, manual):** redeploy the board app to the UNO Q per `README` / `docs/` UNO Q deploy notes, then `uv run teleop unoq` ping and a `clear_skills` call against the real board succeed. Record the result in the PR description.
 
-### Task 2 (T-221): Skill library on disk
+### Task 2 (T-231): Skill library on disk
 
 **Files:**
 - Create: `src/teleop/atc/skill_store.py`
@@ -137,9 +137,9 @@ def test_headless_has_no_default_library(...)  # AtcConfig parse: headless -> sk
 - [ ] **Step 3: Implement** `skill_store.py`. Rewrite = write `path.with_suffix(".json.tmp")` then `os.replace`. The in-memory entry list is guarded by a lock, because `on_deployed` runs on the gate-apply path and `reset` runs on the WebSocket thread. `load` calls `coordinator.reset_library()` first, then `register_skill` and inserts into `library` for each valid entry. Coordinator: call each `skill_listeners` entry right after `self.library[...] = skill`, wrapped in `try/except Exception: logger.exception`.
 - [ ] **Step 4: Wire in `commands/atc.py`.** After `_setup_recovery`: if `cfg.skills` is set, build a `SkillStore`. Call `load` (or `reset_library()` when `--fresh-skills`), append `store.on_deployed` to `skill_listeners`, and add `store.close` to `stack.callback`. Print `teleop atc: loaded N skills from PATH (skipped M)`.
 - [ ] **Step 5: Run** `uv run pytest tests/atc -v` → PASS, golden unchanged.
-- [ ] **Step 6: Commit** `feat(atc): persist the DMP skill library across runs (T-221)`.
+- [ ] **Step 6: Commit** `feat(atc): persist the DMP skill library across runs (T-231)`.
 
-### Task 3 (T-222): Recording on by default, switches, session stats and pile totals
+### Task 3 (T-232): Recording on by default, switches, session stats and pile totals
 
 Depends on T-191 merged.
 
@@ -195,9 +195,9 @@ def test_atc_defaults(): ...  # live -> data/episodes + new_session_dir; --no-re
 - [ ] **Step 2: Run** `uv run pytest tests/atc/test_episodes.py tests/record/test_pile.py -v` → FAIL.
 - [ ] **Step 3: Implement.** Switches are read only in `on_episode_start`, with no lock needed for a bool read. Stats are updated on the writer thread under `self._lock` after a successful write. `open_episode_sink` takes a `session_dir_fn` parameter (default `session_root`), and live default wiring passes `new_session_dir`. If `lerobot` is missing in the live default path, log one line, do not fail startup, and record `available=False` for Task 5. An explicit `--record-episodes` keeps today's exit-1 behaviour.
 - [ ] **Step 4: Run** `uv run pytest tests/atc tests/record -v` → PASS.
-- [ ] **Step 5: Commit** `feat(record): record rescues by default with per-source switches and pile totals (T-222)`.
+- [ ] **Step 5: Commit** `feat(record): record rescues by default with per-source switches and pile totals (T-232)`.
 
-### Task 4 (T-223): Console pages, tabs and rescue banner
+### Task 4 (T-233): Console pages, tabs and rescue banner
 
 **Files:**
 - Modify: `src/teleop/console/web/index.html`, `console.js`, `console.css`, `health.js`
@@ -229,11 +229,11 @@ def test_unknown_hash_falls_back_to_operate(): ...  # console.js contains the fa
 - [ ] **Step 2: Run** `uv run pytest tests/console/test_web_assets.py -v` → FAIL.
 - [ ] **Step 3: Implement.** Move the existing sections into the page containers and do not rewrite them. Show the rescue banner when any bay in telemetry is in a waiting-for-rescue or human-rescue state, and only when not on Operate. Clicking it calls `setPage("operate")`. The setup warning dot shows when any `health` check level is not OK. The camera wall stays mounted when hidden (`display:none` on the page container), so frames and slots survive page switches.
 - [ ] **Step 4: Run** `uv run pytest tests/console -v` → PASS. Manual check: run `uv run teleop atc --source synthetic`, switch pages during a rescue, and confirm the banner shows, the cameras resume instantly and the WebSocket never reconnects (live dot stays green).
-- [ ] **Step 5: Commit** `feat(atc): split the console into Operate, Data and Setup pages (T-223)`.
+- [ ] **Step 5: Commit** `feat(atc): split the console into Operate, Data and Setup pages (T-233)`.
 
-### Task 5 (T-224): Data & training page and its wire protocol
+### Task 5 (T-234): Data & training page and its wire protocol
 
-Depends on T-221, T-222, T-223.
+Depends on T-231, T-232, T-233.
 
 **Files:**
 - Create: `src/teleop/atc/data_controls.py`, `src/teleop/console/web/data.js`
@@ -280,20 +280,20 @@ def test_data_js_sends_protocol(): ...  # data.js contains '"record"' and '"skil
 - [ ] **Step 4: Implement `data.js`** following `health.js`: listen for `telemetry`, render into `#data-root` the Recording switches (or the unavailable line with `uv sync --group train`), This session, All sessions bars toward `pile.target`, Latest episodes, DMP skill library with **Start fresh** behind `confirm()`, Next steps with copy buttons. Update `#tab-data-rec` and `#brief-rec` (shown when the focused/rescue bay is in `recording_bays`). Rebuild only on change, as `health.js` does.
 - [ ] **Step 5: Run** the full verify command → PASS.
 - [ ] **Step 6: Manual check on the hardware laptop.** Run `uv run teleop atc` live with two bays in rescue at once. The console holds 30 fps (FPS readout or `LoopStats`). Both episodes appear on the Data page, and Start fresh empties the library and the board. If 30 fps fails, lower the writer's render rate (not the camera set) and note it in the PR.
-- [ ] **Step 7: Commit** `feat(atc): Data & training page with recording switches and skill library (T-224)`.
+- [ ] **Step 7: Commit** `feat(atc): Data & training page with recording switches and skill library (T-234)`.
 
 ---
 
 ## Task files
 
-Create `tasks/T-220-unoq-clear-skills.md` … `tasks/T-224-console-data-page.md` (frontmatter per `tasks/README.md`, `plan:` this file):
+Create `tasks/T-230-unoq-clear-skills.md` … `tasks/T-234-console-data-page.md` (frontmatter per `tasks/README.md`, `plan:` this file):
 
 | ID | depends_on |
 |---|---|
-| T-220 | [] |
-| T-221 | [T-220] |
-| T-222 | [T-191] |
-| T-223 | [] |
-| T-224 | [T-221, T-222, T-223] |
+| T-230 | [] |
+| T-231 | [T-230] |
+| T-232 | [T-191] |
+| T-233 | [] |
+| T-234 | [T-231, T-232, T-233] |
 
-Add a "Console pages and data collection (`T-220`–`T-224`)" section to `tasks/README.md`, and a line to the file-ownership map in `docs/superpowers/plans/2026-11-14-act-recovery-plan.md` noting that T-222 edits `episodes.py` after T-191, and that T-197 builds on T-223's pages.
+Add a "Console pages and data collection (`T-230`–`T-234`)" section to `tasks/README.md`, and a line to the file-ownership map in `docs/superpowers/plans/2026-11-14-act-recovery-plan.md` noting that T-232 edits `episodes.py` after T-191, and that T-197 builds on T-233's pages.

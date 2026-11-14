@@ -214,7 +214,7 @@ on the brief shows when the current rescue is being recorded.
 
 ## Task ownership
 
-This is a new `T-22x` series. It touches files owned by T-190 (`coordinator.py`, merged),
+This is a new `T-23x` series. It touches files owned by T-190 (`coordinator.py`, merged),
 T-191 (`episodes.py`, in review) and T-197 (`console/telemetry.py`, `console/web/*`, todo), plus
 console work in T-215. Episode-sink changes start after T-191 merges. The console page split goes
 first among the console tasks. T-197 and T-215 then add their panels to the page that fits them:
