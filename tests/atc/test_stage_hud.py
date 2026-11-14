@@ -202,6 +202,19 @@ def test_keymap_and_console_merge_mirror_hardware() -> None:
     assert merge_console([]) == ConsoleInputState()
 
 
+def test_estop_key_and_merge_cut_power_per_bay() -> None:
+    assert KEYMAP[ord("E")] is StageAction.ESTOP
+    hardware = ConsoleInputState(
+        selected_bay=2, clutch=True, timestamp_ns=200, powered_off=frozenset({2})
+    )
+    keyboard = ConsoleInputState(timestamp_ns=100, powered_off=frozenset({4}))
+    merged = merge_console([keyboard, hardware])
+    assert merged.powered_off == frozenset({2, 4})  # any console's cut holds
+    assert not merged.clutch  # the clutch never drives a cut bay
+    other = dataclasses.replace(hardware, selected_bay=1, powered_off=frozenset())
+    assert merge_console([keyboard, other]).clutch  # cuts elsewhere do not block Bay 1
+
+
 def test_audio_cues_follow_compliance_events_and_stay_silent_when_disabled() -> None:
     speaker = FakeSpeaker()
     cues = AudioCues(speaker)

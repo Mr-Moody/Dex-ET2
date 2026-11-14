@@ -318,7 +318,9 @@ class FeedRenderer:
 
     def _animate_conveyors(self, snap: SimSnapshot, wall_t: float) -> None:
         bg_conveyors = (
-            self.background.conveyor_statuses(wall_t) if self.background is not None else {}
+            self.background.conveyor_statuses(wall_t, frozen=snap.view.powered_off)
+            if self.background is not None
+            else {}
         )
         self.bg_conveyors = bg_conveyors
         statuses: dict[int, ConveyorStatus] = {**bg_conveyors}
@@ -350,7 +352,11 @@ class FeedRenderer:
         if snap.mocap_pos.size:
             d.mocap_pos[:] = snap.mocap_pos
             d.mocap_quat[:] = snap.mocap_quat
-        conf = self.background.apply(d, wall_t) if self.background is not None else {}
+        conf = (
+            self.background.apply(d, wall_t, frozen=snap.view.powered_off)
+            if self.background is not None
+            else {}
+        )
         self._animate_conveyors(snap, wall_t)
         self._apply_zoom_pan(feeds)
         mj.mj_kinematics(self.model, d)

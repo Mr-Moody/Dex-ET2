@@ -137,6 +137,7 @@ class TelemetryAdapter:
         background_confidence: Mapping[int, float],
         faults: Mapping[int, dict[str, str]],
         conveyors: Mapping[int, ConveyorStatus],
+        powered_off: frozenset[int] = frozenset(),
     ) -> dict[str, Any]:
         hist = self._history[k]
         conv = conveyors.get(k)
@@ -164,6 +165,7 @@ class TelemetryAdapter:
                 "pose_sigma_mm": _finite_or_none(s.pose_sigma_mm),
                 "pose_sigma_yaw_deg": _finite_or_none(s.pose_sigma_yaw_deg),
                 "touch_correction_mm": _finite_or_none(s.touch_correction_mm),
+                "powered": s.powered and k not in powered_off,
             }
         if k in self.background:
             raw = float(background_confidence.get(k, 1.0))
@@ -185,6 +187,7 @@ class TelemetryAdapter:
                 "pose_sigma_mm": None,
                 "pose_sigma_yaw_deg": None,
                 "touch_correction_mm": None,
+                "powered": k not in powered_off,
             }
         return {
             "id": k,
@@ -202,6 +205,7 @@ class TelemetryAdapter:
             "pose_sigma_mm": None,
             "pose_sigma_yaw_deg": None,
             "touch_correction_mm": None,
+            "powered": k not in powered_off,
         }
 
     def build(
@@ -285,7 +289,9 @@ class TelemetryAdapter:
                     for f in feeds_t
                 ],
                 "bays": [
-                    self._bay_entry(k, snaps, background_confidence, faults, conveyors)
+                    self._bay_entry(
+                        k, snaps, background_confidence, faults, conveyors, view.powered_off
+                    )
                     for k in range(1, N_BAYS + 1)
                 ],
                 "bolt_clear_cm": round(BOLT_CLEARED_M * 100.0, 2),
@@ -295,6 +301,7 @@ class TelemetryAdapter:
                 ],
                 "queue": list(view.queue),
                 "selected_bay": view.selected_bay,
+                "powered_off": sorted(view.powered_off),
                 "rescue": rescue,
                 "gate": gate,
                 "events": list(self._events),

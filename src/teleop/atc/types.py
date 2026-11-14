@@ -197,6 +197,7 @@ class BaySnapshot:
     pose_sigma_mm: float | None = None  # push-axis 1-sigma: x/y until touched, then x (display)
     pose_sigma_yaw_deg: float | None = None  # latch-pose estimate yaw 1-sigma (display)
     touch_correction_mm: float | None = None  # |last accepted touch correction| this cycle
+    powered: bool = True  # False while the console E-stop has this robot's power cut
 
     def __post_init__(self) -> None:
         _check_bay(self.bay_id)
@@ -210,10 +211,13 @@ class ConsoleInputState:
 
     selected_bay: int | None = None
     clutch: bool = False
-    estop: bool = False
+    estop: bool = False  # E-stop button held right now (momentary)
     fault_rig_latched: bool = False
     timestamp_ns: int = 0  # time.monotonic_ns() of the last change
+    powered_off: frozenset[int] = frozenset()  # bays whose power the E-stop cut (latched)
 
     def __post_init__(self) -> None:
         if self.selected_bay is not None:
             _check_bay(self.selected_bay)
+        for bay in self.powered_off:
+            _check_bay(bay)

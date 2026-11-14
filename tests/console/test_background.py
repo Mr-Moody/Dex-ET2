@@ -112,6 +112,32 @@ def test_player_skips_absent_bays() -> None:
 
 
 @needs_models
+def test_player_freezes_a_powered_off_bay_and_resumes_where_it_stopped() -> None:
+    model = build_four_bay_scene()
+    data = mj.MjData(model)
+    player = BackgroundPlayer(load_cycle(), model)
+    adr3 = model.joint("bay3/joint1").qposadr[0]
+    adr4 = model.joint("bay4/joint1").qposadr[0]
+
+    player.apply(data, 1.0)
+    q3_cut = float(data.qpos[adr3])
+    player.apply(data, 3.0, frozen={3})
+    assert float(data.qpos[adr3]) == pytest.approx(q3_cut)  # braked
+    assert player.conveyor_statuses(3.0, frozen={3})[3].mode == "estop"
+    assert player.conveyor_statuses(3.0, frozen={3})[4].mode != "estop"
+    q4 = float(data.qpos[adr4])
+
+    player.apply(data, 3.0)  # power back: replay continues from the cut, no jump
+    assert float(data.qpos[adr3]) == pytest.approx(q3_cut)
+    player.apply(data, 4.0)
+    reference = BackgroundPlayer(load_cycle(), model)
+    ref_data = mj.MjData(model)
+    reference.apply(ref_data, 2.0)  # 2 s of replay since the start, like bay 3 now
+    assert float(data.qpos[adr3]) == pytest.approx(float(ref_data.qpos[adr3]))
+    assert q4 != pytest.approx(float(data.qpos[adr4]))  # bay 4 never stopped
+
+
+@needs_models
 def test_player_wraps_arm_and_conveyor_pitch_without_snapping() -> None:
     from teleop.console.background import PHASE_OFFSETS
     from teleop.sim.cells import PACK_PITCH_M

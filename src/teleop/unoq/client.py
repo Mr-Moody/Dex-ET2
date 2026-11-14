@@ -259,3 +259,7 @@ class UnoQClient:
     def set_bay_state(self, bay_id: int, state: BayState) -> None:
         """Set one bay's LED state on the board's MCU console (no-op without a console)."""
         self.request({"op": P.OP_SET_BAY_STATE, "bay_id": bay_id, "state": state.name})
+
+    def joystick(self, action: str = "status", **fields: Any) -> dict[str, Any]:
+        """Joystick map / calibration on the board's MCU console (``OP_JOYSTICK``)."""
+        return self.request({"op": P.OP_JOYSTICK, "action": action, **fields})
