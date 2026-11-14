@@ -15,3 +15,7 @@ cycle_dwell_s: 1.0         # pause between pallet cycles on a bay
 audio: true                # spoken status cues (always off with --headless)
 script: false              # play the 6-beat stage script (rehearsal autopilot)
 hud_log_period_s: 5.0      # headless: print the HUD every N sim seconds (0 = never)
+display: console           # console (browser CCTV wall, default) | viewer (MuJoCo passive viewer)
+console_port: 8765         # fleet ops console at http://127.0.0.1:<port>/
+console_fps: 30            # camera feed frame rate
+open_browser: true         # open the console page on start (false: just print the URL)
