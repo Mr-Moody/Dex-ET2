@@ -186,68 +186,80 @@ class RenderWorker(threading.Thread):
         self.server.publish_telemetry(msg)
 
     def run(self) -> None:
-        renderer: FeedRendererLike | None = None
-        start = time.monotonic()
-        next_tel = 0.0
-        last_feeds: tuple[FeedSpec, ...] | None = None
+        self._renderer: FeedRendererLike | None = None
+        self._start = time.monotonic()
+        self._next_tel = 0.0
+        self._last_feeds: tuple[FeedSpec, ...] | None = None
         try:
             while not self._stop_event.is_set():
-                tick = time.monotonic()
-                snap = self.snapshots.get()
-                if snap is None:
-                    self._stop_event.wait(0.01)
-                    continue
-                feeds = feed_layout(self.bays_present, snap.view.rescue.bay_id)
-                if feeds != last_feeds or tick >= next_tel:
-                    self._publish_telemetry(snap, feeds)
-                    last_feeds = feeds
-                    next_tel = tick + self.telemetry_period
                 try:
-                    if renderer is None:
-                        player = (
-                            BackgroundPlayer(self.background, self.model)
-                            if self.background is not None
-                            else None
-                        )
-                        renderer = self.renderer_factory(self.model, player)
-                    t0 = time.perf_counter()
-                    due = [
-                        f
-                        for f in feeds
-                        if f.role != "strip" or self.stats.frames % STRIP_EVERY == 0
-                    ]
-                    frames, conf = renderer.render(snap, due, tick - start)
-                    layout_id = self.adapter.layout_id
-                    for slot, jpeg in frames:
-                        self.server.publish_frame(slot, layout_id, jpeg)
-                    self._bg_conf = conf
-                    self.stats.frames += 1
-                    self.stats.total_frame_ms += (time.perf_counter() - t0) * 1000.0
+                    pause = self._step()
                 except Exception:
+                    # Anything (render, layout, telemetry, publish) is logged and retried: the
+                    # console must never go dark for the rest of the demo.
                     self.stats.errors += 1
-                    logger.exception("console: render failed; retrying in %.1f s", ERROR_BACKOFF_S)
-                    if renderer is not None:
-                        renderer.close()
-                        renderer = None
-                    self._wait_with_telemetry(snap, feeds, ERROR_BACKOFF_S)
-                    next_tel = time.monotonic() + self.telemetry_period
+                    logger.exception(
+                        "console: render loop failed; retrying in %.1f s", ERROR_BACKOFF_S
+                    )
+                    self._drop_renderer()
+                    self._backoff(ERROR_BACKOFF_S)
                     continue
-                remaining = self.frame_period - (time.monotonic() - tick)
-                if remaining > 0:
-                    self._stop_event.wait(remaining)
+                if pause > 0:
+                    self._stop_event.wait(pause)
         finally:
-            if renderer is not None:
-                renderer.close()
+            self._drop_renderer()
 
-    def _wait_with_telemetry(
-        self, snap: SimSnapshot, feeds: Sequence[FeedSpec], seconds: float
-    ) -> None:
-        """Back off from rendering but keep the page's telemetry live."""
+    def _drop_renderer(self) -> None:
+        if self._renderer is not None:
+            try:
+                self._renderer.close()
+            except Exception:  # noqa: BLE001 - best-effort GL teardown
+                logger.debug("renderer close failed", exc_info=True)
+            self._renderer = None
+
+    def _step(self) -> float:
+        """One frame: telemetry if due (always before a new layout's frames), then render."""
+        tick = time.monotonic()
+        snap = self.snapshots.get()
+        if snap is None:
+            return 0.01
+        feeds = feed_layout(self.bays_present, snap.view.rescue.bay_id)
+        if feeds != self._last_feeds or tick >= self._next_tel:
+            self._publish_telemetry(snap, feeds)
+            self._last_feeds = feeds
+            self._next_tel = tick + self.telemetry_period
+        if self._renderer is None:
+            player = (
+                BackgroundPlayer(self.background, self.model)
+                if self.background is not None
+                else None
+            )
+            self._renderer = self.renderer_factory(self.model, player)
+        t0 = time.perf_counter()
+        due = [f for f in feeds if f.role != "strip" or self.stats.frames % STRIP_EVERY == 0]
+        frames, conf = self._renderer.render(snap, due, tick - self._start)
+        layout_id = self.adapter.layout_id
+        for slot, jpeg in frames:
+            self.server.publish_frame(slot, layout_id, jpeg)
+        self._bg_conf = conf
+        self.stats.frames += 1
+        self.stats.total_frame_ms += (time.perf_counter() - t0) * 1000.0
+        return self.frame_period - (time.monotonic() - tick)
+
+    def _backoff(self, seconds: float) -> None:
+        """Back off from rendering but keep the page's telemetry live (best effort)."""
         deadline = time.monotonic() + seconds
         while not self._stop_event.is_set():
             now = time.monotonic()
             if now >= deadline:
-                return
-            latest = self.snapshots.get() or snap
-            self._publish_telemetry(latest, feeds)
+                break
+            snap = self.snapshots.get()
+            if snap is not None:
+                try:
+                    feeds = feed_layout(self.bays_present, snap.view.rescue.bay_id)
+                    self._publish_telemetry(snap, feeds)
+                    self._last_feeds = feeds
+                except Exception:  # noqa: BLE001 - already logged by the loop; keep waiting
+                    logger.debug("console: telemetry failed during back-off", exc_info=True)
             self._stop_event.wait(min(self.telemetry_period, deadline - now))
+        self._next_tel = time.monotonic() + self.telemetry_period
