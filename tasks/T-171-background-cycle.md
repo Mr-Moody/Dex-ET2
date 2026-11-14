@@ -1,7 +1,7 @@
 ---
 id: T-171
 title: Canned routine cycle for background Bays 3-4
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/background-cycle
 depends_on: []
