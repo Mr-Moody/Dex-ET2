@@ -609,6 +609,7 @@ class AtcCoordinator:
             belt_dist_m=bay.belt_dist_m,
             pack_dy_m=bay.pack_dy_m,
             resuming=bay.belt_resuming and bay.belt_mode == "paused",
+            incoming_jam=bool(bay.pending_latch and bay.pending_latch[0]),
         )
 
     def conveyors(self) -> tuple[ConveyorStatus, ...]:

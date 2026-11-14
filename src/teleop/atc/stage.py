@@ -48,7 +48,7 @@ from teleop.atc.coordinator import (
     CoordinatorConfig,
     OperatorInput,
 )
-from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
+from teleop.atc.hud import ActionNote, ConveyorStatus, GateStatus, HudView, RescueStatus
 from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
 from teleop.atc.validator import GATE_PASS_MIN, ValidationReport
@@ -624,6 +624,7 @@ class StageController:
         cycle_dwell_s: float = 1.0,
         background_bays: tuple[int, ...] = (),
         unoq_label: str = "",
+        auto_jam_every: int = 0,
     ) -> None:
         self.coordinator = coordinator
         self.active_bays = tuple(s.bay_id for s in coordinator.snapshots()) or ACTIVE_BAYS
@@ -632,6 +633,8 @@ class StageController:
         self.audio = audio
         self.cycle_dwell_s = cycle_dwell_s
         self.background_bays = background_bays
+        self.auto_jam_every = auto_jam_every  # every Nth pallet arrives with a raised flap
+        self._pallets: dict[int, int] = {}
         self.unoq_label = unoq_label
         self.mcu = SoftwareMcu()
         self.keyboard = McuConsoleBridge(self.mcu)
@@ -662,6 +665,7 @@ class StageController:
         cycle_dwell_s: float = 1.0,
         include_background_bays: bool = False,
         unoq_label: str = "",
+        auto_jam_every: int = 0,
         seed: int = 0,
         realism: float = DEFAULT_REALISM,
         gate_pass_min: int = GATE_PASS_MIN,
@@ -687,6 +691,7 @@ class StageController:
             cycle_dwell_s=cycle_dwell_s,
             background_bays=BACKGROUND_BAYS if include_background_bays else (),
             unoq_label=unoq_label,
+            auto_jam_every=auto_jam_every,
         )
 
     @property
@@ -877,6 +882,16 @@ class StageController:
         self._after_tick(snaps, consoles)
         return snaps
 
+    def _conveyors_view(self) -> tuple[ConveyorStatus, ...]:
+        """Belt states, with an armed flap jam already showing on the pack waiting to arrive."""
+        out: list[ConveyorStatus] = []
+        for st in self.coordinator.conveyors():
+            jam = self.armed.get(st.bay_id, (False, False))[0]
+            if jam and not st.incoming_jam and st.mode != "feeding":
+                st = replace(st, incoming_jam=True)
+            out.append(st)
+        return tuple(out)
+
     def _cycle_pallets(self) -> None:
         """Start the next pallet cycle on a bay whose cycle finished ``cycle_dwell_s`` ago."""
         co = self.coordinator
@@ -899,6 +914,11 @@ class StageController:
                 continue
             del self._done_since[bay]
             jam, pin = self.armed.pop(bay, (False, False))
+            n = self._pallets.get(bay, 0)
+            self._pallets[bay] = n + 1
+            if self.auto_jam_every > 0 and not (jam or pin):
+                # Some pallets arrive with the flap already up. Bays are staggered.
+                jam = (n + bay - 1) % self.auto_jam_every == self.auto_jam_every - 1
             if bay == 1 and self._rig_spent and not jam:
                 for console in self.consoles:  # the faulted cycle is over: re-arm the rig
                     console.reset_rig()
@@ -967,7 +987,7 @@ class StageController:
             unoq=self.unoq_label,
             actions=tuple(self.actions),
             faults=self._faults_view(),
-            conveyors=co.conveyors(),
+            conveyors=self._conveyors_view(),
             compliance_detail=self.events.status_detail(),
             compliance_history=tuple(self.events.status_history()),
             powered_off=self.console.powered_off,

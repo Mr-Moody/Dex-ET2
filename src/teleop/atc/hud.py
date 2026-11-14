@@ -30,6 +30,8 @@ class ConveyorStatus:
     # True while the belt is paused because it is restarting after a halt (a rescue, a skill
     # gate, an E-stop), until it next feeds. A plain pause between two packs leaves this False.
     resuming: bool = False
+    # The pack waiting on the belt for this bay carries a raised (jammed) flap.
+    incoming_jam: bool = False
 
 
 STATE_LABELS: dict[BayState, str] = {
