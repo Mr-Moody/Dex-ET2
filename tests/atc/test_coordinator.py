@@ -7,6 +7,7 @@ ground truth, never to steer anything.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Iterator
 
@@ -599,3 +600,136 @@ def test_arm_torque_breach_fast_path_triggers_stall_without_300ms_window(
     assert free.co.last_trigger_reason(1) == "confidence"
     assert ticks_in_routine <= free_ticks - 10
     assert tight.co.rig(1).bolt_x() < BOLT_CLEARED_M
+
+
+# --------------------------------------------------------------------------- arm torque breach
+
+
+def _force_breach_tick(
+    rig: Rig, console: ConsoleInputState | None = None, operator: OperatorInput | None = None
+) -> None:
+    """One tick with a zero margin (every ratio breaches), then the normal margin is restored."""
+    co = rig.co
+    normal = co.config
+    co.config = dataclasses.replace(normal, arm_torque_margin=0.0)
+    try:
+        co.tick(console, operator)
+    finally:
+        co.config = normal
+
+
+def test_arm_torque_breach_in_hover_bleeds_off_to_zero_velocity_hold(rig: Rig) -> None:
+    co = rig.co
+    co.start_cycle(1, flap_jammed=True)
+    rig.run_until(1, {BayState.RESCUE, BayState.QUEUED})
+    for _ in range(5):  # the 3 cm retract is under way but far from finished
+        co.tick()
+    bay = co._bays[1]  # noqa: SLF001 - internal retract/hold state, no public accessor
+    assert bay.move is not None and not bay.move.done
+    assert bay.state == BayState.RESCUE and not bay.clutch_held  # unclutched hold = hover
+    n_events = len(rig.sink.events)
+    x_breach = _latch_rel(rig, 1)[0]
+
+    _force_breach_tick(rig)
+    assert co.peak_arm_ratio(1, "hover") > 0.0
+    assert bay.move is None  # retract cancelled
+    assert bay.hold_pose is not None
+    assert co.state(1) == BayState.RESCUE  # hover breach never changes the state
+    for _ in range(10):  # let the servos' own damping settle the arm
+        co.tick()
+    p0 = _bay_pos(rig, 1)
+    for _ in range(30):
+        co.tick()
+    assert np.linalg.norm(_bay_pos(rig, 1) - p0) < 1e-3  # zero-velocity hold
+    assert _latch_rel(rig, 1)[0] > x_breach - 0.01  # did not finish the 3 cm retract
+    assert len(rig.sink.events) == n_events  # a hover breach is not an escalation
+
+
+def test_arm_torque_breach_in_approach_aborts_the_approach(rig: Rig) -> None:
+    co = rig.co
+    co.start_cycle(1)
+    for _ in range(10):
+        co.tick()
+    assert co._bays[1].approach is not None  # noqa: SLF001
+    _force_breach_tick(rig)
+    assert co.peak_arm_ratio(1, "approach") > 0.0
+    assert co._bays[1].approach is None  # noqa: SLF001
+    assert co._bays[1].pending_latch is None  # noqa: SLF001
+    assert co.outcome(1) == "approach aborted: arm torque limit"
+    for _ in range(10):
+        co.tick()
+    p0 = _bay_pos(rig, 1)
+    for _ in range(60):
+        co.tick()
+        assert not co.in_routine(1)  # the routine never starts
+    assert co.state(1) == BayState.NOMINAL
+    assert np.linalg.norm(_bay_pos(rig, 1) - p0) < 1e-3
+
+
+def test_arm_torque_breach_in_rescue_discards_recording_and_locks_out_clutch(rig: Rig) -> None:
+    co = rig.co
+    rig.stall_bay(1, flap_jammed=True)
+    assert co.state(1) == BayState.RESCUE
+    bay = co._bays[1]  # noqa: SLF001
+    console = ConsoleInputState(selected_bay=1, clutch=True)
+    samples = demo_operator(rig, 1)
+    for _ in range(30):
+        co.tick(console, next(samples))
+    assert bay.clutch_held and bay.buffer is not None and len(bay.buffer) > 0
+    n_events = len(rig.sink.events)
+
+    _force_breach_tick(rig, console, next(samples))
+    assert co.peak_arm_ratio(1, "rescue") > 0.0
+    assert not bay.clutch_held and bay.breach_lock
+    assert len(bay.buffer) == 0  # recording discarded
+    assert co.state(1) == BayState.RESCUE
+
+    # Clutch still held: re-engagement is locked out, the arm stays put, nothing is recorded.
+    for _ in range(10):
+        co.tick(console, next(samples))
+    p0 = _bay_pos(rig, 1)
+    for _ in range(20):
+        co.tick(console, next(samples))
+        assert not bay.clutch_held and len(bay.buffer) == 0
+    assert np.linalg.norm(_bay_pos(rig, 1) - p0) < 1e-3
+
+    # Releasing the clutch lifts the lock without a validation attempt; the next hold records.
+    co.tick(ConsoleInputState(selected_bay=1, clutch=False), None)
+    assert not bay.breach_lock and co.state(1) == BayState.RESCUE
+    for _ in range(10):
+        co.tick(console, next(samples))
+    assert bay.clutch_held and len(bay.buffer) > 0
+    assert len(rig.sink.events) == n_events  # no discarded-rescue event, no validation
+
+
+def test_arm_torque_breach_in_autonomous_replay_aborts_retracts_and_escalates(
+    rig: Rig,
+) -> None:
+    co = rig.co
+    _rescued_rig(rig)
+    n_events = len(rig.sink.events)
+    n_ctx = len(rig.reasoner.contexts)
+    co.start_cycle(2, flap_jammed=True)
+    rig.run_until(2, {BayState.AUTONOMOUS_SKILL})
+    for _ in range(5):  # mid back-off
+        co.tick()
+    assert co.state(2) == BayState.AUTONOMOUS_SKILL
+    x_breach = _latch_rel(rig, 2)[0]
+
+    _force_breach_tick(rig)
+    assert co.peak_arm_ratio(2, "autonomous") > 0.0
+    assert co.outcome(2) == "aborted: arm torque limit"
+    assert co._bays[2].auto is None  # noqa: SLF001
+    assert co.state(2) in (BayState.QUEUED, BayState.RESCUE)  # QUEUED, promoted at once
+    alerts = rig.sink.events[n_events:]
+    assert [e.kind for e in alerts] == ["STALL_ALERT"]
+    assert alerts[0].bay_id == 2 and alerts[0].metadata["reason"] == "arm torque limit"
+    assert len(rig.reasoner.contexts) == n_ctx + 1
+    assert rig.reasoner.contexts[-1].event_kind == "STALL_ALERT"
+
+    for _ in range(60):  # the 3 cm retract completes and the arm rests there
+        co.tick()
+    assert _latch_rel(rig, 2)[0] == pytest.approx(x_breach - 0.03, abs=0.01)
+    assert co.rig(2).bolt_x() < BOLT_CLEARED_M
+    assert co.outcome(2) == "aborted: arm torque limit"
+    assert len(rig.sink.events) == n_events + 1  # no further alerts
