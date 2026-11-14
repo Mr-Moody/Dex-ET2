@@ -231,13 +231,22 @@ def unoq() -> Iterator[object]:
 
 @needs_models
 def test_atc_headless_scripted_6_beat_stage_run_completes(unoq: object) -> None:
-    from teleop.atc.stage import BEATS, STAGE_SEED, StageController, StageDirector
+    from teleop.atc.stage import BEATS, StageController, StageDirector
+    from teleop.commands.atc import DEFAULT_CONFIG, load_config, resolve_seed
     from teleop.unoq.client import UnoQClient
 
     assert isinstance(unoq, UnoQClient)
     sink, reasoner, speaker = RecordingSink(), RecordingReasoner(), FakeSpeaker()
+    # The show's own settings: what `teleop atc --headless --script` resolves by default.
+    cfg = load_config(DEFAULT_CONFIG, {"script": True})
     controller = StageController.build(
-        unoq, sink, reasoner, audio=AudioCues(speaker), cycle_dwell_s=0.5, seed=STAGE_SEED
+        unoq,
+        sink,
+        reasoner,
+        audio=AudioCues(speaker),
+        cycle_dwell_s=cfg.cycle_dwell_s,
+        include_background_bays=cfg.background_bays,
+        seed=resolve_seed(cfg),
     )
     director = StageDirector(controller)
     for _ in range(12_000):

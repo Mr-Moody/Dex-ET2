@@ -857,8 +857,10 @@ class ScriptedGlove:
 
 # Run seed for the scripted stage show: the smallest seed >= 0 at which the full 6-beat run
 # passes with realistic estimate error and the randomized 20-rollout gate (>= 18/20). The spec
-# allows fixed confirmed seeds for the stage; seeds 0-4 give 16, 17, -, 13 and 9 of 20.
-STAGE_SEED = 5
+# allows fixed confirmed seeds for the stage. Pinned against the show's own config (cycle dwell
+# 1.0 s, background bays on, as `teleop atc --script` runs): seeds 0-9 give gate 18, 13, none
+# (earlier beat fails), 11, 9, 15, none, 17, 8 and 12 of 20, so only seed 0 passes the show.
+STAGE_SEED = 0
 
 BEATS: tuple[str, ...] = (
     "1 Routine autonomy",
