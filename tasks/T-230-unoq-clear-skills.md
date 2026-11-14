@@ -1,12 +1,12 @@
 ---
 id: T-230
 title: Board clear_skills op to forget a SKU's skills and prototypes
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: claude-code
+branch: feat/console-pages-data-collection
 depends_on: []
 plan: docs/superpowers/plans/2026-11-14-console-pages-data-collection.md
-claimed_at: null
+claimed_at: '2026-11-14T19:09:55+00:00'
 ---
 
 - [ ] `OP_CLEAR_SKILLS` across protocol, server, classifier, client and switch
