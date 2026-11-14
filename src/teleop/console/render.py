@@ -81,7 +81,6 @@ class FeedRenderer:
         self._renderers: dict[tuple[int, int], Any] = {}
         self._bay_lights = _bay_lights(self.model)
         self._base_active = np.array(self.model.light_active, dtype=np.uint8).copy()
-        self._rescue_opt: Any = None
 
     def _renderer(self, width: int, height: int) -> Any:
         key = (width, height)
@@ -100,15 +99,6 @@ class FeedRenderer:
         for i in self._bay_lights.get(bay, []):
             active[i] = self._base_active[i]
 
-    def _scene_option(self, feed: FeedSpec) -> Any:
-        if feed.role != "main":
-            return None
-        if self._rescue_opt is None:
-            from teleop.retarget.clutch import rescue_view_option
-
-            self._rescue_opt = rescue_view_option()
-        return self._rescue_opt
-
     def render(
         self, snap: SimSnapshot, feeds: Sequence[FeedSpec], wall_t: float
     ) -> tuple[list[tuple[int, bytes]], dict[int, float]]:
@@ -124,7 +114,7 @@ class FeedRenderer:
         for feed in feeds:
             self._light_only(feed.bay)
             r = self._renderer(feed.width, feed.height)
-            r.update_scene(d, feed.camera, scene_option=self._scene_option(feed))
+            r.update_scene(d, feed.camera)  # every feed shows the full arm and hand
             pixels = r.render()
             buf = io.BytesIO()
             Image.fromarray(pixels).save(buf, format="JPEG", quality=self.quality)
