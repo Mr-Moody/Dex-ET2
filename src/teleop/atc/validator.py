@@ -374,6 +374,18 @@ class BayRig:
         for name, value in (fingers or {}).items():
             self.data.ctrl[self._hand_act[name]] = value
 
+    def clip_fingers(self, fingers: Mapping[str, float]) -> dict[str, float]:
+        """Hand targets as MuJoCo applies them: clamped to each ctrl-limited actuator's range."""
+        out: dict[str, float] = {}
+        for name, value in fingers.items():
+            a = self._hand_act[name]
+            v = float(value)
+            if bool(self.model.actuator_ctrllimited[a]):
+                lo, hi = (float(x) for x in self.model.actuator_ctrlrange[a])
+                v = min(max(v, lo), hi)
+            out[name] = v
+        return out
+
 
 def step_physics(model: Any, data: Any, n: int = SUBSTEPS) -> None:
     for _ in range(n):

@@ -1353,8 +1353,11 @@ class AtcCoordinator:
     def _episode_tick(self, bay: _Bay, wrist: Pose, fingers: Mapping[str, float] | None) -> None:
         if self._observer is None or not bay.recording:
             return
+        # Record the hand targets MuJoCo actually applies: a DMP or policy output can overshoot
+        # an actuator's ctrlrange (MuJoCo clamps ctrl), and QC would reject the raw value.
         try:
-            self._observer.on_tick(bay.bay_id, bay.rig, wrist, {**bay.fingers, **(fingers or {})})
+            applied = bay.rig.clip_fingers({**bay.fingers, **(fingers or {})})
+            self._observer.on_tick(bay.bay_id, bay.rig, wrist, applied)
         except Exception:
             logger.exception("episode observer failed")
 
