@@ -1,7 +1,7 @@
 ---
 id: T-172
 title: Console feed layout, telemetry adapter and WebSocket/HTTP server
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/console-protocol
 depends_on: []
