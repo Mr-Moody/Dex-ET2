@@ -1,12 +1,12 @@
 ---
 id: T-052
 title: Disable AI attribution in Claude Code settings and the plan
-status: in_review
-owner: lead-laptop
-branch: chore/no-ai-attribution-settings
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: null
-claimed_at: '2026-11-14T00:13:28+00:00'
+claimed_at: null
 ---
 
 Land what closed PR #4 had that `main` still lacks.
