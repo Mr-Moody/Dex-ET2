@@ -77,19 +77,19 @@ body {
 /* ---------------------------------------------------------------- header */
 
 .bar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 1.1rem;
   min-height: 2.9rem;
   padding: 0 16px;
   border-bottom: 1px solid var(--hair);
   background: var(--panel);
 }
-.bar__site { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.bar__site { flex: none; display: flex; align-items: center; gap: 10px; }
+.bar__views, .bar__live { flex: none; }
 .bar__mark { flex: none; width: 1.9rem; height: 1.9rem; }
 .bar h1 { font-size: var(--t-m); font-weight: 600; white-space: nowrap; }
-.bar__live { justify-self: end; display: flex; align-items: center; gap: 14px; }
+.bar__live { display: flex; align-items: center; gap: 14px; }
 .bar__clock { font-size: var(--t-l); font-weight: 300; }
 
 .live { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
@@ -140,25 +140,27 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  grid-template-areas: "brief brief" "wall wall" "keys health";
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas: "wall wall" "keys health";
   align-items: stretch;
 }
-.brief { grid-area: brief; }
 .wall-wrap { grid-area: wall; }
 .keys { grid-area: keys; }
 
-/* ---------------------------------------------------------------- status banner
-   The annunciator: a filled state window on the left, then what is happening and what to press. */
+/* ---------------------------------------------------------------- status (in the header bar)
+   One line: a state chip, a short headline, and the action to take if there is one. The longer
+   hint shows only on wide screens and is always the tooltip; the cameras keep the screen. */
 
 .brief {
   --tone: var(--faint);
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
-  align-items: stretch;
-  gap: 0 1.1rem;
-  min-height: 4rem;
-  margin: var(--gap) var(--gap) 0;
-  background: var(--panel);
+  align-items: center;
+  gap: 0.7rem;
+  padding-left: 1.1rem;
+  border-left: 1px solid var(--hair);
+  overflow: hidden;  /* never push the layout switch or the clock off the bar */
 }
 .brief[data-tone="idle"] { --tone: var(--nominal); }
 .brief[data-tone="armed"] { --tone: var(--attn); }
@@ -172,23 +174,18 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
 @keyframes brief-in { 50% { opacity: 0.35; } }
 .brief__tag {
   flex: none;
-  display: grid;
-  place-items: center;
-  min-width: 7.4rem;
-  padding: 0.4rem 1rem;
-  white-space: nowrap;
+  padding: 0.15rem 0.7rem;
   background: var(--tone);
   color: var(--ink);
-  font-size: var(--t-s);
+  font-size: var(--t-xs);
   font-weight: 700;
-  line-height: 1.15;
-  text-align: center;
+  white-space: nowrap;
 }
 .brief[data-tone="connecting"] .brief__tag { background: var(--panel-2); color: var(--text); }
-.brief__body { flex: 1 1 16rem; min-width: 0; display: grid; align-content: center; gap: 2px; padding: 0.55rem 0; }
-.brief__head { font-size: var(--t-xl); font-weight: 600; line-height: 1.15; }
-.brief__hint { color: var(--muted); font-size: var(--t-s); }
-.brief__hint:empty { display: none; }
+.brief__body { flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 0.8rem; }
+.brief__head { font-size: var(--t-m); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brief__hint { display: none; flex: 1 1 0; min-width: 0; color: var(--muted); font-size: var(--t-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (min-width: 1500px) { .brief__hint:not(:empty) { display: block; } }
 kbd {
   display: inline-block;
   min-width: 1.7em;
@@ -201,30 +198,14 @@ kbd {
   font: 600 var(--t-xs)/1.5 var(--font);
   text-align: center;
 }
-.brief__actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  align-content: center;
-  justify-content: flex-end;
-  gap: 6px;
-  padding: 0.5rem 0.9rem 0.5rem 0;
-  max-width: 46%;
-}
+.brief__actions { flex: none; display: flex; align-items: center; gap: 6px; }
 .brief__actions:empty { display: none; }
-.brief__beat {
-  flex: none;
-  display: grid;
-  align-content: center;
-  text-align: right;
-  padding: 0 0.9rem;
-  border-left: 1px solid var(--hair);
-}
+.brief__beat { flex: none; margin-left: auto; display: flex; align-items: baseline; gap: 0.4rem; white-space: nowrap; }
 .brief__beat-label { font-size: var(--t-xs); color: var(--muted); }
-.brief__beat-name { font-size: var(--t-m); font-weight: 600; }
+.brief__beat-name { font-size: var(--t-xs); font-weight: 600; }
 
 .actbtn {
-  min-height: 2.2rem;
+  min-height: 1.9rem;
   padding: 0 0.9rem;
   border: 1px solid var(--faint);
   border-radius: 4px;
@@ -235,7 +216,7 @@ kbd {
   cursor: pointer;
 }
 .actbtn:hover { border-color: var(--text); }
-.actbtn--accent { border-color: var(--attn); background: var(--attn); color: var(--ink); font-size: var(--t-s); }
+.actbtn--accent { border-color: var(--attn); background: var(--attn); color: var(--ink); }
 .actbtn--accent:hover { background: #ffd23e; border-color: #ffd23e; }
 
 /* ---------------------------------------------------------------- keyboard bar (quiet) */
@@ -331,7 +312,7 @@ kbd {
 
 .wall {
   min-height: 0;
-  padding: var(--gap);
+  padding: var(--gap) var(--gap) 4px;
   display: grid;
   gap: var(--gap);
   grid-template-columns: 1fr 1fr;
@@ -798,12 +779,13 @@ kbd {
   .bar { padding: 0 10px; }
   .panel { padding: 0.55rem 0.75rem; }
   .drawer summary, .advisor, .demo, .dummy { padding-left: 0.75rem; padding-right: 0.75rem; }
-  .brief__tag { min-width: 6rem; padding: 0.4rem 0.7rem; }
+  .bar { gap: 0.7rem; }
+  .bar h1 { display: none; }  /* the logo stands in for the title */
+  .brief { padding-left: 0.7rem; gap: 0.5rem; }
   .keys { gap: 6px 0.9rem; }
 }
 
 @media (max-height: 760px) {
-  .brief { min-height: 4.2rem; }
   .panel { padding-top: 0.5rem; padding-bottom: 0.5rem; }
 }
 
@@ -815,8 +797,7 @@ kbd {
   .wall.is-rescue, .wall.is-pin, .wall.is-overview { grid-template-columns: 1fr; grid-template-rows: auto 62vw auto; }
   .strip { grid-column: 1; grid-row: 3; grid-template-columns: repeat(3, 1fr); grid-template-rows: 110px; }
   .rail { border-left: 0; }
-  .brief { flex-wrap: wrap; }
-  .brief__actions { max-width: none; padding-left: 0.9rem; }
+  .bar { flex-wrap: wrap; padding-top: 6px; padding-bottom: 6px; }
   .toasts { position: fixed; bottom: 12px; right: 12px; }
 }
 

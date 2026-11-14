@@ -917,8 +917,8 @@ function situation(t) {
       };
     }
     const head = refused
-      ? `Bay ${r} refused out-of-distribution fault`
-      : `Bay ${r} waiting for operator rescue`;
+      ? `Bay ${r} refused, needs you`
+      : `Bay ${r} waiting for you`;
     if (t.selected_bay !== r) {
       acts.push({ label: `Select Bay ${r}`, accent: true, run: () => selectBay(r) });
       return {
@@ -955,7 +955,7 @@ function situation(t) {
   if (val) {
     return {
       tone: "validating", tag: "Learning",
-      head: `Validating Bay ${val.id} rescue skill`,
+      head: `Checking Bay ${val.id} skill in simulation`,
       hint: "Fitting 30-kernel RBF-DMP and testing 3 perturbed MuJoCo rollouts before fleet deployment.",
       keys: [],
       actions: [],
@@ -965,7 +965,7 @@ function situation(t) {
   if (stalled) {
     return {
       tone: "stalled", tag: `Stall · Bay ${stalled.id}`,
-      head: `Bay ${stalled.id} contact stall detected`,
+      head: `Bay ${stalled.id} stalled`,
       hint: "Classifying 300 ms contact torque signature against the Fleet Skill Library…",
       keys: [],
       actions: [],
@@ -975,7 +975,7 @@ function situation(t) {
   if (auto) {
     return {
       tone: "auto", tag: `Autonomous · Bay ${auto.id}`,
-      head: `Bay ${auto.id} executing learned recovery skill`,
+      head: `Bay ${auto.id} running the learned skill`,
       hint: `Warping ${auto.skill || "fleet DMP"} into Bay ${auto.id}'s latch frame inside the torque safety tube.`,
       keys: [],
       actions: [{ label: `Pin Bay ${auto.id}`, accent: false, run: () => setLayoutMode("pin", auto.id) }],
@@ -984,7 +984,7 @@ function situation(t) {
   if (t.queue.length) {
     return {
       tone: "queued", tag: "Queue",
-      head: `Bay ${t.queue[0]} queued for operator takeover`,
+      head: `Bay ${t.queue[0]} waiting for you`,
       hint: "Holding zero-velocity hover until the active rescue slot is free.",
       keys: [],
       actions: [],
@@ -1005,8 +1005,8 @@ function situation(t) {
   if (armed.length) {
     const what = armed.map((b) => `Bay ${b.id} (${faultName(b.fault.kind)})`).join(", ");
     return {
-      tone: "armed", tag: "Fault armed",
-      head: `Next-cycle fault queued: ${what}`,
+      tone: "armed", tag: "Armed",
+      head: `Fault next cycle: ${what}`,
       hint: "Applies automatically as soon as the current pallet cycle completes.",
       keys: [],
       actions: armed.map((b) => ({ label: `Cancel Bay ${b.id}`, accent: false, run: () => sendFault(b.id, "clear") })),
@@ -1014,8 +1014,8 @@ function situation(t) {
   }
   return {
     tone: "idle",
-    tag: t.gate && t.gate.ok ? "Fleet skill active" : "Nominal",
-    head: "All active bays are running on their own",
+    tag: "Nominal",
+    head: "All bays running",
     hint: "",
     keys: [],
     actions: [],
@@ -1030,9 +1030,11 @@ function updateBrief(t) {
     ui.briefKey = key;
     const brief = $("brief");
     brief.dataset.tone = s.tone;
-    $("brief-tag").textContent = s.tag;
+    // The header has room for a state word and a short headline; the hint is also the tooltip.
+    $("brief-tag").textContent = s.tag.split(" · ")[0];
     $("brief-head").textContent = s.head;
     $("brief-hint").innerHTML = s.hint;
+    brief.title = $("brief-hint").textContent;
     const actBox = $("brief-actions");
     actBox.replaceChildren();
     for (const act of s.actions || []) {

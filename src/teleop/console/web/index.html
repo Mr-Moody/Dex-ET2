@@ -34,6 +34,18 @@
       </svg>
       <h1>Fleet operations</h1>
     </div>
+    <section class="brief" id="brief" data-tone="connecting" aria-live="polite">
+      <span class="brief__tag" id="brief-tag">Status</span>
+      <div class="brief__body">
+        <h2 class="brief__head" id="brief-head">Connecting to the cell controller</h2>
+        <p class="brief__hint" id="brief-hint"></p>
+      </div>
+      <div class="brief__actions" id="brief-actions"></div>
+      <div class="brief__beat" id="beat" hidden>
+        <span class="brief__beat-label">Stage script</span>
+        <span class="brief__beat-name" id="beat-name"></span>
+      </div>
+    </section>
     <div class="seg bar__views" role="toolbar" aria-label="Camera layout">
       <button type="button" class="vbtn is-active" id="view-auto" title="Equal grid normally; a bay under rescue takes the stage on its own">Auto focus</button>
       <button type="button" class="vbtn" id="view-grid" title="All 4 bays in an equal 2x2 grid">Grid</button>
@@ -51,18 +63,6 @@
 
   <main class="desk">
     <div class="stagecol">
-      <section class="brief" id="brief" data-tone="connecting" aria-live="polite">
-        <span class="brief__tag" id="brief-tag">Status</span>
-        <div class="brief__body">
-          <h2 class="brief__head" id="brief-head">Connecting to the cell controller</h2>
-          <p class="brief__hint" id="brief-hint"></p>
-        </div>
-        <div class="brief__actions" id="brief-actions"></div>
-        <div class="brief__beat" id="beat" hidden>
-          <span class="brief__beat-label">Stage script</span>
-          <span class="brief__beat-name" id="beat-name"></span>
-        </div>
-      </section>
       <section class="health" id="health" aria-label="Hardware health" hidden></section>
 
       <div class="wall-wrap" id="wall-wrap">
