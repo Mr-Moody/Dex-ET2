@@ -1,7 +1,7 @@
 ---
 id: T-177
 title: Swap the fleet LEAP hands for five-finger Inspire hands
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/inspire-fleet-hands
 depends_on: []
