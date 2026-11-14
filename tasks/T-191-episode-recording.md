@@ -1,12 +1,12 @@
 ---
 id: T-191
 title: Wrist camera and LeRobot episode recording of ATC recoveries
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: claude-code
+branch: feat/episode-recording
 depends_on: [T-190]
 plan: docs/superpowers/plans/2026-11-14-act-recovery-plan.md
-claimed_at: null
+claimed_at: '2026-11-14T17:05:56+00:00'
 ---
 
 Adds `bay{k}/wrist_cam` and records every rescue and autonomous recovery as a LeRobot v3
