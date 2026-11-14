@@ -34,6 +34,7 @@ import contextlib
 import dataclasses
 import importlib
 import logging
+import threading
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -289,8 +290,33 @@ def _unoq_label(cfg: AtcConfig, unoq: SwitchableUnoQ) -> str:
     return "UNO Q local loopback" if unoq.is_mock else f"UNO Q {cfg.unoq_host}"
 
 
+def _console_rebuilder(
+    cfg: AtcConfig, controller: StageController, unoq: SwitchableUnoQ
+) -> Callable[[], None]:
+    """Reinstall the board console poller for the current link (may block on connect).
+
+    Shared by the swap listener and the panel check, which can run on different threads; the
+    lock keeps two rebuilds from installing over each other (and leaking a poller).
+    """
+    lock = threading.Lock()
+
+    def rebuild() -> None:
+        with lock:
+            controller.replace_hardware(_hardware_consoles(cfg, unoq))
+
+    return rebuild
+
+
+def _button_poller(controller: StageController) -> Callable[[], UnoQConsolePoller | None]:
+    """The installed board console poller (None when none is): what the laptop hears."""
+    return lambda: next((c for c in controller.hardware if isinstance(c, UnoQConsolePoller)), None)
+
+
 def _swap_listener(
-    cfg: AtcConfig, controller: StageController, suffix: str
+    cfg: AtcConfig,
+    controller: StageController,
+    suffix: str,
+    rebuild: Callable[[], None] | None = None,
 ) -> Callable[[SwitchableUnoQ], None]:
     """``SwitchableUnoQ.on_swap``: restart the board console poller and refresh the header.
 
@@ -300,7 +326,10 @@ def _swap_listener(
 
     def on_swap(unoq: SwitchableUnoQ) -> None:
         if not cfg.serial_port:
-            controller.replace_hardware(_hardware_consoles(cfg, unoq))
+            if rebuild is not None:
+                rebuild()
+            else:
+                controller.replace_hardware(_hardware_consoles(cfg, unoq))
         controller.unoq_label = _unoq_label(cfg, unoq) + suffix
         logger.info("atc: %s", controller.unoq_label)
 
@@ -430,6 +459,8 @@ def _run_booth(
                 lambda: glove_check.status().level is Level.OK,
             )
         bridge = next((c for c in hardware if isinstance(c, McuConsoleBridge)), None)
+        board_console = not cfg.serial_port  # buttons arrive over a second board connection
+        rebuild = _console_rebuilder(cfg, controller, unoq) if board_console else None
         panel = PanelCheck(
             unoq,
             cfg.unoq_host,
@@ -437,8 +468,10 @@ def _run_booth(
             cfg.unoq_tcp_port,
             serial_port=cfg.serial_port,
             local_bridge=bridge,
+            buttons=_button_poller(controller) if board_console else None,
+            rebuild_consoles=rebuild,
         )
-        unoq.on_swap.append(_swap_listener(cfg, controller, suffix))
+        unoq.on_swap.append(_swap_listener(cfg, controller, suffix, rebuild))
         stack.callback(unoq.on_swap.clear)
         panel.start()
         stack.callback(panel.stop)

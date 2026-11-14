@@ -5,6 +5,12 @@ coordinator's loop-thread requests never share a socket with it. Two consecutive
 :class:`~teleop.unoq.switch.SwitchableUnoQ` to the loopback node proactively, so the next stall is
 classified locally instead of waiting out a dead board. While on loopback it retries the board
 every ``retry_period_s`` and swaps it back in on success.
+
+The light only goes green when the laptop itself hears the buttons. With a laptop serial console
+that is the bridge's last line; with a board console it is the laptop's own console poller (the
+``buttons`` source), not the probe: the board can hear its MCU while the laptop's poller is gone
+(its connection failed after a swap, or died with a board service restart). A missing or stale
+poller is rebuilt from this thread through ``rebuild_consoles``, as on every Reconnect.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from typing import Protocol
 
 from teleop.health.model import Health, Level
 from teleop.unoq import protocol as P
@@ -28,13 +35,26 @@ MISSES_TO_FAIL = 2
 HEARTBEAT_OK_MS = 500.0
 SILENT_DETAIL = "board up but buttons not heard: is the console sketch running?"
 MOCK_DETAIL = "using local mock; keyboard works"
+NO_LINK_DETAIL = "board up but the laptop has no button connection to it; retrying"
+LINK_LOST_DETAIL = "the laptop lost its button connection to the board; retrying"
+
+
+class ButtonsLink(Protocol):
+    """The laptop's board console poller, as the panel check reads it (never blocks)."""
+
+    @property
+    def heartbeat_age_ms(self) -> int | None: ...
+
+    @property
+    def last_ok_ns(self) -> int | None: ...
 
 
 class PanelCheck:
     """``status()`` reads cached probe results only; ``step()``/``reconnect()`` do the I/O.
 
-    ``clock`` must be the clock of ``local_bridge`` when one is given (both default to
-    ``time.monotonic_ns``).
+    ``clock`` must be the clock of ``local_bridge`` and of the ``buttons`` poller when given
+    (all default to ``time.monotonic_ns``). ``buttons`` returns the installed board console
+    poller (None when none is installed); ``rebuild_consoles`` reinstalls it and may block.
     """
 
     name = "panel"
@@ -52,6 +72,8 @@ class PanelCheck:
         clock: Callable[[], int] = time.monotonic_ns,
         local_bridge: McuConsoleBridge | None = None,
         serial_port: str | None = None,
+        buttons: Callable[[], ButtonsLink | None] | None = None,
+        rebuild_consoles: Callable[[], None] | None = None,
     ) -> None:
         self._unoq = unoq
         self._host = host
@@ -63,6 +85,11 @@ class PanelCheck:
         self._clock = clock
         self._local_bridge = local_bridge
         self._serial_port = serial_port
+        self._buttons = buttons
+        self._rebuild_consoles = rebuild_consoles
+        self._link_misses = 0
+        # A probe result older than this means probes stopped succeeding (not just between them).
+        self._probe_stale_ns = int((2 * ping_period_s + ping_timeout_s) * 1e9)
         self._io_lock = threading.Lock()  # serialises step() and reconnect()
         self._lock = threading.Lock()  # guards the cached heartbeat read by status()
         self._probe: UnoQClient | None = None
@@ -104,7 +131,8 @@ class PanelCheck:
         """One thread iteration: probe the board, or retry it when due while on loopback."""
         with self._io_lock:
             if not self._unoq.is_mock:
-                self._probe_board()
+                if self._probe_board():
+                    self._check_button_link()
             elif self._clock() - self._last_attempt_ns >= self._retry_ns:
                 self._try_board()
 
@@ -119,6 +147,7 @@ class PanelCheck:
                 self._close_probe()
                 self._misses = 0
                 self._probe_board()
+                self._rebuild()  # a dead button poller is not fixed by re-probing alone
 
     def _reopen_serial(self, bridge: McuConsoleBridge) -> None:
         """Open the new transport first; only on success hand it to the live bridge."""
@@ -143,7 +172,7 @@ class PanelCheck:
                 self._probe.close()
             self._probe = None
 
-    def _probe_board(self) -> None:
+    def _probe_board(self) -> bool:
         """``console_state`` on our own connection: proves the link and reads the heartbeat."""
         try:
             if self._probe is None:
@@ -163,10 +192,38 @@ class PanelCheck:
                 self._misses = 0
                 self._last_attempt_ns = self._clock()
                 self._unoq.swap_to_loopback()
-            return
+            return False
         self._misses = 0
         with self._lock:
             self._hb_age_ms, self._hb_at_ns = age, self._clock()
+        return True
+
+    def _button_link_live(self, link: ButtonsLink | None) -> bool:
+        if link is None:
+            return False
+        last = link.last_ok_ns
+        return last is not None and self._clock() - last <= HEARTBEAT_OK_MS * 1e6
+
+    def _check_button_link(self) -> None:
+        """Board reachable: rebuild the laptop's button poller if it is missing or stale."""
+        if self._local_bridge is not None or self._buttons is None:
+            return
+        if self._button_link_live(self._buttons()):
+            self._link_misses = 0
+            return
+        self._link_misses += 1
+        if self._link_misses >= MISSES_TO_FAIL:
+            logger.warning("panel: button connection to the board lost; reconnecting it")
+            self._rebuild()
+
+    def _rebuild(self) -> None:
+        self._link_misses = 0
+        if self._rebuild_consoles is None or self._local_bridge is not None:
+            return
+        try:
+            self._rebuild_consoles()
+        except Exception:
+            logger.warning("panel: rebuilding the board console failed", exc_info=True)
 
     def _try_board(self) -> None:
         self._last_attempt_ns = self._clock()
@@ -195,7 +252,11 @@ class PanelCheck:
             return None if heard is None else (self._clock() - heard) / 1e6
         with self._lock:
             age, at = self._hb_age_ms, self._hb_at_ns
-        return None if age is None else age + (self._clock() - at) / 1e6
+        if age is None or self._clock() - at > self._probe_stale_ns:
+            return None  # probes stopped succeeding: do not trust the last one
+        # As the board reported it at probe time: adding the time since the probe would turn a
+        # healthy heartbeat stale between two probes 1 s apart (OK/WARN flicker).
+        return float(age)
 
     def status(self) -> Health:
         health = self._status()
@@ -212,7 +273,16 @@ class PanelCheck:
                 MOCK_DETAIL,
                 can_reconnect=True,
             )
-        age = self._buttons_age_ms()
+        if self._local_bridge is None and self._buttons is not None:
+            link = self._buttons()
+            if link is None:
+                return self._warn(f"UNO Q {self._host}, buttons not connected", NO_LINK_DETAIL)
+            if not self._button_link_live(link):
+                return self._warn(f"UNO Q {self._host}, buttons not heard", LINK_LOST_DETAIL)
+            hb = link.heartbeat_age_ms
+            age = None if hb is None else float(hb)
+        else:
+            age = self._buttons_age_ms()
         if age is not None and age < HEARTBEAT_OK_MS:
             return Health(
                 self.name,
@@ -220,10 +290,7 @@ class PanelCheck:
                 f"UNO Q {self._host}, buttons live",
                 f"MCU heartbeat {age:.0f} ms ago",
             )
-        return Health(
-            self.name,
-            Level.WARN,
-            f"UNO Q {self._host}, buttons not heard",
-            SILENT_DETAIL,
-            can_reconnect=True,
-        )
+        return self._warn(f"UNO Q {self._host}, buttons not heard", SILENT_DETAIL)
+
+    def _warn(self, summary: str, detail: str) -> Health:
+        return Health(self.name, Level.WARN, summary, detail, can_reconnect=True)

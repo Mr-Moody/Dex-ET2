@@ -197,6 +197,22 @@ def test_poller_records_heartbeat_age() -> None:
             poller.close()
 
 
+def test_poller_reports_last_successful_poll() -> None:
+    clock_ns = [5_000]
+    with _server() as server:
+        poller = UnoQConsolePoller(_client(server), period_s=3600.0, clock=lambda: clock_ns[0])
+        try:
+            assert poller.last_ok_ns is None
+            poller.poll_once()
+            assert poller.last_ok_ns == 5_000
+            server.stop()
+            clock_ns[0] = 9_000
+            poller.poll_once()  # fails: the last success stays put
+            assert poller.last_ok_ns == 5_000
+        finally:
+            poller.close()
+
+
 def test_poller_drops_bay_state_failures() -> None:
     with _server() as server:
         client = _client(server)

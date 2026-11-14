@@ -217,6 +217,82 @@ def test_swap_listener_refreshes_label_and_consoles() -> None:
         server.stop()
 
 
+def _wait_for(pred: Any, timeout_s: float = 3.0) -> bool:
+    import time
+
+    end = time.monotonic() + timeout_s
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return bool(pred())
+
+
+def test_panel_rebuilds_the_button_poller_after_a_board_restart() -> None:
+    """A board service restart kills the laptop's button poller: the light must not stay green,
+    and the panel check reinstalls the poller (no hardware: two in-process boards)."""
+    from teleop.atc.stage import UnoQConsolePoller
+    from teleop.atc.types import ConsoleInputState
+    from teleop.health.panel import PanelCheck
+    from teleop.unoq import protocol as P
+    from teleop.unoq.client import UnoQClient
+    from teleop.unoq.server import UnoQServer, console_to_dict
+    from teleop.unoq.switch import SwitchableUnoQ
+
+    class Board(UnoQServer):
+        def _console_state(self, _: dict[str, Any]) -> dict[str, Any]:
+            return P.ok(console=console_to_dict(ConsoleInputState()), mcu_heartbeat_age_ms=50)
+
+    class Controller:
+        def __init__(self) -> None:
+            self.hardware: list[Any] = []
+            self.unoq_label = ""
+
+        def replace_hardware(self, consoles: Any) -> None:
+            old, self.hardware = self.hardware, list(consoles)
+            for c in old:
+                c.close()
+
+    first = Board(host="127.0.0.1", udp_port=0, tcp_port=0).start()
+    cfg = AtcConfig(unoq_host="127.0.0.1")
+    cfg.unoq_udp_port, cfg.unoq_tcp_port = first.udp_port, first.tcp_port
+    unoq = SwitchableUnoQ(UnoQClient("127.0.0.1", first.udp_port, first.tcp_port).connect())
+    ctl = Controller()
+    rebuild_fn: Any = atc._console_rebuilder  # pyright: ignore[reportPrivateUsage]
+    poller_fn: Any = atc._button_poller  # pyright: ignore[reportPrivateUsage]
+    rebuild = rebuild_fn(cfg, ctl, unoq)
+    rebuild()
+    (poller,) = ctl.hardware
+    assert isinstance(poller, UnoQConsolePoller)
+    panel = PanelCheck(
+        unoq,
+        "127.0.0.1",
+        first.udp_port,
+        first.tcp_port,
+        buttons=poller_fn(ctl),
+        rebuild_consoles=rebuild,
+    )
+    second: Board | None = None
+    try:
+        panel.step()
+        assert _wait_for(lambda: panel.status().level is Level.OK)
+        first.stop()  # the board service restarts on the same ports
+        second = Board(host="127.0.0.1", udp_port=cfg.unoq_udp_port, tcp_port=cfg.unoq_tcp_port)
+        second.start()
+        assert _wait_for(lambda: panel.status().level is Level.WARN)  # no lying green light
+        for _ in range(4):  # one miss on the dead probe socket, then two stale-poller steps
+            panel.step()
+        assert ctl.hardware and ctl.hardware[0] is not poller
+        assert _wait_for(lambda: panel.status().level is Level.OK)
+    finally:
+        panel.stop()
+        ctl.replace_hardware([])
+        unoq.close()
+        first.stop()
+        if second is not None:
+            second.stop()
+
+
 def test_viewer_hud_shows_health(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
