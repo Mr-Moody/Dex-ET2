@@ -1,12 +1,12 @@
 ---
 id: T-202
 title: Hotspot health check over the watchdog
-status: in_review
-owner: claude-code
-branch: feat/hotspot-health
+status: done
+owner: null
+branch: null
 depends_on: [T-200]
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: '2026-11-14T11:17:32+00:00'
+claimed_at: null
 ---
 
 Implements Task 3 of the plan.

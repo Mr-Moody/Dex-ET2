@@ -1,12 +1,12 @@
 ---
-id: T-201
+id: T-218
 title: Console 3D camera orbit/pan controls and remove bolt HUD bar
-status: in_review
-owner: tara-kas
-branch: feat/console-orbit-pan-clean-hud
-depends_on: [T-200]
+status: done
+owner: null
+branch: null
+depends_on: [T-217]
 plan: docs/superpowers/plans/2026-11-14-fleet-ops-console.md
-claimed_at: '2026-11-14T13:15:00+00:00'
+claimed_at: null
 ---
 
 Refines camera viewport controls and cleans up the pane overlay:
