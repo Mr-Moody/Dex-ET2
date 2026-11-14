@@ -135,9 +135,8 @@ def test_failed_reconnect_is_logged(caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="teleop.health.monitor"):
             assert mon.request_reconnect("boom") is True
             deadline = time.monotonic() + 2.0
-            while mon.snapshot_dicts() and "boom" in mon._busy and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+            while not caplog.records and time.monotonic() < deadline:
                 time.sleep(0.01)
-            time.sleep(0.05)
         records = [r for r in caplog.records if "boom" in r.getMessage()]
         assert records and records[0].levelno == logging.WARNING
         assert records[0].exc_info is not None
