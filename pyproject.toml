@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=2.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
+    "solders>=0.23",
     "winrt-runtime>=4.1.0 ; sys_platform == 'win32'",
     "winrt-windows-foundation>=4!10.0.28000.2957 ; sys_platform == 'win32'",
     "winrt-windows-networking-connectivity>=4!10.0.28000.2957 ; sys_platform == 'win32'",
