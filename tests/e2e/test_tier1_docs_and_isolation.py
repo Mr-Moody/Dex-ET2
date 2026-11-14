@@ -619,6 +619,8 @@ class TestFeature12CliNoGeminiAndDeterminismTier2:
             [
                 "--headless",
                 "--no-gemini",
+                "--unoq-host",
+                "127.0.0.1",
                 "--no-audio",
                 "--no-background",
                 "--source",
@@ -653,6 +655,8 @@ class TestFeature12CliNoGeminiAndDeterminismTier2:
         rc = atc_cmd.main(
             [
                 "--headless",
+                "--unoq-host",
+                "127.0.0.1",
                 "--no-audio",
                 "--no-background",
                 "--source",

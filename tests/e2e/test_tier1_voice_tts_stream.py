@@ -500,7 +500,7 @@ class TestFeature5SseGeminiTtsStreamingTier2:
             assert out == pcm
             sent_body = mock_gemini_server.requests[-1].json_body
             assert sent_body is not None
-            assert tricky in json.dumps(sent_body, ensure_ascii=False)
+            assert sent_body["contents"][0]["parts"][0]["text"] == tricky
         finally:
             if hasattr(streamer, "close"):
                 streamer.close()

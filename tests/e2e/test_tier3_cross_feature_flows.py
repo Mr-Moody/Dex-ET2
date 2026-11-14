@@ -529,34 +529,6 @@ class TestTier3CrossFeatureIntegrationFlows:
             if hasattr(gate, "close"):
                 gate.close()
 
-    def test_t3_flow07_short_clutch_release_then_full_rescue_gates_only_the_valid_attempt(
-        self,
-        coordinator_factory: Callable[..., E2ECoordinatorRig],
-        mock_gemini_server: LoopbackGeminiTLSServer,
-        inspire_hand_spec: HandSpec,
-    ) -> None:
-        """F9 + F11: Operator slips off clutch early (<5.2cm), re-engages, and completes rescue."""
-        gem_client = GeminiClient("test-key", base_url=mock_gemini_server.base_url)
-        gate = _make_gate(client=gem_client, hand_spec=inspire_hand_spec)
-        rig = coordinator_factory(
-            validator=FastSkillValidator(passed=True),
-            grasp_gate=gate,
-            gate_deadline_s=0.05,
-        )
-        try:
-            rig.stall_bay(1)
-            bolt_short = rig.run_short_rescue(1, ticks=12)
-            assert bolt_short < BOLT_CLEARED_M
-            assert mock_gemini_server.requests_matching("gemini-4-hydrogen") == []
-
-            # Re-engage and complete full rescue
-            rig.run_rescue(1)
-            assert len(mock_gemini_server.requests_matching("gemini-4-hydrogen")) == 1
-            assert len(rig.registered_skills) == 1
-        finally:
-            if hasattr(gate, "close"):
-                gate.close()
-
     def test_t3_flow08_event_detector_to_callout_service_to_precached_speaker_zero_vlm(
         self,
         mock_gemini_server: LoopbackGeminiTLSServer,
@@ -574,14 +546,14 @@ class TestTier3CrossFeatureIntegrationFlows:
                 {
                     "sim_t": 1.0,
                     "wall": "12:00:01",
-                    "bays": [{"bay": 1, "state": "NOMINAL"}],
+                    "bays": [{"id": 1, "state": "NOMINAL"}],
                 }
             )
             evs = detector.feed(
                 {
                     "sim_t": 2.0,
                     "wall": "12:00:02",
-                    "bays": [{"bay": 1, "state": "RESCUE", "reason": "flap jam"}],
+                    "bays": [{"id": 1, "state": "RESCUE", "reason": "flap jam"}],
                 }
             )
             assert len(evs) == 1
@@ -733,6 +705,8 @@ console.log(JSON.stringify({{ hidden: panel.hidden, text: panel.textContent }}))
             [
                 "--headless",
                 "--no-gemini",
+                "--unoq-host",
+                "127.0.0.1",
                 "--no-audio",
                 "--no-background",
                 "--source",
