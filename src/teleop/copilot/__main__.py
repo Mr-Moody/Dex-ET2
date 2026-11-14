@@ -50,7 +50,7 @@ CALLOUT_TIMEOUT_S = 8.0
 CALLOUT_TARGET_MS = 3_000.0
 REVIEW_TIMEOUT_S = 90.0
 TTS_TIMEOUT_S = 30.0  # generous on purpose: the probe measures; the 4 s cut-off is T-212's
-TTS_TARGET_MS = 4_000.0
+TTS_TARGET_MS = 1_500.0  # speech.TTS_DEADLINE_S
 LIST_TIMEOUT_S = 10.0
 
 CALLOUT_SCHEMA: dict[str, Any] = {

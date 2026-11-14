@@ -91,7 +91,7 @@ The flags `--no-images` and `--mute` become `CopilotConfig.no_images` and `Copil
 |---|---|---|
 | Live call-outs: telemetry plus one JPEG → JSON | `gemini-4-hydrogen`, thinking `low` | The fast Gemini 4 model, multimodal, with structured output. Thinking defaults to `high`, which is too slow for a call-out, so the client sends `low`. `minimal` and `thinkingBudget` are HTTP 400 on Gemini 4, so the client offers neither. Fallback: `gemini-3.8-flash`. |
 | Deep review: telemetry plus up to 6 JPEGs → JSON | `gemini-4-argon`, thinking `low` | The strongest Gemini 4 model for multi-frame spatial reasoning: telling a clean latch clearance from a fragile scrape or a pinned bolt. It runs off the critical path (90 s timeout, at most 20 reviews an hour). Thinking is `low` for speed; set `COPILOT_REVIEW_THINKING=high` for harder cases. Paid tier only. The introductory price ends 30 Nov 2026. |
-| Speech | `gemini-3.8-flash-lite-tts`, voice `Kore` | The low-latency Gemini TTS tier, on the same key and client. It returns 24 kHz, 16-bit mono PCM, which the client wraps in a WAV. If speech takes more than 4 s, `T-212` falls back to the system voice. |
+| Speech | `gemini-3.8-flash-lite-tts`, voice `Kore` | The low-latency Gemini TTS tier, on the same key and client. It returns 24 kHz, 16-bit mono PCM, which the client wraps in a WAV. If speech takes more than 1.5 s, `T-212` falls back to the system voice. |
 | Offline backup (`T-214`) | `gemma4:e4b` | The largest multimodal Gemma that runs on this laptop's CPU and Iris Xe next to the simulation. Used for call-outs only, never for reviews. |
 
 Speech uses a dedicated TTS model rather than the text models.
@@ -335,7 +335,7 @@ still runs: every call-out is the template, spoken with the system voice.
   10 s are dropped. Only `say` is spoken, never `detail`.
 - **Gemini TTS** (`COPILOT_TTS_MODEL`) returns a WAV, played with the first available of
   `paplay`, `aplay`, `afplay` or PowerShell `System.Media.SoundPlayer`.
-- **Fallback:** if TTS fails or takes longer than 4 s, the same line is spoken with the system
+- **Fallback:** if TTS fails or takes longer than 1.5 s, the same line is spoken with the system
   voice (`System.Speech` on Windows, `say` on macOS, `spd-say`/`espeak` on Linux). The late WAV is
   never played, so lines are never out of order, but it is cached: template lines repeat, so the
   next "Clutch engaged on bay 1." plays the Gemini voice at once. The cache holds 32 lines.
@@ -375,6 +375,8 @@ refusal. The JSONL log held only frame hashes.
   line. It answered every time, within the 8 s limit.
 - **Gemini TTS missed the 4 s cut-off on every line** (5 of 5), so the system voice spoke them all.
   Because each fallback first waits the full 4 s, spoken lines trailed their events by 4–9 s.
+  The cut-off is now **1.5 s** (`TTS_DEADLINE_S`), so the system voice starts about 1.5 s after a
+  line is dequeued. Repeated lines still get the Gemini voice once their late audio is cached.
 - **A clutch flip about 1 s after a stall** used to cancel the stall's pending model request. Now
   templated events let a pending model answer finish; only a newer model event supersedes it.
 - `runs/copilot/*.jsonl` now also has a `speech` record per line (`route`: `tts`, `system`,

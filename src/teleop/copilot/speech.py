@@ -5,7 +5,7 @@
   has waited longer than ``stale_after_s`` (10 s) is dropped instead of spoken.
 - **Gemini TTS** turns the line into a WAV, which is played with the first available of
   ``paplay``, ``aplay``, ``afplay`` or PowerShell ``SoundPlayer``.
-- **Fallback.** If TTS fails or has not answered within ``tts_deadline_s`` (4 s), the same line
+- **Fallback.** If TTS fails or has not answered within ``tts_deadline_s`` (1.5 s), the same line
   is spoken with the system voice. A late WAV is dropped, never played out of order.
 - **Mute.** With ``mute`` set nothing is spoken; the call-outs are still printed and logged.
 
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 MAX_WAITING = 2
 STALE_AFTER_S = 10.0
-TTS_DEADLINE_S = 4.0
+TTS_DEADLINE_S = 1.5  # Gemini TTS took 4+ s on every live line; see docs/copilot.md
 TTS_REQUEST_TIMEOUT_S = 15.0  # per-socket limit for the late request; the deadline is above
 WAV_CACHE_SIZE = 32  # template lines repeat ("Clutch engaged on bay 1."), so keep their audio
 PLAY_TIMEOUT_S = 30.0
