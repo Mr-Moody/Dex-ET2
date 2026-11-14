@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import time
 from collections.abc import Callable
+from email.message import Message as EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 import pytest
 
@@ -17,11 +21,14 @@ from teleop.reasoning.nemotron import (
     DEFAULT_VERDA_BASE_URL,
     MAX_FIELD_CHARS,
     MAX_HEADLINE_CHARS,
+    SYSTEM_PROMPT,
     ChatTransport,
+    HttpStatusError,
     ReasonerError,
     UrllibChatTransport,
     VerdaNemotronPlaceholder,
     VerdaNemotronReasoner,
+    _http_error_detail,
     build_messages,
     context_to_dict,
     main,
@@ -128,27 +135,43 @@ def test_reasoners_satisfy_fleet_reasoner_protocol() -> None:
 
 
 def test_resolve_completions_url_normalises_variants_and_rejects_bad_schemes() -> None:
+    assert DEFAULT_VERDA_BASE_URL == "https://inference.verda.com/v1"
+    assert SYSTEM_PROMPT.startswith("detailed thinking off\n")
     assert (
-        resolve_completions_url("https://pod.containers.datacrunch.io")
-        == "https://pod.containers.datacrunch.io/v1/chat/completions"
+        resolve_completions_url("https://containers.verda.com/my-nemotron")
+        == "https://containers.verda.com/my-nemotron/v1/chat/completions"
     )
     assert (
-        resolve_completions_url("https://pod.containers.datacrunch.io/")
-        == "https://pod.containers.datacrunch.io/v1/chat/completions"
+        resolve_completions_url("https://containers.verda.com/my-nemotron/")
+        == "https://containers.verda.com/my-nemotron/v1/chat/completions"
     )
     assert (
-        resolve_completions_url("https://inference.datacrunch.io/v1")
-        == "https://inference.datacrunch.io/v1/chat/completions"
+        resolve_completions_url("https://inference.verda.com/v1")
+        == "https://inference.verda.com/v1/chat/completions"
     )
     assert (
-        resolve_completions_url("https://inference.datacrunch.io/v1/")
-        == "https://inference.datacrunch.io/v1/chat/completions"
+        resolve_completions_url("https://inference.verda.com/v1/")
+        == "https://inference.verda.com/v1/chat/completions"
     )
     assert (
-        resolve_completions_url("http://127.0.0.1:8000/v1/chat/completions")
-        == "http://127.0.0.1:8000/v1/chat/completions"
+        resolve_completions_url("https://inference.verda.com/v1?routing=fast")
+        == "https://inference.verda.com/v1/chat/completions?routing=fast"
     )
-    for bad in ("", "   ", "not-a-url", "file:///etc/passwd", "ftp://verda.com", "https://a b.com"):
+    assert (
+        resolve_completions_url("http://127.0.0.1:8000/v1/chat/completions?foo=1")
+        == "http://127.0.0.1:8000/v1/chat/completions?foo=1"
+    )
+    for bad in (
+        "",
+        "   ",
+        "not-a-url",
+        "file:///etc/passwd",
+        "ftp://verda.com",
+        "https://a b.com",
+        "http://:8000",
+        "https://@",
+        "http://verda.com:notaport",
+    ):
         with pytest.raises(ValueError):
             resolve_completions_url(bad)
 
@@ -179,12 +202,18 @@ def test_from_env_selects_mode_and_never_calls_network_at_init() -> None:
 
     assert fake.calls == []
 
-    with pytest.raises(ValueError):
-        VerdaNemotronReasoner(timeout_s=0.0)
-    with pytest.raises(ValueError):
-        VerdaNemotronReasoner(timeout_s=float("nan"))
-    with pytest.raises(ValueError):
-        VerdaNemotronReasoner(max_tokens=0)
+    for bad_kwargs in (
+        {"timeout_s": 0.0},
+        {"timeout_s": float("nan")},
+        {"max_tokens": 0},
+        {"temperature": -0.1},
+        {"temperature": float("nan")},
+        {"close_grace_s": -1.0},
+        {"close_grace_s": float("nan")},
+        {"max_workers": 0},
+    ):
+        with pytest.raises(ValueError):
+            VerdaNemotronReasoner(**bad_kwargs)  # type: ignore[arg-type]
 
 
 # ── Offline deterministic fallback across all event kinds & non-finite floats ────────────────
@@ -414,6 +443,192 @@ def test_parser_handles_think_blocks_markdown_fences_content_arrays_and_clamping
     assert len(v2.headline) == MAX_HEADLINE_CHARS and v2.headline.endswith("...")
     assert v2.model == "nvidia/default"
 
+    # 3. Prompt-prefilled assistant "<think>\n" (only closing </think> in content, even with a
+    # draft JSON object inside the thinking trace) strips everything through </think>.
+    prefilled_think = 'Draft check: {"headline": "draft-only"}.\n</think>\n' + json.dumps(
+        {
+            "headline": "Bay 2: pinned bolt refused",
+            "operator_guidance": "Inspect bolt before rescue.",
+            "compliance_rationale": "d_M=7.40 > 3.0.",
+        }
+    )
+    v3 = parse_verdict_response(
+        chat_envelope(prefilled_think, model="nvidia/nemotron-prefill"),
+        default_model="fallback",
+        latency_ms=15.0,
+    )
+    assert v3.headline == "Bay 2: pinned bolt refused"
+    assert v3.operator_guidance == "Inspect bolt before rescue."
+
+
+def test_provisional_verdict_prevents_stale_hud_across_phase_transitions() -> None:
+    started_gate = threading.Event()
+    release_gate = threading.Event()
+
+    def responder(payload: dict[str, Any]) -> dict[str, Any]:
+        user_msg = str(payload["messages"][-1]["content"])
+        if "STALL_ALERT" in user_msg:
+            return chat_envelope(
+                json.dumps(
+                    {
+                        "headline": "Live STALL_ALERT verdict",
+                        "operator_guidance": "Hold clutch.",
+                        "compliance_rationale": "Stall detected.",
+                    }
+                )
+            )
+        started_gate.set()
+        release_gate.wait(timeout=2.0)
+        return chat_envelope(
+            json.dumps(
+                {
+                    "headline": "Live VALIDATION_GATE verdict",
+                    "operator_guidance": "Skill promoted.",
+                    "compliance_rationale": "3/3 rollouts passed.",
+                }
+            )
+        )
+
+    fake = FakeVerdaTransport(responder=responder)
+    with VerdaNemotronReasoner(api_key="sk-verda", model="nemotron-live", transport=fake) as r:
+        r.submit(make_ctx(bay_id=1, event_kind="STALL_ALERT"))
+        assert r.flush(timeout_s=1.0)
+        v_stall = r.latest_verdict(1)
+        assert v_stall is not None and v_stall.headline == "Live STALL_ALERT verdict"
+
+        # Transition Bay 1 to VALIDATION_GATE while the remote call is still in flight:
+        # HUD immediately sees fresh VALIDATION_GATE provisional guidance (not stale STALL_ALERT),
+        # then upgrades seamlessly once the remote call completes.
+        r.submit(
+            make_ctx(
+                bay_id=1,
+                event_kind="VALIDATION_GATE",
+                is_ood=False,
+                rollout_passed=3,
+                rollout_total=3,
+            )
+        )
+        assert started_gate.wait(timeout=1.0)
+        v_mid = r.latest_verdict(1)
+        assert v_mid is not None
+        assert "3/3 PASS" in v_mid.headline
+        assert v_mid.model == "placeholder:nemotron-live"
+
+        release_gate.set()
+        assert r.flush(timeout_s=1.0)
+        v_done = r.latest_verdict(1)
+        assert v_done is not None
+        assert v_done.headline == "Live VALIDATION_GATE verdict"
+        assert v_done.model == "nvidia/nemotron-verda-live"
+
+
+def test_http_400_on_response_format_retries_without_json_mode_and_caches_capability() -> None:
+    seen_formats: list[bool] = []
+
+    def strict_vllm_responder(payload: dict[str, Any]) -> dict[str, Any]:
+        has_rf = "response_format" in payload
+        seen_formats.append(has_rf)
+        if has_rf:
+            raise HttpStatusError(400, "guided decoding response_format unsupported with thinking")
+        return chat_envelope(
+            "<think>checking telemetry</think>"
+            + json.dumps(
+                {
+                    "headline": "Recovered without response_format",
+                    "operator_guidance": "Hold clutch and depress flap.",
+                    "compliance_rationale": "Fallback to prompt-enforced JSON succeeded.",
+                }
+            )
+        )
+
+    fake = FakeVerdaTransport(responder=strict_vllm_responder)
+    with VerdaNemotronReasoner(api_key="sk-verda", transport=fake) as r:
+        r.submit(make_ctx(bay_id=1))
+        assert r.flush(timeout_s=1.0)
+        v1 = r.latest_verdict(1)
+        assert v1 is not None and v1.headline == "Recovered without response_format"
+        # First call tried response_format=True, retried False.
+        assert seen_formats == [True, False]
+
+        # Subsequent call skips response_format directly (1 HTTP call, no wasted 400).
+        r.submit(make_ctx(bay_id=2))
+        assert r.flush(timeout_s=1.0)
+        assert seen_formats == [True, False, False]
+        assert r.counts()["remote_ok"] == 2
+        assert r.counts()["errors"] == 0
+
+
+def test_multi_bay_worker_pool_prevents_cross_bay_head_of_line_blocking() -> None:
+    bay1_entered = threading.Event()
+    release_bay1 = threading.Event()
+
+    def responder(payload: dict[str, Any]) -> dict[str, Any]:
+        telemetry = json.loads(str(payload["messages"][-1]["content"]).split("\n", 1)[1])
+        bay = int(telemetry["bay_id"])
+        if bay == 1:
+            bay1_entered.set()
+            release_bay1.wait(timeout=2.0)
+        return chat_envelope(
+            json.dumps(
+                {
+                    "headline": f"Live Bay {bay}",
+                    "operator_guidance": "ok",
+                    "compliance_rationale": "ok",
+                }
+            )
+        )
+
+    fake = FakeVerdaTransport(responder=responder)
+    with VerdaNemotronReasoner(api_key="sk-verda", transport=fake, max_workers=4) as r:
+        r.submit(make_ctx(bay_id=1))
+        assert bay1_entered.wait(timeout=1.0)
+
+        # Bay 2 submits while Bay 1 is completely blocked on the remote server:
+        # Bay 2 must complete independently without waiting for Bay 1!
+        t0 = time.perf_counter()
+        r.submit(make_ctx(bay_id=2))
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            v2 = r.latest_verdict(2)
+            if v2 is not None and v2.headline == "Live Bay 2":
+                break
+            time.sleep(0.005)
+        b2_ms = (time.perf_counter() - t0) * 1000.0
+        v2 = r.latest_verdict(2)
+        assert v2 is not None and v2.headline == "Live Bay 2"
+        assert b2_ms < 250.0
+
+        release_bay1.set()
+        assert r.flush(timeout_s=1.0)
+        v1 = r.latest_verdict(1)
+        assert v1 is not None and v1.headline == "Live Bay 1"
+
+
+def test_http_error_detail_extracts_openai_vllm_and_fastapi_messages() -> None:
+    hdrs = EmailMessage()
+    e_vllm = HTTPError(
+        "http://x",
+        400,
+        "Bad Request",
+        hdrs,
+        io.BytesIO(b'{"object":"error","message":"model does not exist"}'),
+    )
+    assert _http_error_detail(e_vllm) == "model does not exist"
+
+    e_fastapi_str = HTTPError(
+        "http://x", 422, "Unprocessable", hdrs, io.BytesIO(b'{"detail":"invalid max_tokens"}')
+    )
+    assert _http_error_detail(e_fastapi_str) == "invalid max_tokens"
+
+    e_fastapi_list = HTTPError(
+        "http://x",
+        422,
+        "Unprocessable",
+        hdrs,
+        io.BytesIO(b'{"detail":[{"msg":"Extra inputs are not permitted"}]}'),
+    )
+    assert _http_error_detail(e_fastapi_list) == "Extra inputs are not permitted"
+
 
 @pytest.mark.parametrize(
     "bad_envelope",
@@ -540,6 +755,80 @@ def test_urllib_transport_end_to_end_success_http_error_and_timeout() -> None:
         thread.join(timeout=1.0)
 
 
+def test_urllib_transport_handles_307_post_redirect_and_blocks_unsafe_redirects() -> None:
+    seen_target: dict[str, Any] = {"body": b"", "auth": None}
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            if self.path == "/v1/chat/completions":
+                self.send_response(307)
+                self.send_header("Location", "/v2/chat/completions")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path == "/v2/chat/completions":
+                seen_target["body"] = body
+                seen_target["auth"] = self.headers.get("Authorization")
+                reply = json.dumps(
+                    chat_envelope(
+                        json.dumps(
+                            {
+                                "headline": "Redirected 307 OK",
+                                "operator_guidance": "Proceed.",
+                                "compliance_rationale": "Preserved POST body across 307.",
+                            }
+                        )
+                    )
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+                return
+            if self.path == "/ssrf/v1/chat/completions":
+                self.send_response(302)
+                self.send_header("Location", "file:///etc/passwd")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        transport = UrllibChatTransport()
+        res = transport.complete(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            "sk-redir",
+            {"model": "m", "messages": []},
+            timeout_s=1.0,
+        )
+        assert res["choices"][0]["message"]["content"]
+        assert seen_target["auth"] == "Bearer sk-redir"
+        assert json.loads(seen_target["body"].decode("utf-8"))["model"] == "m"
+
+        with pytest.raises(HttpStatusError, match=r"unsafe redirect target|not allowed"):
+            transport.complete(
+                f"http://127.0.0.1:{port}/ssrf/v1/chat/completions",
+                "sk-redir",
+                {"model": "m", "messages": []},
+                timeout_s=1.0,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1.0)
+
+
 # ── Lifecycle & CLI smoke tests ──────────────────────────────────────────────────────────────
 
 
@@ -554,8 +843,9 @@ def test_close_is_idempotent_and_ignores_post_close_submits() -> None:
 
 
 def test_module_cli_status_and_demo_run_offline(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.chdir(tmp_path)  # isolate load_dotenv(find_dotenv(usecwd=True)) from repo .env
     monkeypatch.delenv("VERDA_API_KEY", raising=False)
     monkeypatch.delenv("VERDA_BASE_URL", raising=False)
     monkeypatch.setenv("NEMOTRON_MODEL", "nvidia/nemotron-cli-test")

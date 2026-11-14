@@ -2,15 +2,19 @@
 
 Pipeline for every ``ReasoningContext``::
 
-    submit(ctx)     60 Hz control thread: validates/coalesces per bay under a lock and wakes the
-      |             daemon worker. Zero network or disk I/O, bounded O(bays) memory, never raises.
+    submit(ctx)     60 Hz control thread: immediately seeds a deterministic ``triage(ctx)``
+      |             provisional verdict (so the HUD is never blank or stuck on a stale prior-phase
+      |             verdict), coalesces pending work per bay under a lock, and wakes the daemon
+      |             worker pool. Zero network or disk I/O, bounded O(bays) memory, never raises.
       |
-    worker thread   Builds a physics-grounded prompt -> POSTs OpenAI-compatible chat completion
-                    to Verda (``VERDA_BASE_URL``, ``VERDA_API_KEY``, ``NEMOTRON_MODEL``) -> strips
-                    any ``<think>`` / code-fence wrapper -> validates the 3-field JSON verdict and
-                    publishes ``ReasoningVerdict`` if no newer event superseded that bay.
+    worker pool     Up to ``max_workers`` daemon threads (at most 1 in-flight request per bay)
+                    POST OpenAI-compatible chat completions to Verda (``VERDA_BASE_URL``,
+                    ``VERDA_API_KEY``, ``NEMOTRON_MODEL``), retry without ``response_format``
+                    if an endpoint rejects ``json_object`` mode with HTTP 400/422, strip
+                    ``<think>`` / prompt-prefilled ``</think>`` / code-fence wrappers, and
+                    upgrade ``ReasoningVerdict`` if no newer event superseded that bay.
                     On missing ``VERDA_API_KEY``, timeout, HTTP error, or malformed model output,
-                    falls back cleanly to deterministic ``triage(ctx)``.
+                    retains deterministic ``triage(ctx)``.
 
 ``VerdaNemotronPlaceholder`` (from T-100) is kept unchanged for deterministic zero-thread tests;
 ``VerdaNemotronReasoner.from_env()`` selects ``"verda"`` mode when ``VERDA_API_KEY`` is configured
@@ -31,10 +35,11 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
-from typing import Any, Literal, Protocol, Self, cast, runtime_checkable
+from http.client import HTTPMessage
+from typing import IO, Any, Literal, Protocol, Self, cast, runtime_checkable
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -45,19 +50,22 @@ log = logging.getLogger(__name__)
 OOD_THRESHOLD = 3.0  # gamma_ood, spec 4.2; quoted in rationales and system prompt
 BOLT_CLEARED_CM = 5.2  # x_bolt threshold in cm (spec 2.1)
 
-DEFAULT_VERDA_BASE_URL = "https://inference.datacrunch.io/v1"
+DEFAULT_VERDA_BASE_URL = "https://inference.verda.com/v1"
 DEFAULT_NEMOTRON_MODEL = "nvidia/Llama-3.3-Nemotron-Super-49B-v1"
 DEFAULT_TIMEOUT_S = 4.0
-DEFAULT_MAX_TOKENS = 256
+DEFAULT_MAX_TOKENS = 512
+DEFAULT_MAX_WORKERS = 4
 DEFAULT_CLOSE_GRACE_S = 2.0
 
 MAX_HEADLINE_CHARS = 120
 MAX_FIELD_CHARS = 280
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
 _FENCE_RE = re.compile(r"\A```(?:json)?\s*(.*?)\s*```\Z", re.DOTALL | re.IGNORECASE)
 
 SYSTEM_PROMPT = (
+    "detailed thinking off\n"
     "You are the Fleet Reasoning Co-Pilot for a 4-bay EV-battery disassembly cell "
     "(7-DoF Franka Panda + 16-DoF LEAP Hand unlatching a 3-box sprung slide-bolt latch). "
     "Physics reference: bolt clears at x_bolt >= 5.2 cm; a sprung stopper flap stalls the bolt "
@@ -203,6 +211,15 @@ class ReasonerError(RuntimeError):
     """Any Verda endpoint, HTTP, timeout, or model output validation failure."""
 
 
+class HttpStatusError(ReasonerError):
+    """HTTP 4xx/5xx failure carrying the status code for capability-fallback retry."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(f"HTTP {status_code}: {detail}")
+        self.status_code = status_code
+        self.detail = detail
+
+
 @runtime_checkable
 class ChatTransport(Protocol):
     def complete(
@@ -216,17 +233,21 @@ class ChatTransport(Protocol):
 
 def resolve_completions_url(base_url: str) -> str:
     """Normalise ``VERDA_BASE_URL`` into a full ``.../chat/completions`` HTTP(S) endpoint."""
-    raw = base_url.strip().rstrip("/")
+    raw = base_url.strip()
     if not raw or any(ch.isspace() for ch in raw):
         raise ValueError(f"invalid VERDA_BASE_URL: {base_url!r}")
     parts = urlsplit(raw)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
-        raise ValueError(f"VERDA_BASE_URL must be an http(s) URL, got {base_url!r}")
-    if raw.endswith("/chat/completions"):
-        return raw
-    if raw.endswith("/v1"):
-        return f"{raw}/chat/completions"
-    return f"{raw}/v1/chat/completions"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"VERDA_BASE_URL must be an http(s) URL with a hostname, got {base_url!r}")
+    _ = parts.port  # raises ValueError on malformed port (e.g. "http://host:badport")
+    path = parts.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        norm_path = path
+    elif path.endswith("/v1"):
+        norm_path = f"{path}/chat/completions"
+    else:
+        norm_path = f"{path}/v1/chat/completions"
+    return urlunsplit((parts.scheme, parts.netloc, norm_path, parts.query, ""))
 
 
 def _json_safe_float(val: float | None) -> float | str | None:
@@ -271,20 +292,104 @@ def _http_error_detail(exc: HTTPError) -> str:
         raw = exc.read()
         doc: object = json.loads(raw)
         if isinstance(doc, dict):
-            err = cast(dict[str, object], doc).get("error")
+            obj = cast(dict[str, object], doc)
+            err = obj.get("error")
             if isinstance(err, dict):
                 msg = cast(dict[str, object], err).get("message")
-                if isinstance(msg, str):
-                    return msg
-            if isinstance(err, str):
-                return err
+                if isinstance(msg, str) and msg.strip():
+                    return msg.strip()
+            if isinstance(err, str) and err.strip():
+                return err.strip()
+            top_msg = obj.get("message")
+            if isinstance(top_msg, str) and top_msg.strip():
+                return top_msg.strip()
+            detail = obj.get("detail")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()
+            if isinstance(detail, list) and detail:
+                first_item = cast(list[object], detail)[0]
+                if isinstance(first_item, dict):
+                    item_msg = cast(dict[str, object], first_item).get("msg")
+                    if isinstance(item_msg, str) and item_msg.strip():
+                        return item_msg.strip()
     except (OSError, ValueError):
         pass
     return str(exc.reason)
 
 
+class _SafePostRedirectHandler(urlrequest.HTTPRedirectHandler):
+    """Restrict redirects to HTTP(S), block TLS downgrade, and preserve POST body on 307/308."""
+
+    def redirect_request(
+        self,
+        req: urlrequest.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urlrequest.Request | None:
+        target = urljoin(req.full_url, newurl.replace(" ", "%20"))
+        target_parts = urlsplit(target)
+        orig_parts = urlsplit(req.full_url)
+        if target_parts.scheme not in ("http", "https") or not target_parts.hostname:
+            raise HTTPError(
+                req.full_url,
+                code,
+                f"unsafe redirect target: {newurl!r}",
+                headers,
+                fp,
+            )
+        if orig_parts.scheme == "https" and target_parts.scheme != "https":
+            raise HTTPError(
+                req.full_url,
+                code,
+                "refusing HTTPS to HTTP redirect downgrade",
+                headers,
+                fp,
+            )
+        method = req.get_method()
+        same_origin = (target_parts.scheme, target_parts.netloc) == (
+            orig_parts.scheme,
+            orig_parts.netloc,
+        )
+        if code in (307, 308):
+            forwarded_headers: dict[str, str] = {}
+            for k, v in req.header_items():
+                low = k.lower()
+                if low == "content-length":
+                    continue
+                if low == "authorization" and not same_origin:
+                    continue
+                forwarded_headers[k] = v
+            return urlrequest.Request(
+                target,
+                data=req.data,
+                headers=forwarded_headers,
+                origin_req_host=req.origin_req_host,
+                unverifiable=True,
+                method=method,
+            )
+        if method == "POST":
+            raise HTTPError(
+                req.full_url,
+                code,
+                f"HTTP {code} redirect drops POST body; point VERDA_BASE_URL to {target}",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
 class UrllibChatTransport:
     """OpenAI-compatible ``/v1/chat/completions`` client using stdlib ``urllib.request``."""
+
+    def __init__(self) -> None:
+        self._opener = urlrequest.build_opener(
+            urlrequest.HTTPHandler(),
+            urlrequest.HTTPSHandler(),
+            _SafePostRedirectHandler(),
+        )
 
     def complete(
         self,
@@ -306,11 +411,11 @@ class UrllibChatTransport:
             method="POST",
         )
         try:
-            with urlrequest.urlopen(req, timeout=timeout_s) as resp:
+            with self._opener.open(req, timeout=timeout_s) as resp:
                 raw = cast(bytes, resp.read())
             parsed: object = json.loads(raw.decode("utf-8"))
         except HTTPError as exc:
-            raise ReasonerError(f"HTTP {exc.code}: {_http_error_detail(exc)}") from exc
+            raise HttpStatusError(exc.code, _http_error_detail(exc)) from exc
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             raise ReasonerError(str(exc)) from exc
         if not isinstance(parsed, dict):
@@ -336,6 +441,9 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     cleaned = _THINK_RE.sub("", text).strip()
     if "<think>" in cleaned.lower():
         raise ReasonerError("unterminated <think> block in Nemotron response")
+    if "</think>" in cleaned.lower():
+        # Chat templates that prefill "<think>\n" in the prompt emit only "... </think>{...}".
+        cleaned = _THINK_CLOSE_RE.split(cleaned)[-1].strip()
     fence = _FENCE_RE.match(cleaned)
     if fence is not None:
         cleaned = fence.group(1).strip()
@@ -423,9 +531,11 @@ class VerdaNemotronReasoner:
     * When ``api_key`` is absent/blank (or ``base_url`` is invalid), runs in ``"offline"`` mode
       with zero background threads and zero network calls, formatting deterministic ``triage(ctx)``
       verdicts directly in ``submit()``.
-    * When ``api_key`` is set, ``submit()`` enqueues the latest context per bay in microseconds
-      without blocking the 60 Hz loop, and a single daemon worker thread queries Verda Nemotron.
-      Any timeout, network error, HTTP error, or malformed JSON falls back to ``triage(ctx)``.
+    * When ``api_key`` is set, ``submit()`` immediately records a deterministic provisional
+      ``triage(ctx)`` verdict (preventing blank or stale prior-phase HUD guidance) and enqueues the
+      latest context per bay in microseconds. A bounded daemon worker pool queries Verda Nemotron
+      (at most 1 in-flight HTTP call per bay, concurrent across independent bays) and upgrades the
+      verdict if no newer event superseded that bay.
     """
 
     def __init__(
@@ -439,11 +549,18 @@ class VerdaNemotronReasoner:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = 0.1,
         close_grace_s: float = DEFAULT_CLOSE_GRACE_S,
+        max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> None:
         if timeout_s <= 0.0 or not math.isfinite(timeout_s):
             raise ValueError(f"timeout_s must be positive and finite, got {timeout_s}")
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be >= 1, got {max_tokens}")
+        if temperature < 0.0 or not math.isfinite(temperature):
+            raise ValueError(f"temperature must be non-negative and finite, got {temperature}")
+        if close_grace_s < 0.0 or not math.isfinite(close_grace_s):
+            raise ValueError(f"close_grace_s must be non-negative and finite, got {close_grace_s}")
+        if max_workers < 1:
+            raise ValueError(f"max_workers must be >= 1, got {max_workers}")
 
         clean_key = (api_key or "").strip() or None
         raw_model = (model or "").strip() or None
@@ -468,6 +585,7 @@ class VerdaNemotronReasoner:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self._close_grace_s = close_grace_s
+        self._max_workers = max_workers
 
         self._transport: ChatTransport | None = None
         if clean_key is not None and endpoint_url is not None:
@@ -477,7 +595,8 @@ class VerdaNemotronReasoner:
         self._verdicts: dict[int, ReasoningVerdict] = {}
         self._bay_seq: dict[int, int] = {}
         self._pending: OrderedDict[int, tuple[int, ReasoningContext]] = OrderedDict()
-        self._in_flight = 0
+        self._in_flight_bays: set[int] = set()
+        self._use_json_mode = True
         self._closed = False
         self._close_deadline: float | None = None
         self._counts: dict[str, int] = {
@@ -488,14 +607,16 @@ class VerdaNemotronReasoner:
             "errors": 0,
         }
 
-        self._worker: threading.Thread | None = None
+        self._workers: list[threading.Thread] = []
         if self._transport is not None:
-            self._worker = threading.Thread(
-                target=self._worker_loop,
-                name="verda-nemotron",
-                daemon=True,
-            )
-            self._worker.start()
+            for idx in range(self._max_workers):
+                worker = threading.Thread(
+                    target=self._worker_loop,
+                    name=f"verda-nemotron-{idx}",
+                    daemon=True,
+                )
+                worker.start()
+                self._workers.append(worker)
 
     @classmethod
     def from_env(
@@ -506,6 +627,7 @@ class VerdaNemotronReasoner:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         close_grace_s: float = DEFAULT_CLOSE_GRACE_S,
+        max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> Self:
         """Construct from ``VERDA_BASE_URL``, ``VERDA_API_KEY``, and ``NEMOTRON_MODEL``."""
         src = os.environ if env is None else env
@@ -517,6 +639,7 @@ class VerdaNemotronReasoner:
             timeout_s=timeout_s,
             max_tokens=max_tokens,
             close_grace_s=close_grace_s,
+            max_workers=max_workers,
         )
 
     @property
@@ -530,23 +653,23 @@ class VerdaNemotronReasoner:
     def submit(self, ctx: ReasoningContext) -> None:
         """Queue ``ctx`` for triage without blocking the 60 Hz control loop; never raises."""
         try:
+            t0 = time.perf_counter()
+            headline, guidance, rationale = triage(ctx)
+            provisional = ReasoningVerdict(
+                headline=headline,
+                operator_guidance=guidance,
+                compliance_rationale=rationale,
+                model=self.fallback_model,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+            )
             if self._transport is None:
-                t0 = time.perf_counter()
-                headline, guidance, rationale = triage(ctx)
-                verdict = ReasoningVerdict(
-                    headline=headline,
-                    operator_guidance=guidance,
-                    compliance_rationale=rationale,
-                    model=self.fallback_model,
-                    latency_ms=(time.perf_counter() - t0) * 1000.0,
-                )
                 with self._cond:
                     if self._closed:
                         return
                     self._counts["submitted"] += 1
                     self._counts["fallbacks"] += 1
                     self._bay_seq[ctx.bay_id] = self._bay_seq.get(ctx.bay_id, 0) + 1
-                    self._verdicts[ctx.bay_id] = verdict
+                    self._verdicts[ctx.bay_id] = provisional
                 return
 
             with self._cond:
@@ -555,10 +678,11 @@ class VerdaNemotronReasoner:
                 self._counts["submitted"] += 1
                 seq = self._bay_seq.get(ctx.bay_id, 0) + 1
                 self._bay_seq[ctx.bay_id] = seq
+                self._verdicts[ctx.bay_id] = provisional
                 if ctx.bay_id in self._pending:
                     self._counts["coalesced"] += 1
                 self._pending[ctx.bay_id] = (seq, ctx)
-                self._cond.notify()
+                self._cond.notify_all()
         except Exception:
             log.exception("nemotron: submit failed")
 
@@ -568,9 +692,10 @@ class VerdaNemotronReasoner:
 
     def flush(self, timeout_s: float = 5.0) -> bool:
         """Wait up to ``timeout_s`` for queued and in-flight requests to finish."""
-        deadline = time.monotonic() + max(0.0, timeout_s)
+        safe_timeout = 0.0 if not math.isfinite(timeout_s) else max(0.0, timeout_s)
+        deadline = time.monotonic() + safe_timeout
         with self._cond:
-            while self._pending or self._in_flight > 0:
+            while self._pending or self._in_flight_bays:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     return False
@@ -578,15 +703,17 @@ class VerdaNemotronReasoner:
             return True
 
     def close(self) -> None:
-        """Drain queued contexts up to ``close_grace_s`` and stop the worker thread."""
+        """Drain queued contexts up to ``close_grace_s`` and stop the worker pool."""
+        deadline = time.monotonic() + self._close_grace_s
         with self._cond:
             if self._closed:
                 return
             self._closed = True
-            self._close_deadline = time.monotonic() + max(0.0, self._close_grace_s)
+            self._close_deadline = deadline
             self._cond.notify_all()
-        if self._worker is not None:
-            self._worker.join(timeout=self._close_grace_s)
+        for worker in self._workers:
+            remaining = max(0.0, deadline - time.monotonic())
+            worker.join(timeout=remaining)
 
     def __enter__(self) -> Self:
         return self
@@ -606,6 +733,15 @@ class VerdaNemotronReasoner:
             latency_ms=max(0.0, latency_ms),
         )
 
+    def _pop_ready_locked(self) -> tuple[int, int, ReasoningContext] | None:
+        """Pop the oldest pending bay that does not already have an in-flight request."""
+        for bay_id in list(self._pending.keys()):
+            if bay_id not in self._in_flight_bays:
+                seq, ctx = self._pending.pop(bay_id)
+                self._in_flight_bays.add(bay_id)
+                return bay_id, seq, ctx
+        return None
+
     def _evaluate_one(self, ctx: ReasoningContext) -> tuple[ReasoningVerdict, bool]:
         """Return ``(verdict, from_remote)`` without holding the lock."""
         assert self._transport is not None and self.endpoint_url is not None
@@ -615,16 +751,35 @@ class VerdaNemotronReasoner:
             "messages": build_messages(ctx),
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "response_format": {"type": "json_object"},
         }
+        if self._use_json_mode:
+            payload["response_format"] = {"type": "json_object"}
         t0 = time.perf_counter()
         try:
-            response = self._transport.complete(
-                self.endpoint_url,
-                self.api_key,
-                payload,
-                self.timeout_s,
-            )
+            try:
+                response = self._transport.complete(
+                    self.endpoint_url,
+                    self.api_key,
+                    payload,
+                    self.timeout_s,
+                )
+            except HttpStatusError as exc:
+                if exc.status_code in (400, 422) and "response_format" in payload:
+                    self._use_json_mode = False
+                    retry_payload = {k: v for k, v in payload.items() if k != "response_format"}
+                    remaining_s = max(0.05, self.timeout_s - (time.perf_counter() - t0))
+                    log.info(
+                        "nemotron: endpoint rejected response_format (%s); retrying plain",
+                        exc,
+                    )
+                    response = self._transport.complete(
+                        self.endpoint_url,
+                        self.api_key,
+                        retry_payload,
+                        remaining_s,
+                    )
+                else:
+                    raise
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             verdict = parse_verdict_response(
                 response,
@@ -644,20 +799,29 @@ class VerdaNemotronReasoner:
     def _worker_loop(self) -> None:
         while True:
             with self._cond:
-                while not self._pending and not self._closed:
-                    self._cond.wait()
-                expired = (
-                    self._closed
-                    and self._close_deadline is not None
-                    and time.monotonic() >= self._close_deadline
-                )
-                if expired:
-                    self._pending.clear()
-                if not self._pending and self._closed:
-                    self._cond.notify_all()
-                    return
-                bay_id, (seq, ctx) = self._pending.popitem(last=False)
-                self._in_flight += 1
+                while True:
+                    if (
+                        self._closed
+                        and self._close_deadline is not None
+                        and time.monotonic() >= self._close_deadline
+                    ):
+                        self._pending.clear()
+                    ready = self._pop_ready_locked()
+                    if ready is not None:
+                        bay_id, seq, ctx = ready
+                        break
+                    if self._closed and not self._pending:
+                        self._cond.notify_all()
+                        return
+                    if self._closed and self._close_deadline is not None:
+                        remaining = self._close_deadline - time.monotonic()
+                        if remaining <= 0.0:
+                            self._pending.clear()
+                            self._cond.notify_all()
+                            return
+                        self._cond.wait(timeout=remaining)
+                    else:
+                        self._cond.wait()
 
             try:
                 verdict, remote_ok = self._evaluate_one(ctx)
@@ -666,7 +830,7 @@ class VerdaNemotronReasoner:
                 verdict, remote_ok = self._fallback_verdict(ctx, 0.0), False
 
             with self._cond:
-                self._in_flight -= 1
+                self._in_flight_bays.discard(bay_id)
                 if remote_ok:
                     self._counts["remote_ok"] += 1
                 else:
@@ -674,8 +838,7 @@ class VerdaNemotronReasoner:
                     self._counts["fallbacks"] += 1
                 if self._bay_seq.get(bay_id) == seq:
                     self._verdicts[bay_id] = verdict
-                if not self._pending and self._in_flight == 0:
-                    self._cond.notify_all()
+                self._cond.notify_all()
 
 
 # ── Module CLI (uv run python -m teleop.reasoning.nemotron {status,demo}) ────────────────────
