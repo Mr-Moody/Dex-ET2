@@ -1,7 +1,7 @@
 ---
 id: T-150
 title: teleop atc command, 4-bay HUD, audio prompts & 2.5-min stage rehearsal controls
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/atc-stage-hud
 depends_on: [T-140, T-131]
