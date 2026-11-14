@@ -130,14 +130,29 @@ function camZoom(camera) {
   return { z: v[0], px: v[1], py: v[2] };
 }
 
-function setCamZoom(camera, z, px, py) {
+function setCamZoom(camera, z, px, py, immediate = true) {
   if (!camera) return;
   const cz = Math.max(0.5, Math.min(4.0, z));
-  const cpx = Math.max(-1.0, Math.min(1.0, px));
-  const cpy = Math.max(-1.0, Math.min(1.0, py));
+  const cpx = Math.max(-2.5, Math.min(2.5, px));
+  const cpy = Math.max(-2.5, Math.min(2.5, py));
   ui.view.zooms[camera] = [cz, cpx, cpy];
-  sendClient({ type: "view", zoom_cam: camera, zoom: cz, pan_x: cpx, pan_y: cpy });
   refreshZoomBadge(camera);
+  const send = () => sendClient({ type: "view", zoom_cam: camera, zoom: cz, pan_x: cpx, pan_y: cpy });
+  if (immediate) {
+    send();
+    return;
+  }
+  ui.pendingZoomSend = send;
+  if (!ui.zoomRaf) {
+    ui.zoomRaf = requestAnimationFrame(() => {
+      ui.zoomRaf = 0;
+      if (ui.pendingZoomSend) {
+        const fn = ui.pendingZoomSend;
+        ui.pendingZoomSend = null;
+        fn();
+      }
+    });
+  }
 }
 
 function resetCamZoom(camera) {
@@ -158,8 +173,16 @@ function refreshZoomBadge(camera) {
   }
 }
 
+function isPanGesture(e) {
+  return e.button === 2 || e.button === 1 || (e.button === 0 && (e.ctrlKey || e.shiftKey));
+}
+
 function attachZoomPan(el, camera, role) {
+  // Always suppress native right-click menu on sim camera panes (on macOS, contextmenu fires on
+  // right-mousedown before any movement, which would otherwise steal the right-drag pan gesture).
+  el.addEventListener("contextmenu", (e) => e.preventDefault());
   if (!camera || role === "strip") return;
+
   el.addEventListener(
     "wheel",
     (e) => {
@@ -167,49 +190,58 @@ function attachZoomPan(el, camera, role) {
       e.stopPropagation();
       const cur = camZoom(camera);
       const nextZ = cur.z * Math.exp(-e.deltaY * 0.0018);
-      setCamZoom(camera, nextZ, cur.px, cur.py);
+      setCamZoom(camera, nextZ, cur.px, cur.py, false);
     },
     { passive: false }
   );
 
+  // Prevent HTML5 dragstart if right-button or ctrl/middle is used.
+  el.addEventListener("mousedown", (e) => {
+    if (isPanGesture(e) && !(e.target && e.target.closest("button"))) {
+      e.preventDefault();
+    }
+  });
+
   let panStart = null;
-  let moved = false;
+  const onMove = (e) => {
+    if (!panStart || e.pointerId !== panStart.id) return;
+    const rect = el.getBoundingClientRect();
+    const dx = e.clientX - panStart.x;
+    const dy = e.clientY - panStart.y;
+    const zScale = Math.max(0.5, panStart.z);
+    const nx = panStart.px + dx / (Math.max(rect.width, 1) * zScale);
+    const ny = panStart.py + dy / (Math.max(rect.height, 1) * zScale);
+    setCamZoom(camera, panStart.z, nx, ny, false);
+  };
+  const endPan = (e) => {
+    if (!panStart || (e && e.pointerId !== undefined && e.pointerId !== panStart.id)) return;
+    panStart = null;
+    ui.panningCam = null;
+    el.draggable = true;
+    el.classList.remove("is-panning");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", endPan);
+    window.removeEventListener("pointercancel", endPan);
+  };
+
   el.addEventListener("pointerdown", (e) => {
-    if (!(e.shiftKey || e.button === 1 || e.button === 2)) return;
+    if (!isPanGesture(e)) return;
     if (e.target && e.target.closest("button")) return;
     e.preventDefault();
     e.stopPropagation();
     const cur = camZoom(camera);
     panStart = { x: e.clientX, y: e.clientY, px: cur.px, py: cur.py, z: cur.z, id: e.pointerId };
-    moved = false;
+    ui.panningCam = camera;
     el.draggable = false;
     el.classList.add("is-panning");
-    el.setPointerCapture(e.pointerId);
-  });
-  el.addEventListener("pointermove", (e) => {
-    if (!panStart) return;
-    const rect = el.getBoundingClientRect();
-    const dx = e.clientX - panStart.x;
-    const dy = e.clientY - panStart.y;
-    if (Math.hypot(dx, dy) > 3) moved = true;
-    const scale = Math.max(0.6, panStart.z * 0.75);
-    const nx = panStart.px + dx / (Math.max(rect.width, 1) * scale);
-    const ny = panStart.py + dy / (Math.max(rect.height, 1) * scale);
-    setCamZoom(camera, panStart.z, nx, ny);
-  });
-  const endPan = () => {
-    if (!panStart) return;
-    panStart = null;
-    el.draggable = true;
-    el.classList.remove("is-panning");
-  };
-  el.addEventListener("pointerup", endPan);
-  el.addEventListener("pointercancel", endPan);
-  el.addEventListener("contextmenu", (e) => {
-    if (moved) {
-      e.preventDefault();
-      moved = false;
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      // fallback to window listeners below
     }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", endPan);
+    window.addEventListener("pointercancel", endPan);
   });
 }
 

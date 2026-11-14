@@ -32,6 +32,7 @@ from teleop.console.background import BackgroundCycle, BackgroundPlayer
 from teleop.console.layout import FeedSpec, ViewState, feed_layout
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
+from teleop.sim.cells import WALL_HEIGHT_M, cell_bounds
 
 mj: Any = _mujoco
 logger = logging.getLogger("teleop.console.render")
@@ -138,20 +139,44 @@ class FeedRenderer:
             )
             ortho_arr = getattr(self.model, "cam_orthographic", None)
             is_ortho = bool(ortho_arr[cid]) if ortho_arr is not None else fovy0 < 2.0
+            aspect = feed.width / max(feed.height, 1)
+            z = max(feed.zoom, 0.2)
             if is_ortho:
-                self.model.cam_fovy[cid] = min(0.65, max(0.05, fovy0 / max(feed.zoom, 0.2)))
-                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * 0.16, -feed.pan_y * 0.16, 0.0))
+                self.model.cam_fovy[cid] = min(0.65, max(0.05, fovy0 / z))
+                # +pan_x (drag right) moves camera -X_cam; +pan_y (drag down) moves camera +Y_cam.
+                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * fovy0 * aspect, feed.pan_y * fovy0, 0.0))
+                self.model.cam_pos[cid, 0] = self._base_cam_pos[cid, 0] + dx
+                self.model.cam_pos[cid, 1] = self._base_cam_pos[cid, 1] + dy
+                self.model.cam_pos[cid, 2] = self._base_cam_pos[cid, 2] + dz
+            elif feed.camera.endswith("/wrist_cam"):
+                self.model.cam_fovy[cid] = min(92.0, max(10.0, fovy0 / z))
+                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * 0.14 * aspect, feed.pan_y * 0.14, 0.0))
                 self.model.cam_pos[cid, 0] = self._base_cam_pos[cid, 0] + dx
                 self.model.cam_pos[cid, 1] = self._base_cam_pos[cid, 1] + dy
                 self.model.cam_pos[cid, 2] = self._base_cam_pos[cid, 2] + dz
             else:
-                self.model.cam_fovy[cid] = min(88.0, max(9.0, fovy0 / max(feed.zoom, 0.2)))
-                ax = 0.5 * (feed.pan_y * 0.48)
-                ay = 0.5 * (feed.pan_x * 0.48)
-                cx, sx = math.cos(ax), math.sin(ax)
-                cy, sy = math.cos(ay), math.sin(ay)
-                q_pan = (cy * cx, cy * sx, sy * cx, -sy * sx)
-                self.model.cam_quat[cid] = _qmul_wxyz(q0, q_pan)
+                self.model.cam_fovy[cid] = min(88.0, max(9.0, fovy0 / z))
+                # Translate camera in its view plane (clamped inside cell walls) + gentle pan/tilt
+                # around world Z (yaw) and local X (pitch) so the horizon stays level.
+                dx, dy, dz = _qrot_wxyz(q0, (-feed.pan_x * 0.95 * aspect, feed.pan_y * 0.95, 0.0))
+                nx = float(self._base_cam_pos[cid, 0]) + dx
+                ny = float(self._base_cam_pos[cid, 1]) + dy
+                nz = float(self._base_cam_pos[cid, 2]) + dz
+                if feed.bay in (1, 2, 3, 4):
+                    x0, x1, y0, y1 = cell_bounds(feed.bay)
+                    margin = 0.12
+                    nx = min(x1 - margin, max(x0 + margin, nx))
+                    ny = min(y1 - margin, max(y0 + margin, ny))
+                    nz = min(WALL_HEIGHT_M - margin, max(margin, nz))
+                self.model.cam_pos[cid, 0] = nx
+                self.model.cam_pos[cid, 1] = ny
+                self.model.cam_pos[cid, 2] = nz
+                # World-Z turntable yaw + local-X pitch keeps vertical walls upright (zero roll).
+                hy = 0.5 * (feed.pan_x * 0.32)
+                hp = 0.5 * (feed.pan_y * 0.28)
+                q_world_yaw = (math.cos(hy), 0.0, 0.0, math.sin(hy))
+                q_local_pitch = (math.cos(hp), math.sin(hp), 0.0, 0.0)
+                self.model.cam_quat[cid] = _qmul_wxyz(_qmul_wxyz(q_world_yaw, q0), q_local_pitch)
 
     def _renderer(self, width: int, height: int) -> Any:
         key = (width, height)

@@ -30,7 +30,7 @@ MAIN = (960, 540)
 SPLIT_MAIN = (680, 540)
 STRIP = (384, 216)
 ZOOM_MIN, ZOOM_MAX = 0.5, 4.0
-PAN_LIMIT = 1.0
+PAN_LIMIT = 2.5
 
 
 @dataclass(frozen=True, slots=True)
