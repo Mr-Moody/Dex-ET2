@@ -27,6 +27,7 @@ from teleop.copilot.events import EventDetector
 from teleop.copilot.feed import CameraFrame, FeedClient
 from teleop.copilot.frames import FrameStore
 from teleop.copilot.gemini import GeminiClient
+from teleop.copilot.local import LocalModelClient
 from teleop.copilot.speech import Speaker
 
 DEFAULT_LOG_DIR = Path("runs") / "copilot"
@@ -37,12 +38,15 @@ async def run(
     outputs: CopilotOutputs,
     client: GeminiClient | None,
     speaker: Speaker,
+    local_client: LocalModelClient | None = None,
 ) -> None:
     store = FrameStore()
     detector = EventDetector()
     service = CalloutService(
         client,
         model=cfg.fast_model,
+        local_client=local_client,
+        local_model=cfg.local_model,
         thinking_level=cfg.fast_thinking,
         sink=outputs.callout,
         speaker=speaker,
@@ -92,9 +96,20 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
         return 2
     url = args.console or cfg.console_url
     cfg = dataclasses.replace(cfg, console_url=url)
+    try:
+        local_client = LocalModelClient.from_config(cfg)
+    except ValueError as exc:
+        print(f"copilot: {exc}", file=sys.stderr)
+        return 2
     client: GeminiClient | None = None
     if cfg.gemini_api_key:
         client = GeminiClient(cfg.gemini_api_key, no_images=cfg.no_images)
+    elif local_client is not None:
+        print(
+            f"copilot: GEMINI_API_KEY is not set; using local fallback {cfg.local_model} "
+            "(reviews unavailable; see docs/copilot.md).",
+            file=sys.stderr,
+        )
     else:
         print(
             "copilot: GEMINI_API_KEY is not set; speaking template call-outs with the system "
@@ -110,16 +125,30 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
         on_spoken=outputs.spoken,
     )
     outputs.note(
-        f"copilot watching {url}: call-outs {cfg.fast_model if client else 'templates only'}, "
+        f"copilot watching {url}: call-outs {_callout_label(cfg, client, local_client)}, "
         f"speech {_speech_label(cfg, client is not None and args.gemini_tts)}, "
         f"images {'off' if cfg.no_images else 'on'}, log {outputs.log_path()} (Ctrl+C to stop)"
     )
     try:
         with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(run(cfg, outputs, client, speaker))
+            asyncio.run(run(cfg, outputs, client, speaker, local_client))
     finally:
         speaker.close()
     return 0
+
+
+def _callout_label(
+    cfg: CopilotConfig,
+    client: GeminiClient | None,
+    local_client: LocalModelClient | None,
+) -> str:
+    if client is not None and local_client is not None:
+        return f"{cfg.fast_model} (fallback {cfg.local_model})"
+    if client is not None:
+        return cfg.fast_model
+    if local_client is not None:
+        return f"local {cfg.local_model}"
+    return "templates only"
 
 
 def _speech_label(cfg: CopilotConfig, gemini_tts: bool) -> str:
