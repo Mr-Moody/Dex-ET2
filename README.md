@@ -15,8 +15,10 @@ Everything runs locally on the laptop in one Python process. The only exception 
 optional real UNO Q board on the network. MuJoCo does all the physics and all the 3D rendering.
 The browser is only a display and a keyboard.
 
-**Control loop.** Glove input drives a 60 Hz MuJoCo loop. Side services run on their own
-threads (or on the UNO Q board), so the physics never waits on them.
+**Control loop.** Glove input drives a 60 Hz MuJoCo loop. Compliance and reasoning run on
+background threads and never block it. The UNO Q calls (classify a stall, fit a skill) are short
+request/response calls. The 3-rollout validation gate runs inline after a rescue and takes about
+2 s.
 
 ```mermaid
 flowchart TD
@@ -60,38 +62,64 @@ flowchart TD
 The UNO Q, compliance sink and reasoner fall back to local modes when unavailable. Bays 3–4
 replay a canned background cycle rather than running live physics.
 
-How the coordinator handles a stall:
+How a bay handles a stall (Bays 1 and 2, coordinator in `src/teleop/atc/coordinator.py`):
 
 ```mermaid
 flowchart TD
-    RUN["Routine unlatching push"] --> STALL{"C(t) &lt; 0.3<br/>for 300 ms?"}
+    RUN["Routine unlatching push"] --> CLEAR{"Bolt cleared?"}
+    CLEAR -->|yes| DONE["Bay done"]
+    CLEAR -->|no| STALL{"Stall trigger?<br/>C(t) &lt; 0.3 for 300 ms,<br/>3 s watchdog, or<br/>arm torque limit"}
     STALL -->|no| RUN
-    STALL -->|yes| CLS{"UNO Q classifies<br/>stall signature"}
-    CLS -->|"known, skill deployed"| AUTO["Replay skill inside<br/>torque tube"]
-    CLS -->|"unseen"| QUEUE["Retract to hover,<br/>join rescue queue"]
-    CLS -->|"out of distribution<br/>(Mahalanobis &gt; 3.0)"| REFUSE["Refuse and escalate<br/>to a human"]
-    QUEUE --> RESCUE["Operator rescues<br/>with gloves + clutch"]
-    RESCUE --> FIT["UNO Q fits RBF-DMP<br/>(&lt; 20 ms)"]
+    STALL -->|yes| CLS{"UNO Q classifier:<br/>nearest learned skill<br/>for this part"}
+
+    CLS -->|"match within<br/>Mahalanobis 3.0"| AUTO["Back off 1 cm, replay skill<br/>inside torque tube"]
+    AUTO -->|"bolt cleared"| DONE
+    AUTO -->|"tube breach, timeout<br/>or arm torque limit"| QUEUE
+
+    CLS -->|"unseen: no skills<br/>learned yet"| QUEUE["Retract 3 cm to hover,<br/>join FIFO rescue queue"]
+    CLS -->|"refused: skills exist,<br/>none within 3.0"| QUEUE
+
+    QUEUE --> SLOT["Operator takes the bay<br/>(one rescue at a time)"]
+    SLOT -->|"unseen or aborted"| RESCUE["RESCUE"]
+    SLOT -->|"refused: inspect part,<br/>skill transfer withheld"| ESC["OOD_ESCALATED"]
+    RESCUE --> CLUTCH["Operator drives the bay<br/>with gloves + clutch"]
+    ESC --> CLUTCH
+    CLUTCH --> CLEARED{"Bolt cleared on<br/>clutch release?"}
+    CLEARED -->|"no: recording discarded"| CLUTCH
+    CLEARED -->|yes| FIT["UNO Q fits RBF-DMP skill"]
     FIT --> VAL{"3/3 headless<br/>rollouts pass?"}
-    VAL -->|yes| LIB["Add to fleet library"]
-    VAL -->|no| WITHHOLD["Skill withheld"]
-    LIB -.->|"next matching stall,<br/>any bay"| AUTO
-    AUTO --> RUN
+    VAL -->|yes| LIB["Skill deployed to fleet library"]
+    VAL -->|no| REJ["Skill rejected"]
+    LIB --> DONE
+    REJ --> DONE
+    LIB -.->|"later stalls on this part,<br/>any bay, can now match"| CLS
 ```
+
+Both unseen and refused stalls go to a human through the same queue. The difference:
+
+- **Unseen** (`STALL_ALERT`): nothing is learned yet, so the bay asks to be taught.
+- **Refused** (`OOD_REFUSAL`): skills exist, but none is close enough, so the robot will not
+  guess. This is the negative control. A pinned bolt cannot be cleared by hand either, so
+  nothing is learned from it.
 
 ### A rescue, step by step
 
 1. **Routine.** Bays 1 and 2 run a routine one-finger push to unlatch the slide-bolt.
-2. **Stall.** A fault (a jammed flap or a pinned bolt) makes the confidence C(t) fall below 0.3
-   for 300 ms. The coordinator judges this from contact only (bolt travel, external torque,
-   wrist speed). It never reads the fault state directly.
-3. **Classify.** The stall signature goes to the UNO Q classifier.
-   - **Known signature:** the bay replays the learned skill inside a torque safety tube.
-   - **Unseen signature:** the bay retracts to a safe hover and joins the rescue queue.
-   - **Out-of-distribution (Mahalanobis distance > 3.0):** the stall is refused and escalated
-     to a human.
-4. **Rescue.** The operator selects the bay and holds the clutch. The gloves then drive that
-   bay's wrist and fingers, and the rescue is recorded.
+2. **Stall.** A fault (a jammed flap or a pinned bolt) triggers a stall. The trigger is the
+   confidence C(t) staying below 0.3 for 300 ms, a 3 s watchdog, or an arm torque limit. The
+   coordinator judges this from contact only (bolt travel, external torque, wrist speed). It
+   never reads the fault state directly.
+3. **Classify.** The UNO Q compares the stall signature with the skills learned for this part.
+   - **Match (Mahalanobis distance 3.0 or less):** the bay replays the skill inside a torque
+     safety tube. If the tube is breached or the skill times out, the bay goes to the rescue
+     queue instead.
+   - **Unseen (no skills learned yet):** the bay retracts to a safe hover and joins the rescue
+     queue.
+   - **Refused (skills exist, none within 3.0):** the bay also joins the rescue queue, flagged
+     `OOD_ESCALATED`. The robot will not apply a skill it has not validated for this stall.
+4. **Rescue.** The queue hands the operator one bay at a time. The operator holds the clutch,
+   and the gloves drive that bay's wrist and fingers while the rescue is recorded. If the bolt is
+   not cleared on clutch release, the recording is discarded and the operator can try again.
 5. **Learn.** The UNO Q fits the recording as a dynamic movement primitive (a learned movement
    skill) in under 20 ms. `SkillValidator` replays it in three perturbed headless simulations,
    and it is added to the fleet library only if all three pass.
