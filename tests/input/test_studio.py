@@ -319,3 +319,38 @@ def test_bind_failure_does_not_truncate_tee(tmp_path: Path):
         with pytest.raises(OSError):
             src.start()
     assert tee_path.read_text() == "previous recording\n"
+
+
+def test_liveness_counts_datagrams():
+    src = StudioSource(StudioConfig(host="127.0.0.1", port=0))
+    src.start()
+    try:
+        _send_some(src.bound_port(), _payload({"x": 0.0, "y": 0.0, "z": 0.0}))
+        deadline = time.monotonic() + 1.0
+        live = src.liveness()
+        while live.last_right_frame_ns is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            live = src.liveness()
+        assert live.bound is True
+        assert live.port == src.bound_port()
+        assert live.last_datagram_ns is not None
+        assert live.last_right_frame_ns is not None
+        assert live.datagram_hz > 0
+    finally:
+        src.stop()
+
+
+def test_liveness_bind_error_tolerated():
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    blocker.bind(("127.0.0.1", 0))
+    port = blocker.getsockname()[1]
+    try:
+        src = StudioSource(StudioConfig(host="127.0.0.1", port=port), tolerate_bind_error=True)
+        src.start()
+        live = src.liveness()
+        assert live.bound is False
+        assert live.bind_error is not None
+        assert str(port) in live.bind_error
+        src.stop()
+    finally:
+        blocker.close()
