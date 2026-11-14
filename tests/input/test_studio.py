@@ -197,8 +197,19 @@ def test_missing_position_gives_none():
     assert f.wrist is not None and f.wrist.position is None
 
 
-def _send_some(port: int, payload: bytes, n: int = 3) -> None:
+def _udp_sender(payload: bytes) -> socket.socket:
+    """UDP socket able to send ``payload`` in one datagram.
+
+    macOS caps outgoing datagrams at the socket send buffer (default 9216 bytes,
+    ``net.inet.udp.maxdgram``), smaller than a captured Studio frame; raise it.
+    """
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tx.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, max(len(payload) + 1024, 65536))
+    return tx
+
+
+def _send_some(port: int, payload: bytes, n: int = 3) -> None:
+    tx = _udp_sender(payload)
     try:
         for _ in range(n):
             tx.sendto(payload, ("127.0.0.1", port))
@@ -213,7 +224,7 @@ def test_studio_source_receives_udp():
     src.start()
     try:
         port = src.bound_port()
-        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx = _udp_sender(payload)
         try:
             deadline = time.monotonic() + 0.5
             while time.monotonic() < deadline and src.latest().right is None:
