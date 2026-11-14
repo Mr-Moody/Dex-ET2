@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from teleop.atc.coordinator import (
+    DEFAULT_REALISM,
     ROUTINE,
     AtcCoordinator,
     CoordinatorConfig,
@@ -25,6 +26,7 @@ from teleop.atc.coordinator import (
     compute_confidence,
 )
 from teleop.atc.estimate import HOOK_BACK_X_M, INDEX_PAD_RADIUS_M, POSE_SIGMA_XY_M
+from teleop.atc.stage import RESCUE_PRESS, RESCUE_WAYPOINTS
 from teleop.atc.types import (
     BOLT_CLEARED_M,
     BayState,
@@ -119,7 +121,7 @@ def hand_spec() -> HandSpec:
 
 @pytest.fixture(scope="module")
 def validator(hand_spec: HandSpec) -> SkillValidator:
-    return SkillValidator(hand_spec)
+    return SkillValidator(hand_spec, realism=DEFAULT_REALISM)  # the coordinator's default
 
 
 @pytest.fixture
@@ -191,19 +193,10 @@ def rig(unoq: UnoQClient, hand_spec: HandSpec, validator: SkillValidator) -> Rig
 
 # --------------------------------------------------------------------------- scripted operator
 
-# Waypoints (duration s, wrist delta from the safe hover in the latch frame in metres, finger
-# press fraction). The index finger rests behind the bolt hook, the thumb presses the raised
-# stopper flap flat (press fraction 1), then the wrist pushes the bolt clear.
-# Tuned for the randomized gate: y -9 mm centres the hand on the flap paddle across the
-# pose-estimate y error, and the 2.2 s push keeps a stiff flap spring pressed down.
-DEMO_PRESS = {"thumb_yaw": 0.6}
-DEMO_WAYPOINTS: list[tuple[float, tuple[float, float, float], float]] = [
-    (0.0, (0.0, 0.0, 0.0), 0.0),
-    (0.4981, (0.0, -0.009, -0.012), 0.0),
-    (0.8199, (0.0, -0.009, -0.012), 1.0),
-    (0.3333, (0.0, -0.009, -0.012), 1.0),
-    (2.2, (0.0458, -0.009, -0.012), 1.0),
-]
+# The stage's scripted rescue (duration s, wrist delta from the safe hover in the latch frame in
+# metres, finger press fraction): one source, so the tests rescue exactly as the show does.
+DEMO_PRESS = RESCUE_PRESS
+DEMO_WAYPOINTS = list(RESCUE_WAYPOINTS)
 
 
 def demo_operator(rig: Rig, bay_id: int) -> Iterator[OperatorInput]:
