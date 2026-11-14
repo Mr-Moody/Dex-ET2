@@ -156,3 +156,38 @@ def test_track_twin_and_hidden_physics_floor(scene: tuple[Any, Any]) -> None:
         phys_top = model.geom_pos[phys.id][2] + model.geom_size[phys.id][2]
         twin_top = model.geom_pos[twin.id][2] + model.geom_size[twin.id][2]
         assert twin_top == pytest.approx(phys_top - 0.001)
+
+
+def test_belt_packs_wear_the_same_latch_skin_as_the_bay_latch(scene: tuple[Any, Any]) -> None:
+    """A pack must look the same riding the belt as it does under the arm."""
+    from teleop.sim.latch import VISUAL_MESHES
+
+    model, data = scene
+    names = [str(model.geom(i).name) for i in range(model.ngeom)]
+    assert not [n for n in names if n.endswith(("_q_track", "_q_bolt", "_q_flap"))]
+    for bay in CONVEYOR_BAYS:
+        for slot in ("in2", "in", "out"):
+            pack = model.body(f"conveyor_bay{bay}_{slot}_pack").id
+            skin = model.body(f"conveyor_bay{bay}_{slot}_latch_skin").id
+            # same height over its pack as the real latch has over the bay's pack
+            real_dz = data.xpos[model.body(f"bay{bay}/latch_base").id][2]
+            real_dz -= data.xpos[model.body(f"bay{bay}/cell_jig_pack").id][2]
+            assert data.xpos[skin][2] - data.xpos[pack][2] == pytest.approx(real_dz, abs=1e-9)
+            for stem, _, rgba in VISUAL_MESHES:
+                belt = model.geom(f"conveyor_bay{bay}_{slot}_{stem}_visual")
+                real = model.geom(f"bay{bay}/{stem}_visual")
+                assert int(belt.dataid[0]) == int(real.dataid[0])  # the same mesh asset
+                assert np.allclose(belt.rgba, rgba)
+                assert int(belt.contype[0]) == 0 and int(belt.conaffinity[0]) == 0
+
+
+def test_belt_packs_fall_back_to_boxes_without_mesh_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    import teleop.sim.latch as latch
+
+    monkeypatch.setattr(latch, "MESH_DIR", tmp_path)
+    model = build_four_bay_scene()
+    names = {str(model.geom(i).name) for i in range(model.ngeom)}
+    assert "conveyor_bay1_in_q_track" in names and "conveyor_bay1_in_q_bolt" in names
+    assert "conveyor_bay1_in_slide_bolt_visual" not in names

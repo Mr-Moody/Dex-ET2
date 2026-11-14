@@ -86,14 +86,15 @@ class HudView:
     selected_bay: int | None = None
     rescue: RescueStatus = field(default_factory=RescueStatus)
     gate: GateStatus = field(default_factory=GateStatus)
-    compliance: str = "SOLANA  no events yet"
+    compliance: str = "Audit Trail  no events yet"
     reasoning: str = "TRIAGE  idle"
     beat: str = ""
     unoq: str = ""
     actions: tuple[ActionNote, ...] = ()  # recent key outcomes, oldest first
-    # (bay, kind, phase): kind "flap" | "pin"; phase "armed" (next cycle) | "active" (this cycle)
     faults: tuple[tuple[int, str, str], ...] = ()
     conveyors: tuple[ConveyorStatus, ...] = ()
+    compliance_detail: dict[str, Any] | None = None
+    compliance_history: tuple[dict[str, Any], ...] = ()
     powered_off: frozenset[int] = frozenset()  # bays (live or replayed) cut by the E-stop
 
 

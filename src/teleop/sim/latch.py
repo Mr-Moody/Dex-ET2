@@ -92,6 +92,50 @@ def yaw_quat_wxyz(yaw_rad: float) -> list[float]:
     return [math.cos(half), 0.0, 0.0, math.sin(half)]
 
 
+def _mesh_files_present() -> bool:
+    return all((MESH_DIR / f"{stem}.stl").is_file() for stem, _, _ in VISUAL_MESHES)
+
+
+def _ensure_mesh_assets(spec: Any) -> None:
+    """Register the printed-rig meshes once per spec; every latch and skin shares them."""
+    have = {str(m.name) for m in spec.meshes}
+    for stem, _, _ in VISUAL_MESHES:
+        if f"latch_{stem}" not in have:
+            spec.add_mesh(name=f"latch_{stem}", file=str(MESH_DIR / f"{stem}.stl"))
+
+
+def add_latch_skin(spec: Any, parent: Any, prefix: str, *, bolt_x: float = 0.0) -> bool:
+    """Add a static, visual-only copy of the printed rig's meshes to ``parent``.
+
+    ``parent``'s frame is the latch frame. There are no joints and no physics boxes: this is for
+    latches that are only looked at (packs riding the conveyor), so they wear the same skin as
+    the bay latch the hand works on. ``bolt_x`` is the bolt's slide along +X (0 is latched).
+    Returns False, adding nothing, when the mesh files are missing.
+    """
+    if not _mesh_files_present():
+        return False
+    _ensure_mesh_assets(spec)
+    offsets = {
+        "latch_base": (0.0, 0.0, 0.0),
+        "slide_bolt": (float(bolt_x), 0.0, 0.0),
+        "stopper_flap": FLAP_HINGE_POS,
+    }
+    for stem, body_key, rgba in VISUAL_MESHES:
+        geom = parent.add_geom(
+            name=f"{prefix}{stem}_visual",
+            type=mj.mjtGeom.mjGEOM_MESH,
+            meshname=f"latch_{stem}",
+            pos=list(offsets[body_key]),
+            rgba=list(rgba),
+        )
+        geom.contype = 0
+        geom.conaffinity = 0
+        geom.mass = 0.0
+        geom.group = 0
+        geom.castshadow = False
+    return True
+
+
 def _add_visual_twin(spec: Any, p: str, bodies: dict[str, Any]) -> None:
     """Dress the latch with the printed rig's meshes and hide the physics boxes.
 
@@ -100,14 +144,11 @@ def _add_visual_twin(spec: Any, p: str, bodies: dict[str, Any]) -> None:
     ``teleop.sim.cells`` adds for it. Mesh assets are shared by every latch in the spec. If the
     mesh files are missing, the boxes stay visible.
     """
-    if not all((MESH_DIR / f"{stem}.stl").is_file() for stem, _, _ in VISUAL_MESHES):
+    if not _mesh_files_present():
         return
-    have = {str(m.name) for m in spec.meshes}
+    _ensure_mesh_assets(spec)
     for stem, body_key, rgba in VISUAL_MESHES:
         mesh = f"latch_{stem}"
-        if mesh not in have:
-            spec.add_mesh(name=mesh, file=str(MESH_DIR / f"{stem}.stl"))
-            have.add(mesh)
         geom = bodies[body_key].add_geom(
             name=f"{p}{stem}_visual",
             type=mj.mjtGeom.mjGEOM_MESH,

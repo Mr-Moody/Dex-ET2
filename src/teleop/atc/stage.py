@@ -383,8 +383,8 @@ class EventTap:
     def status_line(self) -> str:
         event = self.latest()
         if event is None:
-            return "SOLANA  no events yet"
-        line = f"SOLANA {event.kind} bay {event.bay_id} #{event.payload_sha256[:12]}"
+            return "Audit Trail  no events yet"
+        line = f"Audit Trail  {event.kind} bay {event.bay_id} #{event.payload_sha256[:12]}"
         latest_status: Any = getattr(self.inner, "latest_status", None)
         if callable(latest_status):
             try:
@@ -397,6 +397,109 @@ class EventTap:
         if isinstance(mode, str):
             line += f" ({mode})"
         return line
+
+    def status_detail(self) -> dict[str, Any] | None:
+        event = self.latest()
+        if event is None:
+            return None
+        latest_status: Any = getattr(self.inner, "latest_status", None)
+        status = None
+        if callable(latest_status):
+            try:
+                status = latest_status()
+            except Exception:
+                status = None
+
+        digest = event.payload_sha256
+        state = "local"
+        tx_sig = None
+        url = None
+
+        if status is not None:
+            digest = getattr(status, "digest", digest) or digest
+            state = getattr(status, "state", state) or state
+            tx_sig = getattr(status, "tx_signature", None)
+            url = getattr(status, "explorer_url", None)
+
+        if not url and tx_sig:
+            rpc_url = getattr(self.inner, "rpc_url", "") or ""
+            from teleop.compliance.solana import explorer_url
+
+            url = (
+                explorer_url(tx_sig, rpc_url)
+                if rpc_url
+                else f"https://explorer.solana.com/tx/{tx_sig}?cluster=devnet"
+            )
+
+        mode = getattr(self.inner, "mode", None)
+        return {
+            "kind": str(event.kind),
+            "bay_id": int(event.bay_id),
+            "digest": str(digest),
+            "state": str(state),
+            "tx_signature": str(tx_sig) if tx_sig else None,
+            "explorer_url": str(url) if url else None,
+            "mode": str(mode) if mode else None,
+            "summary": str(event.summary),
+            "part_sku_id": str(event.part_sku_id),
+            "timestamp_ns": int(event.timestamp_ns),
+        }
+
+    def status_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        if not self.history:
+            return []
+        mode = getattr(self.inner, "mode", None)
+        rpc_url = getattr(self.inner, "rpc_url", "") or ""
+        recent_fn: Any = getattr(self.inner, "recent_status", None)
+        statuses: list[Any] = []
+        if callable(recent_fn):
+            try:
+                raw_statuses: Any = recent_fn(limit)
+                if raw_statuses:
+                    statuses = list(raw_statuses)
+            except Exception:
+                statuses = []
+        if statuses:
+            from teleop.compliance.solana import explorer_url
+
+            out: list[dict[str, Any]] = []
+            for st in statuses:
+                tx_sig = getattr(st, "tx_signature", None)
+                url = getattr(st, "explorer_url", None)
+                if not url and tx_sig:
+                    url = (
+                        explorer_url(tx_sig, rpc_url)
+                        if rpc_url
+                        else f"https://explorer.solana.com/tx/{tx_sig}?cluster=devnet"
+                    )
+                out.append(
+                    {
+                        "seq": getattr(st, "seq", None),
+                        "kind": str(getattr(st, "kind", "")),
+                        "bay_id": int(getattr(st, "bay_id", 0)),
+                        "digest": str(getattr(st, "digest", "")),
+                        "state": str(getattr(st, "state", "local")),
+                        "tx_signature": str(tx_sig) if tx_sig else None,
+                        "explorer_url": str(url) if url else None,
+                        "mode": str(mode) if mode else None,
+                    }
+                )
+            return out
+        return [
+            {
+                "kind": str(ev.kind),
+                "bay_id": int(ev.bay_id),
+                "digest": str(ev.payload_sha256),
+                "state": "local",
+                "tx_signature": None,
+                "explorer_url": None,
+                "mode": str(mode) if mode else None,
+                "summary": str(ev.summary),
+                "part_sku_id": str(ev.part_sku_id),
+                "timestamp_ns": int(ev.timestamp_ns),
+            }
+            for ev in list(self.history)[-limit:]
+        ]
 
     def close(self) -> None:
         self.inner.close()
@@ -845,6 +948,8 @@ class StageController:
             actions=tuple(self.actions),
             faults=self._faults_view(),
             conveyors=co.conveyors(),
+            compliance_detail=self.events.status_detail(),
+            compliance_history=tuple(self.events.status_history()),
             powered_off=self.console.powered_off,
         )
 

@@ -68,6 +68,7 @@ torchvision = [{ index = "pytorch-cu132", group = "act", marker = "sys_platform 
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = [".claude"]  # vendored agent skills, not project code
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
