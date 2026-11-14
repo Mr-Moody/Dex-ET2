@@ -68,6 +68,18 @@ class GateStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryStatus:
+    """Which recovery backend the next stall uses, and the health of the ACT release behind it."""
+
+    backend: str = "dmp"
+    note: str = ""  # last switch or downgrade, e.g. "ACT unavailable (...): back to dmp"
+    act_loaded: bool = False
+    act_healthy: bool = False
+    p95_ms: float | None = None
+    faults: tuple[str, ...] = ()  # faults the gated ACT checkpoint may handle
+
+
+@dataclass(frozen=True, slots=True)
 class ActionNote:
     """Outcome of one operator key press, so the displays can say what it did.
 
@@ -99,6 +111,8 @@ class HudView:
     compliance_detail: dict[str, Any] | None = None
     compliance_history: tuple[dict[str, Any], ...] = ()
     powered_off: frozenset[int] = frozenset()  # bays (live or replayed) cut by the E-stop
+    recovery: RecoveryStatus = field(default_factory=RecoveryStatus)
+    recovery_bays: tuple[tuple[int, str], ...] = ()  # (bay, "dmp" | "act") while recovering
 
 
 # --------------------------------------------------------------------------- pieces
@@ -177,6 +191,20 @@ def format_gate(gate: GateStatus) -> str:
     return f"UNO Q DMP fit: {fit} | {label}{elapsed}"
 
 
+def format_recovery(rec: RecoveryStatus) -> str:
+    """``RECOVERY hybrid | ACT ok p95 12 ms | flap``"""
+    if not rec.act_loaded:
+        act = "ACT off"
+    elif not rec.act_healthy:
+        act = "ACT down"
+    else:
+        act = "ACT ok" + (f" p95 {rec.p95_ms:.0f} ms" if rec.p95_ms is not None else "")
+    parts = [f"RECOVERY {rec.backend}", act]
+    if rec.act_loaded and rec.faults:
+        parts.append(", ".join(rec.faults))
+    return " | ".join(parts)
+
+
 def format_health(health: Sequence[Health]) -> str:
     """``HOTSPOT ok | GLOVES fail | PANEL warn``"""
     return " | ".join(f"{h.name.upper()} {h.level.value}" for h in health)
@@ -191,7 +219,13 @@ def hud_lines(view: HudView, health: Sequence[Health] | None = None) -> list[str
     lines = [
         f"{lab:<9} {val}" for lab, val in zip(labels.split("\n"), values.split("\n"), strict=True)
     ]
-    lines += [format_rescue(view.rescue), format_gate(view.gate), view.compliance, view.reasoning]
+    lines += [
+        format_rescue(view.rescue),
+        format_gate(view.gate),
+        format_recovery(view.recovery),
+        view.compliance,
+        view.reasoning,
+    ]
     if view.beat:
         lines.append(f"BEAT {view.beat}")
     if view.actions:
@@ -213,7 +247,9 @@ def hud_overlays(
     mj: Any = _mujoco
     font, grid = mj.mjtFont, mj.mjtGridPos
     labels, values = format_bay_table(view)
-    status = "\n".join([format_rescue(view.rescue), format_gate(view.gate)])
+    status = "\n".join(
+        [format_rescue(view.rescue), format_gate(view.gate), format_recovery(view.recovery)]
+    )
     hook_rows = [view.compliance, view.reasoning]
     if health:
         hook_rows.append(format_health(health))
@@ -237,12 +273,14 @@ __all__ = [
     "ConveyorStatus",
     "GateStatus",
     "HudView",
+    "RecoveryStatus",
     "RescueStatus",
     "confidence_bar",
     "format_bay_row",
     "format_bay_table",
     "format_gate",
     "format_health",
+    "format_recovery",
     "format_rescue",
     "hud_lines",
     "hud_overlays",
