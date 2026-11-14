@@ -1,12 +1,12 @@
 ---
 id: T-203
 title: Edge service serves the MCU console and bay states; App Lab auto-run app
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: claude-code
+branch: feat/unoq-console-service
 depends_on: []
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: null
+claimed_at: '2026-11-14T11:04:23+00:00'
 ---
 
 Implements Task 4 of the plan.
