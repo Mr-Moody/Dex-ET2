@@ -2,11 +2,11 @@
 id: T-010
 title: Hotspot manager + keep-alive watchdog (Windows)
 status: done
-owner: lead-laptop
-branch: feat/T-010-hotspot
+owner: null
+branch: null
 depends_on: [T-003]
 plan: docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md#task-t-010-hotspot
-claimed_at: '2026-11-13T22:19:24+00:00'
+claimed_at: null
 ---
 
 **Hardware laptop only.**
