@@ -456,6 +456,52 @@ def test_observer_sees_rescue_and_auto_episodes(unoq: Any) -> None:
     assert observer.ticks(1) > 30 and observer.ticks(2) > 30
 
 
+class FingerObserver(RecordingObserver):
+    """Keeps every recorded hand target and the rig, to check them against the ctrlrange."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fingers: list[tuple[int, dict[str, float]]] = []
+        self.rigs: dict[int, Any] = {}
+
+    def on_tick(self, bay_id: int, rig: Any, wrist_world: Any, fingers: Any) -> None:
+        super().on_tick(bay_id, rig, wrist_world, fingers)
+        self.fingers.append((bay_id, dict(fingers)))
+        self.rigs[bay_id] = rig
+
+
+@needs_models
+def test_recorded_fingers_stay_inside_ctrlrange(unoq: Any) -> None:
+    """The DMP replay overshoots thumb_yaw's 0 target to about -0.005 rad. MuJoCo clamps ctrl,
+    so episodes must record the clamped value or ATC QC drops them as out of range."""
+    from teleop.atc.stage import StageDirector
+
+    observer = FingerObserver()
+    controller, sink = _controller(unoq, observer=observer)
+    director = StageDirector(controller)
+    _tick_until(
+        controller,
+        lambda: any(e.kind == "RESCUE_LOGGED" and e.bay_id == 2 for e in sink.events),
+        max_ticks=8000,
+        director=director,
+    )
+    assert observer.for_bay(2) == [("start", "dmp"), ("end", (True, None))]
+    for bay_id, fingers in observer.fingers:
+        rig = observer.rigs[bay_id]
+        for name, value in fingers.items():
+            a = int(rig.model.actuator(f"{rig.prefix}{name}").id)
+            lo, hi = (float(x) for x in rig.model.actuator_ctrlrange[a])
+            assert lo <= value <= hi, f"bay {bay_id} {name}={value} outside [{lo}, {hi}]"
+
+    rig = observer.rigs[2]
+    a = int(rig.model.actuator(f"{rig.prefix}thumb_yaw").id)
+    lo, hi = (float(x) for x in rig.model.actuator_ctrlrange[a])
+    assert rig.clip_fingers({"thumb_yaw": lo - 0.5}) == {"thumb_yaw": lo}
+    assert rig.clip_fingers({"thumb_yaw": hi + 0.5}) == {"thumb_yaw": hi}
+    inside = (lo + hi) / 2
+    assert rig.clip_fingers({"thumb_yaw": inside}) == {"thumb_yaw": inside}
+
+
 @needs_models
 def test_m_key_cycles_backend(unoq: Any) -> None:
     controller, _ = _controller(unoq)
