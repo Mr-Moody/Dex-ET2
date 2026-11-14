@@ -1,7 +1,7 @@
 ---
 id: T-140
 title: ATC Fleet Coordinator — C(t), FIFO queue, Bay 2 SE(3) replay, torque tube & 3-rollout gate
-status: claimed
+status: in_review
 owner: claude
 branch: feat/atc-fleet-coordinator
 depends_on: [T-110, T-120, T-130]
