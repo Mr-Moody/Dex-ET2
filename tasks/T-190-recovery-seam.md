@@ -1,12 +1,12 @@
 ---
 id: T-190
 title: Recovery backend seam, policy schema and gate manifest (dmp default)
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: claude-code
+branch: feat/recovery-seam
 depends_on: [T-140, T-150]
 plan: docs/superpowers/plans/2026-11-14-act-recovery-plan.md
-claimed_at: null
+claimed_at: '2026-11-14T10:01:18+00:00'
 ---
 
 **Foundation for the ACT recovery track. Claim first.** It makes the DMP path one of several
