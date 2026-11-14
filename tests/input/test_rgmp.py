@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from teleop import registry
@@ -220,6 +220,9 @@ def test_disconnect_prefix_3() -> None:
     assert stale == []
 
 
+# Timing checks off: on a busy machine (the full suite renders MuJoCo scenes in parallel)
+# Hypothesis flags slow input generation, which says nothing about the parser.
+@settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(st.lists(st.binary(max_size=128), max_size=20))
 def test_parse_frames_fuzz_never_raises(chunks: list[bytes]) -> None:
     buf = bytearray()
