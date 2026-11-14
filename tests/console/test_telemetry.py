@@ -192,3 +192,14 @@ def test_layout_id_bumps_on_layout_change() -> None:
     rescue = a.build(_view(), 1.2, feed_layout([1, 2, 3, 4], 1), {})["layout_id"]
     assert rescue == first + 1  # type: ignore[operator]
     assert a.build(_view(), 1.3, GRID, {})["layout_id"] == first + 2  # type: ignore[operator]
+
+
+def test_non_finite_values_never_reach_the_wire() -> None:
+    # stage.py records a missing gate time as NaN; the browser's JSON.parse rejects NaN.
+    a = _adapter()
+    view = _view(gate=GateStatus(12.0, 3, 3, float("nan"), True))
+    msg = a.build(view, float("nan"), GRID, {3: float("nan"), 4: float("inf")})
+    json.dumps(msg, allow_nan=False)
+    assert msg["gate"]["elapsed_s"] is None  # type: ignore[index]
+    assert _bay(msg, 3)["confidence"] == 0.0
+    assert msg["events"][-1]["text"] == "Skill gate 3/3 passed in ? s"  # type: ignore[index]
