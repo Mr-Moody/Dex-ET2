@@ -91,3 +91,24 @@ To keep the real-time $60\text{ Hz}$ control loop completely non-blocking and al
    - **Interface:** `FleetReasoner` (`src/teleop/reasoning/`) invoked asynchronously off the real-time loop on stall events, validation gates, and OOD refusals to synthesize root-cause triage, operator rescue hints, and human-readable compliance rationales.
    - **Hosting:** Served via **Verda** (`VERDA_BASE_URL`, `VERDA_API_KEY`, `NEMOTRON_MODEL` in `.env`).
    - **Status:** `T-100` provides `VerdaNemotronPlaceholder` (deterministic offline status text); a teammate owns `T-161` to connect the Verda Nemotron endpoint.
+
+---
+
+## Presenter notes: realism
+
+For the experts in the audience. One line each:
+
+- **Sensor model:** the latch pose is not read from the simulator. The estimator is a simulated
+  fiducial-tag sensor (about 3 mm in x and y, 1.5 degrees in yaw), the error a tag-based setup
+  would realistically give, so the controller never sees ground truth.
+- **Tactile localization:** a bolt encoder plus the compliant wrist spring detect first contact
+  with the latch and correct the pose by touch (about 1 mm). Replay uses a touch offset
+  calibrated from the demonstration.
+- **Randomized gate:** a learned skill must pass at least 18 of 20 rollouts with randomized
+  latch pose, estimate error, flap stiffness and rest angle, friction (plus or minus 25%) and
+  jam, before it is shared with the fleet.
+
+Honesty note: the default-seed test gate passes 18/20. The scripted show runs at the fixed
+`STAGE_SEED` 5. The scripted demo skill's pooled per-rollout pass rate is about 70% across
+seeds 0-9, so the robustness claim is "every deployed skill passed at least 18/20 randomized
+trials", not "every demo passes".

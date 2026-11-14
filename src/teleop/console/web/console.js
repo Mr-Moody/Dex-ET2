@@ -244,9 +244,14 @@ function ensureSparks() {
   for (const bay of BAYS) {
     const row = document.createElement("div");
     row.className = "spark";
-    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas></canvas><span class="spark__val"></span>`;
+    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas></canvas><span class="spark__val"></span><span class="spark__pose"></span>`;
     box.append(row);
-    ui.sparks.set(bay, { row, canvas: row.querySelector("canvas"), val: row.querySelector(".spark__val") });
+    ui.sparks.set(bay, {
+      row,
+      canvas: row.querySelector("canvas"),
+      val: row.querySelector(".spark__val"),
+      pose: row.querySelector(".spark__pose"),
+    });
   }
 }
 
@@ -289,6 +294,10 @@ function updateSparks(t) {
     s.row.classList.toggle("is-standby", standby);
     s.row.classList.toggle("is-low", !standby && b.confidence < t.threshold);
     s.val.textContent = standby ? "–" : b.confidence.toFixed(2);
+    const parts = [];
+    if (b.pose_sigma_mm != null) parts.push(`Pose est. ±${Math.round(b.pose_sigma_mm)} mm`);
+    if (b.touch_correction_mm != null) parts.push(`touch-corrected ${b.touch_correction_mm.toFixed(1)} mm`);
+    s.pose.textContent = parts.join(", ");
     drawSpark(s.canvas, b.history, t.threshold, css(STATE_COLOR[b.state] || "--nominal"));
   }
 }
@@ -304,11 +313,17 @@ function updateGate(t) {
   }
   const big = `<span class="gate__big ${g.ok ? "is-ok" : "is-bad"}">${g.passed}/${g.total}</span>`;
   const verdict = g.ok ? "Simulation checks passed, shared with the fleet" : "Simulation checks failed, not shared";
+  const conds = g.conditions ? `Skill gate ${g.passed}/${g.total} ${g.ok ? "PASS" : "FAIL"} (${g.conditions})` : null;
   const timing = [
+    !g.ok && g.worst_failure ? g.worst_failure : null,
     g.fit_ms != null ? `fitted in ${g.fit_ms.toFixed(0)} ms` : null,
     g.elapsed_s != null ? `checked in ${g.elapsed_s.toFixed(2)} s` : null,
   ].filter(Boolean).join(", ");
-  box.innerHTML = `${big}<span>${verdict}</span><span class="gate__line">${timing}</span>`;
+  box.innerHTML = `${big}<span>${verdict}</span><span class="gate__line">${timing}</span>${
+    conds ? `<span class="gate__conds"></span>` : ""
+  }`;
+  const condsEl = box.querySelector(".gate__conds");
+  if (condsEl) condsEl.textContent = conds;
 }
 
 function updateLog(t) {

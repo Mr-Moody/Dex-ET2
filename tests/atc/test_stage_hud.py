@@ -20,6 +20,7 @@ from teleop.atc.hud import (
 )
 from teleop.atc.stage import (
     KEYMAP,
+    STAGE_SEED,
     AudioCues,
     StageAction,
     merge_console,
@@ -298,3 +299,75 @@ def test_atc_command_headless_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         ]
     )
     assert rc == 0
+
+
+def test_format_gate_shows_randomized_pass_count() -> None:
+    g = GateStatus(
+        fit_ms=12.0,
+        passed=19,
+        total=20,
+        elapsed_s=3.1,
+        ok=True,
+        conditions="randomized pose, friction, spring, jam",
+    )
+    assert "19/20 PASS (randomized pose, friction, spring, jam)" in format_gate(g)
+
+
+def test_bay_row_shows_pose_sigma_and_touch_correction() -> None:
+    snap = BaySnapshot(
+        1,
+        BayState.NOMINAL,
+        0.9,
+        0.0,
+        0.0,
+        "ev_latch_v1",
+        pose_sigma_mm=3.0,
+        touch_correction_mm=4.2,
+    )
+    _, value = format_bay_table(HudView(bays=(snap,), queue=()))
+    assert "pose ±3 mm" in value and "touch 4.2 mm" in value
+    bare = BaySnapshot(1, BayState.NOMINAL, 0.9, 0.0, 0.0, "ev_latch_v1", pose_sigma_mm=3.0)
+    _, value = format_bay_table(HudView(bays=(bare,), queue=()))
+    assert "pose ±3 mm" in value and "touch" not in value
+
+
+@needs_models
+def test_cli_seed_reaches_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from teleop.atc.stage import StageController
+    from teleop.commands import atc
+
+    seen: list[int] = []
+    real_build = StageController.build
+
+    def spy(*args: object, **kwargs: object) -> StageController:
+        ctl = real_build(*args, **kwargs)  # type: ignore[arg-type]
+        seen.append(ctl.coordinator.config.seed)
+        return ctl
+
+    monkeypatch.setattr(StageController, "build", staticmethod(spy))
+    monkeypatch.chdir(tmp_path)
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "UNOQ_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    base = [
+        "--headless",
+        "--steps",
+        "1",
+        "--unoq-host",
+        "127.0.0.1",
+        "--unoq-tcp-port",
+        "1",
+        "--env-file",
+        str(tmp_path / "missing.env"),
+    ]
+    assert atc.main([*base, "--seed", "5"]) == 0
+    assert atc.main(base) == 0
+    assert seen == [5, 0]
+
+
+def test_resolve_seed_defaults() -> None:
+    from teleop.commands.atc import AtcConfig, resolve_seed
+
+    assert resolve_seed(AtcConfig()) == 0
+    assert resolve_seed(AtcConfig(script=True)) == STAGE_SEED
+    assert resolve_seed(AtcConfig(script=True, seed=2)) == 2
+    assert resolve_seed(AtcConfig(seed=7)) == 7

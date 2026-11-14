@@ -1,7 +1,7 @@
 """``teleop atc``: 4-bay fleet supervisor with HUD, keyboard stage controls and audio cues.
 
     teleop atc [--source studio|synthetic|replay] [--unoq-host HOST] [--headless --steps N]
-               [--script] [--hotspot] [--config configs/atc.yaml]
+               [--script] [--seed N] [--hotspot] [--config configs/atc.yaml]
 
 Opens the fleet ops console in the browser unless ``--headless``: a CCTV feed per bay plus
 fleet telemetry, served on ``--console-port`` (``--no-browser`` only prints the URL).
@@ -33,6 +33,7 @@ from teleop.app import make_source
 from teleop.atc.coordinator import OperatorInput
 from teleop.atc.hud import hud_lines, hud_overlays
 from teleop.atc.stage import (
+    STAGE_SEED,
     AudioCues,
     ConsoleSource,
     NullSpeaker,
@@ -83,10 +84,18 @@ class AtcConfig:
     console_port: int = 8765
     console_fps: int = 30
     open_browser: bool = True
+    seed: int | None = None  # None: STAGE_SEED with --script, else 0
 
 
 _PATH_FIELDS = {"replay_file", "calibration"}
 DISPLAYS = ("console", "viewer")
+
+
+def resolve_seed(cfg: AtcConfig) -> int:
+    """Run seed: an explicit one always wins; else the scripted show uses ``STAGE_SEED``."""
+    if cfg.seed is not None:
+        return cfg.seed
+    return STAGE_SEED if cfg.script else 0
 
 
 def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
@@ -185,6 +194,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-audio", dest="audio", action="store_false", default=None)
     ap.add_argument("--no-background", dest="background_bays", action="store_false", default=None)
     ap.add_argument("--display", choices=DISPLAYS, default=None, help="console (default) or viewer")
+    ap.add_argument("--seed", type=int, default=None, help="run seed (stage script: STAGE_SEED)")
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
@@ -247,6 +257,7 @@ def main(argv: list[str]) -> int:
         hardware=_hardware_consoles(cfg, unoq),
         cycle_dwell_s=cfg.cycle_dwell_s,
         include_background_bays=cfg.background_bays,
+        seed=resolve_seed(cfg),
         unoq_label=f"{label} | compliance {sink.mode} | reasoner {reasoner.mode}",
     )
     logger.info("atc: %s", controller.unoq_label)

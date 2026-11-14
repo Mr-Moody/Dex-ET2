@@ -511,7 +511,19 @@ class AtcCoordinator:
             queue_position=queue_position,
             active_skill_id=bay.skill_id if bay.state == BayState.AUTONOMOUS_SKILL else None,
             last_match=bay.match,
+            pose_sigma_mm=bay.rig.estimate.sigma_xy_m * 1e3,
+            touch_correction_mm=self._touch_mm(bay),
         )
+
+    @staticmethod
+    def _touch_mm(bay: _Bay) -> float | None:
+        """Size of this cycle's accepted touch correction (needs no ground truth)."""
+        touch = bay.last_touch
+        if touch is None or touch.rejected_correction_m is not None:
+            return None
+        if touch.last_correction_m is None:
+            return None
+        return abs(touch.last_correction_m) * 1e3
 
     def snapshots(self) -> tuple[BaySnapshot, ...]:
         return tuple(self.snapshot(b) for b in sorted(self._bays))

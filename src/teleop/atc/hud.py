@@ -38,13 +38,15 @@ class RescueStatus:
 
 @dataclass(frozen=True, slots=True)
 class GateStatus:
-    """Latest UNO Q DMP fit and 3-rollout sim gate result."""
+    """Latest UNO Q DMP fit and randomized sim gate result."""
 
     fit_ms: float | None = None
     passed: int | None = None
     total: int | None = None
     elapsed_s: float | None = None
     ok: bool | None = None
+    conditions: str | None = None  # what the gate randomized, shown after the verdict
+    worst_failure: str | None = None  # most extreme condition among failed rollouts
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +108,13 @@ def _match_text(snap: BaySnapshot) -> str:
 
 def format_bay_row(snap: BaySnapshot) -> tuple[str, str]:
     skill = f"  {snap.active_skill_id}" if snap.active_skill_id else ""
+    pose = f"  pose ±{snap.pose_sigma_mm:.0f} mm" if snap.pose_sigma_mm is not None else ""
+    touch = (
+        f"  touch {snap.touch_correction_mm:.1f} mm" if snap.touch_correction_mm is not None else ""
+    )
     value = (
         f"{_state_text(snap):<14} C {confidence_bar(snap.confidence)}  "
-        f"x {snap.x_bolt_m * 100:4.1f} cm{_match_text(snap)}{skill}"
+        f"x {snap.x_bolt_m * 100:4.1f} cm{pose}{touch}{_match_text(snap)}{skill}"
     )
     return f"BAY {snap.bay_id}", value
 
@@ -141,7 +147,11 @@ def format_gate(gate: GateStatus) -> str:
         return f"UNO Q DMP fit: {fit} | Sim Gate: --"
     verdict = "PASS" if gate.ok else "FAIL"
     elapsed = f" ({gate.elapsed_s:.2f} s)" if gate.elapsed_s is not None else ""
-    return f"UNO Q DMP fit: {fit} | Sim Gate: {gate.passed}/{gate.total} {verdict}{elapsed}"
+    if gate.conditions:
+        label = f"Skill gate {gate.passed}/{gate.total} {verdict} ({gate.conditions})"
+    else:
+        label = f"Sim Gate: {gate.passed}/{gate.total} {verdict}"
+    return f"UNO Q DMP fit: {fit} | {label}{elapsed}"
 
 
 # --------------------------------------------------------------------------- whole HUD

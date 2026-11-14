@@ -44,6 +44,7 @@ import numpy as np
 from teleop.atc.coordinator import ROUTINE, AtcCoordinator, CoordinatorConfig, OperatorInput
 from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
+from teleop.atc.validator import ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, ComplianceSink
 from teleop.reasoning.protocol import FleetReasoner, ReasoningContext, ReasoningVerdict
 from teleop.sim.bays import ACTIVE_BAYS, BACKGROUND_BAYS
@@ -387,6 +388,53 @@ class ReasonerTap:
 # --------------------------------------------------------------------------- controller
 
 
+GATE_CONDITIONS = "randomized pose, friction, spring, jam"
+
+# Half-range of each randomized condition, to rank which failing rollout condition was the most
+# extreme: friction +-25%, flap stiffness +-20%, springref +-3 deg, y error 3 mm, yaw 1.5 deg.
+_COND_SCALE = (0.25, 0.20, 3.0, 3.0, 1.5)
+
+
+def worst_failure(report: ValidationReport | None) -> str | None:
+    """Plain-words most extreme condition across the failed rollouts, or ``None`` if none failed.
+
+    Deterministic: ranks each condition by its value over the randomized half-range and takes
+    the largest (first one wins a tie), e.g. ``"failed at +23% friction, 2.8 mm y error"``.
+    """
+    if report is None:
+        return None
+    best: tuple[float, str] | None = None
+    for r in report.results:
+        if r.passed:
+            continue
+        c = r.conditions
+        parts = (
+            (c.friction_scale - 1.0) * 100.0,
+            (c.flap_stiffness_scale - 1.0) * 100.0,
+            c.flap_springref_deg,
+            abs(c.est_error[1]) * 1e3,
+            abs(math.degrees(c.est_error[2])),
+        )
+        sev = (
+            abs(parts[0]) / 100.0 / _COND_SCALE[0],
+            abs(parts[1]) / 100.0 / _COND_SCALE[1],
+            abs(parts[2]) / _COND_SCALE[2],
+            parts[3] / _COND_SCALE[3],
+            parts[4] / _COND_SCALE[4],
+        )
+        i = max(range(5), key=lambda k: sev[k])
+        text = (
+            f"{parts[0]:+.0f}% friction",
+            f"{parts[1]:+.0f}% flap stiffness",
+            f"{parts[2]:+.1f} deg flap rest angle",
+            f"{parts[3]:.1f} mm y error",
+            f"{parts[4]:.1f} deg yaw error",
+        )[i]
+        if best is None or sev[i] > best[0]:
+            best = (sev[i], text)
+    return None if best is None else f"failed at {best[1]}"
+
+
 class StageController:
     """One stage tick: keys -> console -> pallet cycling -> coordinator -> LEDs, HUD, cues."""
 
@@ -669,6 +717,8 @@ class StageController:
                 total=int(meta.get("rollouts_total", 0)),
                 elapsed_s=float(meta.get("elapsed_s", math.nan)),
                 ok=bool(meta.get("passed")),
+                conditions=GATE_CONDITIONS,
+                worst_failure=worst_failure(self.coordinator.last_report),
             )
         if self.audio is not None:
             self.audio.on_event(event)
@@ -972,4 +1022,5 @@ __all__ = [
     "UnoQConsolePoller",
     "merge_console",
     "scripted_rescue",
+    "worst_failure",
 ]
