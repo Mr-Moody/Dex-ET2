@@ -1,7 +1,7 @@
 ---
 id: T-100
 title: ATC shared contracts, CLI registration, Panda fetch, 16-DoF LEAP & placeholders
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/atc-shared-contracts
 depends_on: [T-050]
