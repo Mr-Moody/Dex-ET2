@@ -22,3 +22,17 @@ The lead may reclaim (release) a claim older than 6 hours with no activity on it
 ## Hardware
 
 Tasks marked hardware-laptop-only (T-010, T-011 Step 1, T-050 Step 6) go to the hardware laptop; teammates take the others first.
+
+## Active Track (2026-11-14 Pivot): Air Traffic Control (`T-100`–`T-161`)
+
+See `PROJECT_BRIEF.md`, `docs/adr/0002-atc-fleet-rescue-pivot.md`, and `docs/superpowers/plans/2026-11-14-atc-implementation-plan.md`.
+
+- **Foundation (claim first):** `T-100` (`depends_on: [T-050]`) — shared ATC contracts, Franka Panda model fetch, 16-DoF LEAP YAML update, CLI subcommands (`atc`, `unoq`), and Solana / Verda-Nemotron placeholders. Also marks any unstarted legacy `T-060`/`T-070` booth tasks `blocked` once `main` settles.
+- **Parallel P0/P1 tracks unlocked by `T-100`:**
+  - `T-110` -> `T-120`: 3-box sprung slide-bolt MJCF, 4-bay Franka Panda + LEAP scene, DLS differential IK, `mj_inverse` torques, relative-clutch pose indexing, and split cameras.
+  - `T-130`: Arduino UNO Q QRB2210 Python edge service + automatic localhost mock (`1-Euro` filter, Mahalanobis stall-signature/OOD gate, `<20 ms` 30-kernel RBF-DMP ridge regression).
+  - `T-131`: Arduino UNO Q STM32U585 1 kHz console/Judge Fault Rig firmware sketch + 8x13 LED Matrix serial/mock bridge.
+  - `T-140` -> `T-150`: ATC Fleet Coordinator (`C(t)`, single-active FIFO hold queue, Bay 2 `SE(3)` replay, additive residual torque tube, 3-rollout headless validation gate, `x=0` Negative Control) and `teleop atc` live HUD + 2.5-min stage controls.
+- **Reserved Teammate Tasks (unlocked by `T-100`):**
+  - `T-160`: Solana compliance & alert chain (`src/teleop/compliance/solana.py`).
+  - `T-161`: Verda Nemotron reasoning co-pilot (`src/teleop/reasoning/nemotron.py`).
