@@ -45,3 +45,9 @@ Key rules for parallel agents on the `T-100`–`T-161` track:
 2. **Only `T-100`** edits shared entrypoints (`src/teleop/cli.py`, `scripts/fetch_models.py`, `configs/hands/leap.yaml`, `.env.example`, `.pre-commit-config.yaml`). Tasks `T-110`–`T-161` must only create/edit their own owned modules listed in `2026-11-14-atc-implementation-plan.md`.
 3. `T-160` (**Solana compliance & alert chain**, `src/teleop/compliance/solana.py`) and `T-161` (**Verda Nemotron reasoning**, `src/teleop/reasoning/nemotron.py`) are reserved for their respective teammates; `T-100` creates non-blocking placeholder implementations for both.
 4. Never commit as co-author (`Co-Authored-By` trailers or "Generated with" lines are forbidden for all agents).
+
+## Active Track: ACT Recovery Policy (`T-190`–`T-198`)
+
+Spec `docs/superpowers/specs/2026-11-14-act-recovery-policy-design.md`, plan
+`docs/superpowers/plans/2026-11-14-act-recovery-plan.md` (Global Constraints and File Ownership
+Map there). `T-190` lands first; `recovery_backend: dmp` must stay byte-for-byte today's behaviour.

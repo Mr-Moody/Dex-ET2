@@ -41,10 +41,10 @@ press on the console) puts the system back on today's DMP behaviour, unchanged.
    sessions into one training set.
 4. **Train remotely:** one documented command trains ACT on a Verda GPU instance from the merged
    dataset and brings back a checkpoint.
-5. **Gate offline:** `teleop eval` runs the checkpoint through headless rollouts per failure
-   signature (the same perturbations as the DMP gate, more rollouts) and writes a release
-   manifest listing the signatures it passed.
-6. **Run live:** `teleop atc --recovery-backend hybrid` uses ACT for gated signatures and the DMP
+5. **Gate offline:** `teleop eval` runs the checkpoint through headless rollouts per
+   fault type (the same perturbations as the DMP gate, more rollouts) and writes a release
+   manifest listing the fault types it passed, with their fingerprints.
+6. **Run live:** `teleop atc --recovery-backend hybrid` uses ACT for stalls the release covers and the DMP
    for the rest, inside the existing safety checks, without stuttering the 60 Hz loop or the
    30 fps console.
 7. **Fall back:** `--recovery-backend dmp` (the default) reproduces today's behaviour exactly.
@@ -63,7 +63,7 @@ press on the console) puts the system back on today's DMP behaviour, unchanged.
 ## Anti-goals (failure even if it works)
 
 - The `dmp` backend behaves differently from today in any way, or needs `torch` installed.
-- ACT runs on a failure signature its checkpoint hasn't passed the gate for.
+- ACT runs on a stall whose fault type its checkpoint hasn't passed the gate for.
 - The live loop drops below 60 Hz or the console feeds hitch because of inference, rendering
   for the policy, or episode encoding.
 - The policy reads simulator-only state (`bolt_x`, `flap_hinge`, the latch controller's fault
@@ -127,19 +127,25 @@ record_episodes: null        # directory: save recoveries as LeRobot episodes (o
 | Backend | On a matched stall | On ACT abort |
 |---|---|---|
 | `dmp` | Today's DMP replay, byte-for-byte | n/a |
-| `hybrid` | ACT if the signature is in `gate.json`, else the DMP if one is deployed | DMP if deployed, else operator queue |
-| `act` | ACT if the signature is in `gate.json`, else operator queue | Operator queue |
+| `hybrid` | ACT if the release covers the stall, else the DMP if one is deployed | DMP if deployed, else operator queue |
+| `act` | ACT if the release covers the stall, else operator queue | Operator queue |
 
-Unmatched or out-of-distribution stalls always go to the operator queue, in every mode. DMPs
+**"The release covers the stall"** means the live stall fingerprint is within the classifier's
+OOD threshold of one of the fingerprint prototypes stored in `gate.json` for the failure types
+that passed the gate (section 8). Signature IDs are not used across sessions: the UNO Q numbers
+them in order of appearance (`Jam_Sig_1`, ...), so the same ID can mean a different fault in
+another session. Stalls that neither the release nor the live DMP library covers go to the
+operator queue, in every mode. DMPs
 are still fitted, gated and deployed after every rescue in every mode, so switching back to
 `dmp` never loses the hotfix library.
 
 **Live toggle:** the `M` key (console page and MuJoCo viewer) cycles `dmp → hybrid → act`.
 It takes effect at the next recovery start. A running recovery finishes on its backend. The
-console shows the current backend in the telemetry strip and the key bar, and every switch
-emits a `BACKEND_CHANGED` compliance event.
+console shows the current backend in the telemetry strip and the key bar, and every switch is
+logged and shown as a console action note. (No new compliance event kind: `ComplianceKind` is a
+T-100 shared contract. ACT aborts reuse `STALL_ALERT` with `"backend": "act"` in the payload.)
 
-**Automatic downgrade to `dmp`** happens, with a console toast and a compliance event, if:
+**Automatic downgrade to `dmp`** happens, with a console toast and a log warning, if:
 
 - the checkpoint or `gate.json` is missing, unreadable or doesn't match the observation and
   action schema;
@@ -192,8 +198,9 @@ Recorded at 30 fps (every second 60 Hz tick):
 
 - observation and action as above (the action is what was actually commanded: glove after
   clutch indexing, scripted target, or DMP output);
-- `task` string `"recover latch: <signature_id>"` (required by LeRobot, and it keeps a later VLA
-  option open).
+- `task` string `"recover latch: <fault>"`, e.g. `"recover latch: flap"` (required by LeRobot,
+  and it keeps a later VLA option open). `fault` is the fault the stage armed, a ground-truth
+  label used only for labelling and eval, never for live decisions.
 
 Sidecar (`meta/teleop_episodes.jsonl`, the same mechanism `teleop process` already reads),
 one line per episode:
@@ -264,7 +271,7 @@ can weight or exclude sources.
   clear.
 - **Label:** carry `signature_id`, `fault` and `source` into the clean dataset's sidecar.
   `--sources glove,scripted,dmp` selects which sources go in. A summary prints counts per
-  signature and source.
+  fault type and source.
 - **Merge:** several session directories into one training dataset (as today).
 
 ### 7. Training on Verda
@@ -291,18 +298,22 @@ can weight or exclude sources.
 
 ### 8. Offline gate and release manifest
 
-`teleop eval --checkpoint models/act/<run> [--signatures ...] [--rollouts 10]`:
+`teleop eval --checkpoint models/act/<run> [--faults flap,pin] [--rollouts 10]`:
 
 - Generalises `SkillValidator` to take any `RecoveryController`, not just a `SkillPrimitive`.
-- Per signature, runs headless single-bay rollouts from the post-retract hover, across the DMP
+- Per fault type (`flap`, `pin`), runs headless single-bay rollouts from the post-retract hover, across the DMP
   gate's latch perturbations plus random ones. Each rollout uses the same pass rules as today:
   bolt cleared, hand torque below `tau_hard_max`, arm ratio below the margin.
-- Default pass bar: at least 9 of 10 rollouts per signature. This is stricter than the DMP's 3
+- Default pass bar: at least 9 of 10 rollouts per fault type. This is stricter than the DMP's 3
   of 3 because the policy covers more variation.
-- Reports success rate, time-to-clear and peak torques next to the DMP for the same signature,
+- Reports success rate, time-to-clear and peak torques next to the DMP for the same fault type,
   and the inference latency measured on this machine.
-- Writes `models/act/<run>/gate.json`: passed signatures, the bar used, per-signature results,
-  the checkpoint hash and schema version. The live runtime trusts only signatures listed there.
+- Groups rollouts and training episodes by `fault` label. For each fault that passes, it
+  stores the fingerprint samples (the sidecar `signature` vectors of that fault's training
+  episodes) as a prototype.
+- Writes `models/act/<run>/gate.json`: the passed faults with their prototypes, the bar used,
+  per-fault results, the checkpoint hash and schema version. The live runtime runs ACT only on
+  stalls whose fingerprint matches a prototype in there.
 
 The gate runs offline, never inside the live loop: rendering cameras and running ACT for
 dozens of rollouts would stall the demo.
@@ -315,7 +326,7 @@ dozens of rollouts would stall the demo.
 3. The generator produces 300 or more successful scripted episodes headless. `teleop process`
    cleans and merges them with glove sessions.
 4. One Verda training run, following only `docs/training/verda.md`, produces a checkpoint.
-5. `teleop eval` passes that checkpoint for at least the flap-jam signature. It reports success
+5. `teleop eval` passes that checkpoint for at least the `flap` fault. It reports success
    rate and time-to-clear next to the DMP.
 6. Live `hybrid` with ACT active in two bays at once holds 60 Hz and 30 fps console feeds. p95
    inference ≤ 30 ms.
@@ -338,6 +349,6 @@ dozens of rollouts would stall the demo.
 - ACT recoveries start after the same 3 cm retract as human rescues (not the DMP's 1 cm
   back-off), so live start states match the training data.
 - Policy inputs exclude `bolt_x` and other sim-only state.
-- Gate bar of 9 of 10 rollouts per signature.
+- Gate bar of 9 of 10 rollouts per fault type.
 - Episode recording off by default, so the demo laptop isn't encoding video unless asked.
 - `M` key for the live backend toggle.

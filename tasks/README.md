@@ -36,3 +36,12 @@ See `PROJECT_BRIEF.md`, `docs/adr/0002-atc-fleet-rescue-pivot.md`, and `docs/sup
 - **Reserved Teammate Tasks (unlocked by `T-100`):**
   - `T-160`: Solana compliance & alert chain (`src/teleop/compliance/solana.py`).
   - `T-161`: Verda Nemotron reasoning co-pilot (`src/teleop/reasoning/nemotron.py`).
+
+## Active Track (2026-11-14): ACT Recovery Policy (`T-190`–`T-198`)
+
+See `docs/superpowers/specs/2026-11-14-act-recovery-policy-design.md` and `docs/superpowers/plans/2026-11-14-act-recovery-plan.md` (Global Constraints and the File Ownership Map live there).
+
+- **Foundation (claim first):** `T-190`: recovery backend seam (`dmp` default, unchanged behaviour), policy schema, gate manifest, `M` toggle and `teleop atc` hooks.
+- **Parallel after `T-190`:** `T-191` (wrist camera + episode recording), `T-193` (ATC QC in `teleop process`), `T-194` (CUDA `act` group, training wrapper, Verda runbook).
+- **Then:** `T-192` (scripted generator) and `T-195` (ACT runtime) after `T-191`; `T-196` (offline gate, `teleop eval`) after `T-195`; `T-197` (console/HUD + README) after `T-196`.
+- **Release:** `T-198` is operational. It is run by whoever holds the Verda credits on the hardware laptop.
