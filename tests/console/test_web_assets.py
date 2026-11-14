@@ -26,6 +26,15 @@ def test_index_references_only_local_assets() -> None:
         assert not re.search(r"https?://", _read(name)), f"{name} references the network"
 
 
+def test_health_strip_assets() -> None:
+    html, js = _read("index.html"), _read("health.js")
+    assert 'src="health.js"' in html and 'id="health"' in html
+    for token in ('"reconnect"', '"hotspot"', '"gloves"', '"panel"'):
+        assert token in js, token
+    assert not re.search(r"https?://", js)
+    assert "/* health strip */" in _read("console.css")
+
+
 def test_js_speaks_protocol() -> None:
     js = _read("console.js")
     for token in ('"/ws"', "layout_id", '"key"', "Signal lost", "arraybuffer"):

@@ -9,10 +9,12 @@ glyphs beyond it).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from teleop.atc.types import BaySnapshot, BayState
+from teleop.health.model import Health
 
 STATE_LABELS: dict[BayState, str] = {
     BayState.NOMINAL: "NOMINAL",
@@ -144,10 +146,15 @@ def format_gate(gate: GateStatus) -> str:
     return f"UNO Q DMP fit: {fit} | Sim Gate: {gate.passed}/{gate.total} {verdict}{elapsed}"
 
 
+def format_health(health: Sequence[Health]) -> str:
+    """``HOTSPOT ok | GLOVES fail | PANEL warn``"""
+    return " | ".join(f"{h.name.upper()} {h.level.value}" for h in health)
+
+
 # --------------------------------------------------------------------------- whole HUD
 
 
-def hud_lines(view: HudView) -> list[str]:
+def hud_lines(view: HudView, health: Sequence[Health] | None = None) -> list[str]:
     """The HUD as plain text lines (headless logging, tests)."""
     labels, values = format_bay_table(view)
     lines = [
@@ -161,10 +168,14 @@ def hud_lines(view: HudView) -> list[str]:
         lines.append(f"KEY {last.key}: {last.text}")
     if view.unoq:
         lines.append(view.unoq)
+    if health:
+        lines.append(format_health(health))
     return lines
 
 
-def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
+def hud_overlays(
+    view: HudView, health: Sequence[Health] | None = None
+) -> list[tuple[int, int, str, str]]:
     """``viewer.set_texts`` overlays: one panel per screen corner, big font for the bay table."""
     import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
@@ -172,7 +183,10 @@ def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
     font, grid = mj.mjtFont, mj.mjtGridPos
     labels, values = format_bay_table(view)
     status = "\n".join([format_rescue(view.rescue), format_gate(view.gate)])
-    hooks = "\n".join([view.compliance, view.reasoning])
+    hook_rows = [view.compliance, view.reasoning]
+    if health:
+        hook_rows.append(format_health(health))
+    hooks = "\n".join(hook_rows)
     last_key = f"{view.actions[-1].key}: {view.actions[-1].text}" if view.actions else ""
     stage = "\n".join(
         x for x in (f"BEAT {view.beat}" if view.beat else "", last_key, view.unoq) if x
@@ -195,6 +209,7 @@ __all__ = [
     "format_bay_row",
     "format_bay_table",
     "format_gate",
+    "format_health",
     "format_rescue",
     "hud_lines",
     "hud_overlays",

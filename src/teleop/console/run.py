@@ -17,10 +17,12 @@ from teleop.atc.coordinator import OperatorInput
 from teleop.atc.stage import StageController
 from teleop.atc.types import N_BAYS
 from teleop.console.background import load_cycle
+from teleop.console.health_publish import HealthPublisher
 from teleop.console.render import RenderWorker
 from teleop.console.server import ConsoleServer
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
+from teleop.health.monitor import HealthMonitor
 from teleop.sim.cells import cctv_camera_name
 from teleop.sim.loop import FixedRateLoop, LoopStats
 
@@ -55,10 +57,20 @@ def run_console(
     fps: int,
     open_browser: bool,
     steps: int | None = None,
+    health: HealthMonitor | None = None,
 ) -> LoopStats:
     co = controller.coordinator
     bays = bays_in_model(co.model)
-    server = ConsoleServer(port=port, on_key=controller.on_key)
+
+    def reconnect(name: str) -> None:
+        if health is not None:
+            health.request_reconnect(name)  # non-blocking; the bool is not needed here
+
+    server = ConsoleServer(
+        port=port,
+        on_key=controller.on_key,
+        on_reconnect=reconnect if health is not None else None,
+    )
     try:
         server.start()
     except OSError as exc:
@@ -68,7 +80,8 @@ def run_console(
     snapshots.put(SimSnapshot.capture(co.data, controller.hud_view(), co.time_s))
     background = load_cycle() if controller.background_bays else None
     adapter = TelemetryAdapter(bays, controller.background_bays)
-    worker = RenderWorker(co.model, snapshots, server, adapter, bays, background, fps=fps)
+    sink = HealthPublisher(server, health) if health is not None else server
+    worker = RenderWorker(co.model, snapshots, sink, adapter, bays, background, fps=fps)
     worker.start()
     print(f"teleop atc: fleet ops console at {server.url}", flush=True)
     if open_browser:
