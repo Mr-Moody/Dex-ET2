@@ -1,12 +1,12 @@
 ---
 id: T-216
 title: UNO Q console controls (joystick calibration, per-robot E-stop, clutch-gated glove)
-status: claimed
-owner: cursor-agent
-branch: feat/unoq-console-controls
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: docs/hardware/console/README.md
-claimed_at: '2026-11-14T15:15:31+00:00'
+claimed_at: null
 ---
 
 Make the physical console (`docs/hardware/console/wiring.html`) drive the web fleet console.

@@ -1,12 +1,12 @@
 ---
 id: T-200
 title: Health model and monitor with off-thread reconnect
-status: in_review
-owner: claude-code
-branch: feat/health-monitor
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: '2026-11-14T11:04:09+00:00'
+claimed_at: null
 ---
 
 Implements Task 1 of the plan.

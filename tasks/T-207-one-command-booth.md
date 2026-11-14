@@ -1,12 +1,12 @@
 ---
 id: T-207
 title: 'One-command booth launch: wiring, defaults and README'
-status: in_review
-owner: claude-code
-branch: feat/one-command-booth
+status: done
+owner: null
+branch: null
 depends_on: [T-201, T-202, T-204, T-205, T-206]
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: '2026-11-14T12:37:38+00:00'
+claimed_at: null
 ---
 
 Implements Task 8 of the plan.

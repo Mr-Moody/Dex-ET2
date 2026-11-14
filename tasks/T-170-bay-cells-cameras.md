@@ -1,12 +1,12 @@
 ---
 id: T-170
 title: Enclosed bay cells, lighting, per-bay CCTV and live rescue cameras
-status: in_review
-owner: lead-laptop
-branch: feat/bay-cells
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: docs/superpowers/plans/2026-11-14-fleet-ops-console.md#task-t-170-bay-cells-lighting-and-cameras
-claimed_at: '2026-11-14T05:19:40+00:00'
+claimed_at: null
 ---
 
 **Fleet ops console, scene. Edit only `src/teleop/sim/cells.py` (new), `src/teleop/sim/bays.py`, `tests/sim/test_cells.py`.**
