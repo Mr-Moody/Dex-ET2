@@ -1,12 +1,12 @@
 ---
 id: T-221
 title: Stop the RGMP fuzz test flaking under load and the keypair test failing on Windows
-status: in_review
-owner: claude-code
-branch: test/stabilise-fuzz-and-keypair
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: null
-claimed_at: '2026-11-14T18:58:40+00:00'
+claimed_at: null
 ---
 
 Both were reported as pre-existing failures in #72.
