@@ -455,14 +455,17 @@ def _run_booth(
     stack.callback(_close_act, controller)
     _setup_recovery(cfg, controller, hooks.get("--act-checkpoint"))
     sink_handle: Any = None
+    operator_box: list[Any] = []  # filled once the operator is built (after the sink)
     if "--record-episodes" in hooks:
         scripted = cfg.generate is not None or cfg.source == "synthetic"
-        # TODO(T-191): with gloves, SelectingGlove may play the scripted rescue instead
-        # (gloves unhealthy at clutch engage), so this startup-wide label can be wrong per
-        # episode. Once the episode sink takes a callable label, pass
-        # ``lambda: selecting.rescue_input or "glove"`` for a SelectingGlove operator.
-        source = "scripted" if scripted else "glove"
-        sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
+        # With gloves, SelectingGlove may play the scripted rescue instead (gloves unhealthy at
+        # clutch engage), so the label is read per rescue, never fixed at startup.
+        source: str | Callable[[], str] = "scripted" if scripted else rescue_label(operator_box)
+        try:
+            sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
+        except (RuntimeError, OSError) as exc:
+            print(f"teleop atc: {exc}")
+            return 1
         controller.coordinator.set_observer(sink_handle)
         stack.callback(_close_episodes, controller, sink_handle)
     if "--generate" in hooks:
@@ -502,7 +505,25 @@ def _run_booth(
         health = HealthMonitor([hotspot_check, glove_check, panel])
         health.start()
         stack.callback(health.stop)
+    operator_box.append(glove)
     return _run(cfg, controller, glove, health)
+
+
+def rescue_label(operator_box: list[Any]) -> Callable[[], str]:
+    """Episode label for a human rescue, read when it starts: what really drove the hand.
+
+    ``operator_box`` holds the operator once built. A ``SelectingGlove`` reports the input it
+    chose at clutch engage (``"scripted"`` when the gloves were unhealthy); anything else is the
+    glove.
+    """
+
+    def label() -> str:
+        op = operator_box[0] if operator_box else None
+        if isinstance(op, SelectingGlove) and op.rescue_input is not None:
+            return op.rescue_input
+        return "glove"
+
+    return label
 
 
 def _build_glove(
