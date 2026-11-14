@@ -1,12 +1,12 @@
 ---
 id: T-180
 title: Top-level README with setup and run instructions
-status: in_review
-owner: ethan
-branch: docs/run-readme
+status: done
+owner: null
+branch: null
 depends_on: [T-175, T-176]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md
-claimed_at: '2026-11-14T06:46:44+00:00'
+claimed_at: null
 ---
 
 Add `README.md` covering setup (uv, models, `.env`), running `teleop atc` in the browser console,
