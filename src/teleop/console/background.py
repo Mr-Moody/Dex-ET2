@@ -20,7 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from teleop.atc.hud import ConveyorStatus
-from teleop.sim.cells import CONVEYOR_SPEED_M_S
+from teleop.sim.cells import CONVEYOR_SPEED_M_S, PACK_PITCH_M
 
 DEFAULT_CYCLE_PATH = Path(__file__).parent / "data" / "background_cycle.npz"
 BLEND_S = 0.5
@@ -29,8 +29,7 @@ LATCH_JOINTS = frozenset({"bolt_slide", "flap_hinge"})  # snap at the wrap: a ne
 SAMPLE_HZ = 30.0
 RECORD_DWELL_S = 1.0
 SOURCE_BAY = 1
-_BG_FEED_IN_END_S = 1.32
-_BG_FEED_OUT_START_S = 3.25
+_BG_WORK_END_S = 3.35
 
 FloatArray = NDArray[np.float64]
 
@@ -49,7 +48,7 @@ class BackgroundCycle:
     def duration_s(self) -> float:
         return float(self.t[-1])
 
-    def _snap_mask(self) -> NDArray[np.bool_]:
+    def snap_mask(self) -> NDArray[np.bool_]:
         mask: list[bool] = []
         for name, width in zip(self.joint_names, self.qpos_widths, strict=True):
             mask.extend([name in LATCH_JOINTS] * width)
@@ -71,7 +70,7 @@ class BackgroundCycle:
         blend_start = dur - min(BLEND_S, dur)
         if t > blend_start and dur > 0.0:
             w = (t - blend_start) / (dur - blend_start)
-            blend = ~self._snap_mask()
+            blend = ~self.snap_mask()
             q[blend] = (1.0 - w) * q[blend] + w * self.qpos[0, blend]
             conf = (1.0 - w) * conf + w * float(self.confidence[0])
         return q, conf
@@ -150,46 +149,70 @@ class BackgroundPlayer:
     def bays(self) -> tuple[int, ...]:
         return tuple(self._maps)
 
+    def loop_params(self) -> tuple[float, float, float]:
+        dur = self.cycle.duration_s
+        work_end = min(_BG_WORK_END_S, max(0.5 * dur, dur - 0.5))
+        transfer_s = PACK_PITCH_M / CONVEYOR_SPEED_M_S if dur > 2.5 else 0.0
+        return work_end, transfer_s, work_end + transfer_s
+
     def apply(self, data: Any, wall_t: float) -> dict[int, float]:
         """Pose each background bay at ``wall_t``; returns ``{bay: C(t)}``. No ``mj_forward``."""
+        import math
+
         out: dict[int, float] = {}
-        dur = self.cycle.duration_s
+        work_end, transfer_s, loop_s = self.loop_params()
+        if transfer_s <= 0.0 or loop_s <= 0.0:
+            dur = self.cycle.duration_s
+            for bay, mapping in self._maps.items():
+                q, conf = self.cycle.sample(wall_t + PHASE_OFFSETS.get(bay, 0.0) * dur)
+                for col, adr, width in mapping:
+                    data.qpos[adr : adr + width] = q[col : col + width]
+                out[bay] = conf
+            return out
+
+        q_end, c_end = self.cycle.sample(work_end)
+        q_start = self.cycle.qpos[0]
+        c_start = float(self.cycle.confidence[0])
+        arm_mask = ~self.cycle.snap_mask()
         for bay, mapping in self._maps.items():
-            phase = PHASE_OFFSETS.get(bay, 0.0) * dur
-            q, conf = self.cycle.sample(wall_t + phase)
+            phase = PHASE_OFFSETS.get(bay, 0.0) * loop_s
+            u = max(0.0, float(wall_t) + phase) % loop_s
+            if u < work_end:
+                q, conf = self.cycle.sample(u)
+            else:
+                tau = min(1.0, (u - work_end) / transfer_s)
+                w = 0.5 - 0.5 * math.cos(math.pi * tau)
+                q = q_end.copy()
+                q[arm_mask] = (1.0 - w) * q_end[arm_mask] + w * q_start[arm_mask]
+                conf = (1.0 - w) * c_end + w * c_start
             for col, adr, width in mapping:
                 data.qpos[adr : adr + width] = q[col : col + width]
             out[bay] = conf
         return out
 
     def conveyor_statuses(self, wall_t: float, *, estop: bool = False) -> dict[int, ConveyorStatus]:
-        """Compute segmented conveyor belt status (feed in -> pause -> advance out) for Bays 3-4."""
-        dur = self.cycle.duration_s
+        """Seamless modular conveyor loop (pause during unlatching -> advance full PACK_PITCH_M)."""
+        work_end, transfer_s, loop_s = self.loop_params()
         out: dict[int, ConveyorStatus] = {}
         for bay in self._maps:
             t_eff = self._last_t.get(bay, wall_t) if estop else wall_t
             self._last_t[bay] = t_eff
-            phase = PHASE_OFFSETS.get(bay, 0.0) * dur
-            t_total = max(0.0, t_eff + phase)
-            t_in = t_total % dur if dur > 0.0 else 0.0
-            feed_out_dur = max(0.0, dur - _BG_FEED_OUT_START_S)
-            feed_per_cycle = (_BG_FEED_IN_END_S + feed_out_dur) * CONVEYOR_SPEED_M_S
-            n_cycles = int(t_total // dur) if dur > 0.0 else 0
-            if t_in < _BG_FEED_IN_END_S:
-                mode = "feeding"
-                pack_dy = -(_BG_FEED_IN_END_S - t_in) * CONVEYOR_SPEED_M_S
-                cycle_dist = t_in * CONVEYOR_SPEED_M_S
-            elif t_in < _BG_FEED_OUT_START_S:
+            if transfer_s <= 0.0 or loop_s <= 0.0:
+                out[bay] = ConveyorStatus(bay_id=bay, mode="estop" if estop else "paused")
+                continue
+            phase = PHASE_OFFSETS.get(bay, 0.0) * loop_s
+            t_total = max(0.0, float(t_eff) + phase)
+            n_cycles = int(t_total // loop_s)
+            u = t_total % loop_s
+            if u < work_end:
                 mode = "paused"
                 pack_dy = 0.0
-                cycle_dist = _BG_FEED_IN_END_S * CONVEYOR_SPEED_M_S
+                belt_dist = n_cycles * PACK_PITCH_M
             else:
                 mode = "feeding"
-                pack_dy = (t_in - _BG_FEED_OUT_START_S) * CONVEYOR_SPEED_M_S
-                cycle_dist = (
-                    _BG_FEED_IN_END_S + (t_in - _BG_FEED_OUT_START_S)
-                ) * CONVEYOR_SPEED_M_S
-            belt_dist = n_cycles * feed_per_cycle + cycle_dist
+                tau = min(1.0, (u - work_end) / transfer_s)
+                pack_dy = tau * PACK_PITCH_M
+                belt_dist = (n_cycles + tau) * PACK_PITCH_M
             self._belt_dist[bay] = belt_dist
             out[bay] = ConveyorStatus(
                 bay_id=bay,

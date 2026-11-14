@@ -39,7 +39,7 @@ WAREHOUSE_ROOF_Z = 5.00
 WAREHOUSE_BOUNDS: tuple[float, float, float, float] = (-8.80, 9.40, -8.80, 8.80)
 
 CONVEYOR_BAYS: tuple[int, ...] = (1, 2, 3, 4)
-CONVEYOR_HALF_LEN_M = 1.96  # belt runs between the feeder (-2.12..-1.12) and extractor (+1.12..+2.12)
+CONVEYOR_HALF_LEN_M = 1.96  # spans between feeder (-2.12..-1.12) and extractor (+1.12..+2.12)
 CONVEYOR_BED_HALF_W_M = 0.27
 CONVEYOR_TOP_Z = -0.052
 CONVEYOR_CLEAT_PITCH_M = 0.28

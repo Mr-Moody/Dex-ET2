@@ -106,7 +106,7 @@ from teleop.sim.bays import (
     build_four_bay_scene,
     reset_robot_home,
 )
-from teleop.sim.cells import CONVEYOR_FEED_TRAVEL_M, CONVEYOR_SPEED_M_S
+from teleop.sim.cells import CONVEYOR_SPEED_M_S, PACK_PITCH_M
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
@@ -348,9 +348,10 @@ class _Bay:
     prev_cmd_pos: FloatArray | None = None
     prev_wrist_pos: FloatArray | None = None
     outcome: str = ""
-    belt_mode: ConveyorMode = "feeding"
+    belt_mode: ConveyorMode = "paused"
+    belt_transfer: bool = False
     belt_dist_m: float = 0.0
-    pack_dy_m: float = -CONVEYOR_FEED_TRAVEL_M
+    pack_dy_m: float = 0.0
 
 
 class AtcCoordinator:
@@ -562,8 +563,9 @@ class AtcCoordinator:
         bay.match = None
         bay.skill_id = None
         bay.outcome = ""
-        bay.pack_dy_m = -CONVEYOR_FEED_TRAVEL_M
-        bay.belt_mode = "feeding"
+        if not bay.belt_transfer:
+            bay.pack_dy_m = 0.0
+            bay.belt_mode = "paused"
         bay.breach_lock = False
         bay.trigger_reason = ""
         bay.confidence = 1.0
@@ -609,20 +611,19 @@ class AtcCoordinator:
             ):
                 bay.belt_mode = "estop"
                 continue
-            if (
-                bay.state == BayState.NOMINAL
-                and bay.approach is not None
-                and bay.approach.index < 2
-            ):
+            if bay.belt_transfer:
                 bay.belt_mode = "feeding"
-                prev = bay.pack_dy_m
-                bay.pack_dy_m = min(0.0, prev + step)
-                bay.belt_dist_m += max(0.0, bay.pack_dy_m - prev)
-                continue
-            if bay.state == BayState.NOMINAL and not bay.routine_active and bool(bay.outcome):
-                bay.belt_mode = "feeding"
-                bay.pack_dy_m = min(0.30, bay.pack_dy_m + step)
+                bay.pack_dy_m += step
                 bay.belt_dist_m += step
+                if bay.pack_dy_m >= PACK_PITCH_M:
+                    # Seamless modular wrap: incoming pack lands at 0.0 right as latch resets.
+                    bay.pack_dy_m = 0.0
+                    bay.belt_transfer = False
+                    bay.belt_mode = "paused"
+                    if bay.pending_latch is not None:
+                        jam, pin = bay.pending_latch
+                        bay.pending_latch = None
+                        bay.rig.reset_latch(flap_jammed=jam, bolt_pinned=pin)
                 continue
             bay.belt_mode = "paused"
             bay.pack_dy_m = 0.0
@@ -691,6 +692,15 @@ class AtcCoordinator:
     def _control_approach(self, bay: _Bay) -> None:
         plan = bay.approach
         assert plan is not None
+        if bay.belt_transfer:
+            # Lift to hover and wait above the belt while the cleared pack glides to +PACK_PITCH_M
+            # and the fresh upstream pack glides into 0.0 (preserving the open bolt until wrap).
+            if plan.index < 2:
+                bay.hold_pose = plan.step()
+            self._command(
+                bay, bay.hold_pose or bay.rig.wrist_pose(), self.routine.fingers, v_cmd=0.0
+            )
+            return
         if plan.index >= 1 and bay.pending_latch is not None:  # lifted clear: reset the latch
             jam, pin = bay.pending_latch
             bay.pending_latch = None
@@ -818,6 +828,7 @@ class AtcCoordinator:
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
                 bay.outcome = "cleared"
+                bay.belt_transfer = True
                 # Lift slightly clear of the bolt hook so the conveyor can advance the cleared pack.
                 wrist = rig.wrist_pose()
                 bay.hold_pose = wrist
@@ -1090,6 +1101,7 @@ class AtcCoordinator:
         act = rec is not None and rec.kind == "act"
         bay.auto = None
         bay.outcome = "cleared autonomously"
+        bay.belt_transfer = True
         bay.state = BayState.NOMINAL
         bay.routine_active = False
         wrist = bay.rig.wrist_pose()
@@ -1217,7 +1229,10 @@ class AtcCoordinator:
             bay.outcome = "rescued, skill rejected by validation gate"
         bay.state = BayState.NOMINAL
         bay.routine_active = False
-        bay.hold_pose = bay.rig.wrist_pose()
+        bay.belt_transfer = True
+        wrist = bay.rig.wrist_pose()
+        bay.hold_pose = wrist
+        bay.move = SmoothMove(wrist, translate_pose(wrist, np.array([0.0, 0.0, 0.08])), 0.25)
         bay.prev_cmd_pos = None
 
     # ------------------------------------------------------------------ hooks

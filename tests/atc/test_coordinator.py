@@ -742,13 +742,11 @@ def test_arm_torque_breach_in_autonomous_replay_aborts_retracts_and_escalates(
     assert len(rig.sink.events) == n_events + 1  # no further alerts
 
 
-def test_conveyor_feeds_in_pauses_advances_and_estops_concerned_bay_only(rig: Rig) -> None:
-    co = rig.co
-    co.tick()
-    assert co.conveyor_status(1).mode == "feeding"
-    assert co.conveyor_status(1).pack_dy_m < 0.0
+def test_conveyor_pauses_during_work_and_advances_seamless_pitch_loop_with_estop(rig: Rig) -> None:
+    from teleop.sim.cells import PACK_PITCH_M
 
-    # Once the arm finishes approach and starts pushing, the belt pauses at the workstation.
+    co = rig.co
+    # Fresh startup pack is already indexed at 0.0 while the arm approaches and unlatches.
     for _ in range(400):
         co.tick()
         if co.in_routine(1):
@@ -757,25 +755,28 @@ def test_conveyor_feeds_in_pauses_advances_and_estops_concerned_bay_only(rig: Ri
     assert co.conveyor_status(1).mode == "paused"
     assert co.conveyor_status(1).pack_dy_m == pytest.approx(0.0)
 
-    # On clearance, the belt advances the finished pack forward.
+    # On clearance, belt_transfer advances the cleared pack continuously across PACK_PITCH_M.
     for _ in range(400):
         co.tick()
         if co.outcome(1) == "cleared":
             break
     assert co.outcome(1) == "cleared"
-    dist_before = co.conveyor_status(1).belt_dist_m
-    for _ in range(20):
+    co.start_cycle(1)  # even when next cycle is requested immediately, belt finishes full pitch!
+    seen_max_dy = 0.0
+    for _ in range(400):
         co.tick()
-    assert co.conveyor_status(1).mode == "feeding"
-    assert co.conveyor_status(1).belt_dist_m > dist_before
-    assert co.conveyor_status(1).pack_dy_m > 0.0
+        st = co.conveyor_status(1)
+        seen_max_dy = max(seen_max_dy, st.pack_dy_m)
+        if st.mode == "paused":
+            break
+    assert seen_max_dy > 0.8 * PACK_PITCH_M
+    assert co.conveyor_status(1).mode == "paused"
+    assert co.conveyor_status(1).pack_dy_m == pytest.approx(0.0)
 
-    # An emergency stall on Bay 1 stops ONLY Bay 1's segmented belt; Bay 2 keeps operating.
+    # Emergency stall on Bay 1 halts ONLY Bay 1's belt while Bay 2 keeps operating.
     co.start_cycle(1, flap_jammed=True)
     rig.run_until(1, {BayState.RESCUE})
-    st1 = co.conveyor_status(1)
-    assert st1.mode == "estop"
-    dist_estop = st1.belt_dist_m
+    dist_estop = co.conveyor_status(1).belt_dist_m
     for _ in range(15):
         co.tick()
     assert co.conveyor_status(1).mode == "estop"

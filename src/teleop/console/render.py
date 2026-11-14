@@ -148,6 +148,7 @@ def _bay_conveyor_rig(
             if name in (
                 f"bay{k}/cell_jig_pack",
                 f"bay{k}/latch_base",
+                f"conveyor_bay{k}_in2_pack",
                 f"conveyor_bay{k}_in_pack",
                 f"conveyor_bay{k}_out_pack",
             ):
