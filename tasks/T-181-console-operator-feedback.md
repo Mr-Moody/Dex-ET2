@@ -1,7 +1,7 @@
 ---
 id: T-181
 title: Fleet ops console operator feedback (key acks, next-step banner, key bar)
-status: claimed
+status: in_review
 owner: ethan
 branch: feat/console-operator-feedback
 depends_on: [T-174, T-175]
