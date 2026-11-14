@@ -193,21 +193,21 @@ def test_pinned_bolt_fault_locks_bolt_at_zero(rig: LatchRig) -> None:
 
 def _models_present() -> bool:
     try:
-        right = load_hand("leap").mjcf["right"]
+        right = load_hand("inspire").mjcf["right"]
     except FileNotFoundError:
         return False
     return PANDA_XML.is_file() and right.is_file()
 
 
 needs_models = pytest.mark.skipif(
-    not _models_present(), reason="Panda/LEAP MJCFs missing; run scripts/fetch_models.py"
+    not _models_present(), reason="Panda/Inspire MJCFs missing; run scripts/fetch_models.py"
 )
 
 
 @pytest.fixture(scope="module")
 def single_bay() -> Any:
     if not _models_present():
-        pytest.skip("Panda/LEAP MJCFs missing; run `uv run python scripts/fetch_models.py`")
+        pytest.skip("Panda/Inspire MJCFs missing; run `uv run python scripts/fetch_models.py`")
     return build_single_bay_scene(CANONICAL_LATCH)
 
 

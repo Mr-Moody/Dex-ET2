@@ -25,7 +25,7 @@ from numpy.typing import NDArray
 from teleop.atc.types import LatchPose, StallSignature
 from teleop.types import Pose, Quat
 from teleop.unoq.dmp import (
-    LEAP_ACTUATORS,
+    HAND_ACTUATORS,
     compose_pose,
     mat_to_quat,
     pose_to_vec7,
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 FloatArray = NDArray[np.float64]
 
 ARM_ACTUATORS = tuple(f"actuator{i}" for i in range(1, 8))
-BAY_ACTUATORS = (*ARM_ACTUATORS, *LEAP_ACTUATORS)  # 7 Panda + 16 LEAP, unprefixed
+BAY_ACTUATORS = (*ARM_ACTUATORS, *HAND_ACTUATORS)  # 7 Panda + 16 LEAP, unprefixed
 
 IDENTITY: Quat = (0.0, 0.0, 0.0, 1.0)
 
@@ -124,14 +124,14 @@ def _actuator_joint_qadr(model: Any, actuator_id: int) -> int:
     return int(model.jnt_qposadr[joint_id])
 
 
-def read_leap_q(model: Any, data: Any, bay_prefix: str) -> FloatArray:
-    """Measured LEAP joint positions in ``LEAP_ACTUATORS`` order (16 values)."""
+def read_hand_q(model: Any, data: Any, bay_prefix: str) -> FloatArray:
+    """Measured LEAP joint positions in ``HAND_ACTUATORS`` order (16 values)."""
     p = _norm_prefix(bay_prefix)
     qpos = np.asarray(data.qpos, dtype=np.float64)
     return np.array(
         [
             qpos[_actuator_joint_qadr(model, int(model.actuator(f"{p}{n}").id))]
-            for n in LEAP_ACTUATORS
+            for n in HAND_ACTUATORS
         ],
         dtype=np.float64,
     )
@@ -174,7 +174,7 @@ class RescueTrajectory:
     wrist_latch_se3: FloatArray  # (N, 7): x, y, z, qx, qy, qz, qw
     fingers_q: FloatArray  # (N, 16) in actuator_names order
     tau_ext_inf: FloatArray  # (N,)
-    actuator_names: tuple[str, ...] = LEAP_ACTUATORS
+    actuator_names: tuple[str, ...] = HAND_ACTUATORS
 
     def __len__(self) -> int:
         return int(self.timestamps_s.shape[0])
@@ -213,7 +213,7 @@ class RescueTrajectoryBuffer:
     MIN_SAMPLES = 2
 
     def __init__(
-        self, world_from_latch: LatchPose | Pose, actuator_names: Sequence[str] = LEAP_ACTUATORS
+        self, world_from_latch: LatchPose | Pose, actuator_names: Sequence[str] = HAND_ACTUATORS
     ) -> None:
         self.world_from_latch = (
             world_from_latch.as_pose()
@@ -242,7 +242,7 @@ class RescueTrajectoryBuffer:
         clutch_pressed: bool,
         t_s: float,
         world_wrist: Pose,
-        leap_q: Mapping[str, float] | Sequence[float] | FloatArray,
+        hand_q: Mapping[str, float] | Sequence[float] | FloatArray,
         tau_ext_inf: float,
     ) -> bool:
         """Append one control tick if the clutch is held. Returns whether it was recorded.
@@ -261,10 +261,10 @@ class RescueTrajectoryBuffer:
             self.clear()
         if self._t and t_s <= self._t[-1]:
             return False
-        if isinstance(leap_q, Mapping):
-            q = [float(leap_q[n]) for n in self.actuator_names]
+        if isinstance(hand_q, Mapping):
+            q = [float(hand_q[n]) for n in self.actuator_names]
         else:
-            q = [float(v) for v in np.asarray(leap_q, dtype=np.float64).ravel()]
+            q = [float(v) for v in np.asarray(hand_q, dtype=np.float64).ravel()]
         if len(q) != len(self.actuator_names):
             raise ValueError(f"need {len(self.actuator_names)} LEAP joints, got {len(q)}")
         local = relative_pose(self.world_from_latch, world_wrist)

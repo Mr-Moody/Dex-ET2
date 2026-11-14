@@ -100,7 +100,7 @@ from teleop.sim.bays import (
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
-from teleop.unoq.dmp import LEAP_ACTUATORS, compose_pose, mat_to_quat
+from teleop.unoq.dmp import HAND_ACTUATORS, compose_pose, mat_to_quat
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,8 @@ class CoordinatorConfig:
     skill_hold_s: float = 0.3
     skill_timeout_s: float = 2.0
     max_classify_s: float = 0.3
+    # The Inspire fingers have no abduction compliance, so a blocked push loads the arm almost
+    # directly: a 3 mm lead keeps a flap stall under the arm torque guard.
     push_lead_limit_m: float = 0.012
 
 
@@ -200,19 +202,19 @@ def _rz(a: float) -> FloatArray:
 
 
 ROUTINE = RoutineSpec(
-    yaw=1.097,
-    pitch=0.033,
-    roll=0.135,
-    start_x=-0.0777,
-    y=-0.097,
-    z=0.116,
+    yaw=-2.2,
+    pitch=0.0,
+    roll=-0.4,
+    start_x=0.0019,
+    y=0.023,
+    z=0.1163,
     fingers={
-        "if_mcp_act": 0.389,
-        "if_pip_act": -0.068,
-        "if_dip_act": 0.068,
-        "mf_mcp_act": 0.202,
-        "mf_pip_act": 0.093,
-        "mf_dip_act": 0.789,
+        "index": 0.5,
+        "middle": 0.5,
+        "ring": 0.3,
+        "pinky": 0.3,
+        "thumb_proximal": 0.1,
+        "thumb_yaw": 0.0,
     },
 )
 
@@ -277,14 +279,14 @@ class OperatorInput:
     """One glove sample: wrist pose in the glove/sim axes and LEAP actuator targets by name."""
 
     glove_wrist: Pose
-    leap_targets: Mapping[str, float] = field(default_factory=dict[str, float])
+    hand_targets: Mapping[str, float] = field(default_factory=dict[str, float])
 
 
 # --------------------------------------------------------------------------- per-bay state
 
 
 def _fingers_array(fingers: Mapping[str, float]) -> FloatArray:
-    return np.array([fingers.get(n, 0.0) for n in LEAP_ACTUATORS], dtype=np.float64)
+    return np.array([fingers.get(n, 0.0) for n in HAND_ACTUATORS], dtype=np.float64)
 
 
 class _Move:
@@ -415,7 +417,7 @@ class AtcCoordinator:
             unoq,
             sink,
             reasoner,
-            hand_spec or load_hand("leap"),
+            hand_spec or load_hand("inspire"),
             config=config,
             validator=validator,
         )
@@ -482,7 +484,7 @@ class AtcCoordinator:
         lift_z = rig.world_latch().position[2] + LIFT_HEIGHT_M
         # Every LEAP actuator, not just the routine's: clutch release pins all 16 targets to the
         # rescue posture, and a stale one (e.g. mf_rot_act) would rest a finger on the bolt.
-        fingers = {name: 0.0 for name in LEAP_ACTUATORS} | dict(self.routine.fingers)
+        fingers = {name: 0.0 for name in HAND_ACTUATORS} | dict(self.routine.fingers)
         rig.ik.reset()
         bay.approach = ApproachPlan(here, [lifted(here, lift_z), lifted(start, lift_z), start])
         bay.pending_latch = (flap_jammed, bolt_pinned)
@@ -627,7 +629,7 @@ class AtcCoordinator:
         if engaged and operator is not None:
             cmd = bay.indexer.update(True, operator.glove_wrist, bay.rig.wrist_pose())
             if cmd is not None:
-                self._command(bay, cmd, operator.leap_targets)
+                self._command(bay, cmd, operator.hand_targets)
                 bay.hold_pose = cmd
                 if bay.buffer is not None:
                     bay.buffer.record(
@@ -716,6 +718,9 @@ class AtcCoordinator:
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
                 bay.outcome = "cleared"
+                # Hold where the wrist is, not at the push target that leads it: a held lead
+                # keeps driving the bolt into its end stop through the stiff Inspire finger.
+                bay.hold_pose = rig.wrist_pose()
                 bay.detector.reset()
                 return
             trigger = bay.detector.update(

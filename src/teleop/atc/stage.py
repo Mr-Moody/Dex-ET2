@@ -598,13 +598,13 @@ class StageController:
 # metres, finger press fraction): the index finger rests behind the bolt hook, the middle
 # finger presses the raised stopper flap flat, then the wrist pushes the bolt clear. Same
 # demonstration the T-140 tests use.
-RESCUE_PRESS = {"mf_mcp_act": 0.7813, "mf_pip_act": -0.0436, "mf_dip_act": -0.2812}
+RESCUE_PRESS = {"thumb_yaw": 0.7}
 RESCUE_WAYPOINTS: tuple[tuple[float, tuple[float, float, float], float], ...] = (
     (0.0, (0.0, 0.0, 0.0), 0.0),
-    (0.4981, (0.0056, 0.004, 0.0021), 0.0),
-    (0.8199, (0.0056, 0.004, 0.0016), 1.0),
-    (0.3333, (0.0056, 0.004, 0.0016), 1.0),
-    (1.4385, (0.0056 + 0.0458, 0.004, 0.0016), 1.0),
+    (0.4981, (0.0055, -0.004, -0.012), 0.0),
+    (0.8199, (0.0055, -0.004, -0.012), 1.0),
+    (0.3333, (0.0055, -0.004, -0.012), 1.0),
+    (1.4385, (0.0055 + 0.0458, -0.004, -0.012), 1.0),
 )
 
 

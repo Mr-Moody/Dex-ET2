@@ -1,12 +1,12 @@
-"""4-bay EV-latch fleet scene (spec 2.2, 2.3): Franka Panda + right LEAP Hand + latch per bay.
+"""4-bay EV-latch fleet scene (spec 2.2, 2.3): Franka Panda + right Inspire hand + latch per bay.
 
 Bays 1-2 are active physics. Bays 3-4 are a visual-only background row (every geom has
 ``contype=conaffinity=0``) so rendering them adds no contact cost. Each bay's robot base frame
 has no rotation (the arm reaches along world +X), and latch poses passed to the builders are
 **bay-local**, relative to that base. ``latch_world_pose`` converts to the world frame.
 
-Names are prefixed per bay: ``bay{k}/joint1..7``, ``bay{k}/actuator1..7``, the 16 LEAP joints
-and actuators (``bay{k}/if_mcp_act`` ...), ``bay{k}/wrist_site`` at the LEAP palm frame, and
+Names are prefixed per bay: ``bay{k}/joint1..7``, ``bay{k}/actuator1..7``, the Inspire hand
+joints and its 6 actuators (``bay{k}/index`` ...), ``bay{k}/wrist_site`` at the knuckles, and
 the latch bodies, joints and equalities from ``teleop.sim.latch``.
 """
 
@@ -44,10 +44,22 @@ CANONICAL_LATCH = LatchPose(position=(0.50, 0.0, 0.02), yaw_rad=0.0)
 # Bay 2's perturbed latch: shifted ~12 cm and rotated +35 deg (spec 2.3).
 BAY2_LATCH = CANONICAL_LATCH.offset(dx=0.08, dy=0.09, dyaw_rad=math.radians(35.0))
 
-# The LEAP palm frame sits at the knuckles; its wrist end is ~0.10 m back along palm -X. Mount
-# it so the fingers point along the flange's tool axis (+Z) and palm +Z faces flange -X.
-PALM_MOUNT_POS = (0.0, 0.0, 0.10)
-PALM_MOUNT_QUAT = (math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0)  # wxyz, -90 deg about flange Y
+# Inspire base frame: wrist at the origin, fingers along +Z, curling towards +X (the palm side),
+# index on +Y. The wrist site gives it the palm-frame convention the latch-frame routine, rescue
+# and clutch use: site +X along the fingers, fingers curling towards site -Z, index on +Y,
+# origin on the knuckle line between the index and middle fingers, on the back of the hand.
+WRIST_SITE_POS = (-0.019, 0.0226, 0.137)  # in the hand base frame
+# wxyz, -90 deg about base Y: site x = base z, site y = base y, site z = -base x
+WRIST_SITE_QUAT = (math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0)
+# The base mounts straight on the flange (fingers along the tool axis +Z), which puts the wrist
+# site in the same flange pose as the LEAP palm frame it replaces: site +X along flange +Z and
+# site +Z along flange -X.
+HAND_MOUNT_POS = (0.0, 0.0, 0.0)
+HAND_MOUNT_QUAT = (0.0, 0.0, 0.0, 1.0)  # wxyz
+HAND_KP = 300.0  # Nm/rad finger servo stiffness (the model ships 300)
+HAND_CONTACT_SOLREF = (0.05, 1.0)  # MuJoCo's default, as on the LEAP hand
+HAND_RGBA = (0.16, 0.17, 0.19, 1.0)  # dark graphite links
+HAND_VISUAL_GROUP = 1  # Inspire ships visuals in group 2, which the rescue cameras hide (Panda)
 
 TIMESTEP = 1.0 / 600
 OVERVIEW_CAMERA = "overview"
@@ -132,23 +144,41 @@ def _new_spec(name: str) -> Any:
 def _add_robot(spec: Any, bay_id: int, *, collide: bool) -> None:
     prefix = bay_prefix(bay_id)
     panda: Any = mj.MjSpec.from_file(str(_require(PANDA_XML)))
-    hand: Any = mj.MjSpec.from_file(str(_require(load_hand("leap").mjcf["right"])))
+    hand_spec = load_hand("inspire")
+    hand: Any = mj.MjSpec.from_file(str(_require(hand_spec.mjcf["right"])))
     for child in (panda, hand):
         _strip_globals(child)
         _sync_options(spec, child)
+    for site in list(hand.worldbody.sites):  # the model's loose "eeff" marker
+        hand.delete(site)
 
-    # Both models ship a material named "white"; rename the hand's (and its references).
+    # Avoid material name clashes with the Panda (and rename the references).
     for mat in list(hand.materials):
         old = str(mat.name)
-        mat.name = f"leap_{old}"
+        mat.name = f"hand_{old}"
         for geom in hand.geoms:
             if geom.material == old:
                 geom.material = mat.name
+    for act in hand.actuators:  # compliant fingers: a blocked finger yields instead of the arm
+        act.gainprm[0] = HAND_KP
+        act.biasprm[1] = -HAND_KP
+    for geom in hand.geoms:
+        if int(geom.group) == 2:
+            geom.group = HAND_VISUAL_GROUP
+            geom.rgba = list(HAND_RGBA)
+        else:  # the model's 2 ms contacts make a finger striking the stalled bolt a torque spike
+            geom.solref = list(HAND_CONTACT_SOLREF)
 
-    palm = hand.body("palm")
-    palm.pos = list(PALM_MOUNT_POS)
-    palm.quat = list(PALM_MOUNT_QUAT)
-    palm.add_site(name="wrist_site", size=[0.006, 0.006, 0.006], rgba=[0.1, 0.9, 0.2, 0.6])
+    base = hand.body(hand_spec.base_body)
+    base.pos = list(HAND_MOUNT_POS)
+    base.quat = list(HAND_MOUNT_QUAT)
+    base.add_site(
+        name="wrist_site",
+        pos=list(WRIST_SITE_POS),
+        quat=list(WRIST_SITE_QUAT),
+        size=[0.006, 0.006, 0.006],
+        rgba=[0.1, 0.9, 0.2, 0.6],
+    )
 
     frame = spec.worldbody.add_frame(pos=list(BAY_BASES[bay_id]))
     spec.attach(panda, frame=frame, prefix=prefix)
@@ -229,8 +259,10 @@ def reset_robot_home(model: Any, data: Any, bay_id: int) -> None:
     for i in range(int(model.nu)):
         act = model.actuator(i)
         if str(act.name).startswith(prefix) and not str(act.name).startswith(f"{prefix}actuator"):
-            data.ctrl[i] = 0.0
+            lo, hi = (float(v) for v in model.actuator_ctrlrange[i])
+            q_open = min(max(0.0, lo), hi)  # the Inspire thumb flexion range starts at 0.1
+            data.ctrl[i] = q_open
             jnt_id = int(model.actuator_trnid[i][0])
-            data.qpos[int(model.jnt_qposadr[jnt_id])] = 0.0
+            data.qpos[int(model.jnt_qposadr[jnt_id])] = q_open
             data.qvel[int(model.jnt_dofadr[jnt_id])] = 0.0
     mj.mj_forward(model, data)

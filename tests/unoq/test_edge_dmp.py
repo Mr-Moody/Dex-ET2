@@ -19,7 +19,7 @@ from teleop.unoq import protocol as P
 from teleop.unoq.classifier import MahalanobisStallClassifier
 from teleop.unoq.client import UnoQClient, UnoQError
 from teleop.unoq.dmp import (
-    LEAP_ACTUATORS,
+    HAND_ACTUATORS,
     compose_pose,
     evaluate_latch_frame,
     evaluate_rbf_dmp,
@@ -165,7 +165,7 @@ def test_rbf_dmp_fit_completes_under_20ms_and_reconstructs_trajectory() -> None:
     assert skill.fit_ms < 20.0
     assert skill.n_kernels == 30
     assert skill.n_dims == 6 + 16
-    assert skill.actuator_names == LEAP_ACTUATORS
+    assert skill.actuator_names == HAND_ACTUATORS
 
     duration = float(demo["t"][-1])
     for k in range(0, len(demo["t"]), 5):
@@ -174,7 +174,7 @@ def test_rbf_dmp_fit_completes_under_20ms_and_reconstructs_trajectory() -> None:
         truth = _vec7_pose(demo["wrist"][k])
         assert _pos_err(wrist, truth) < 0.002
         assert _rot_deg(wrist, truth) < 0.5
-        q = np.array([fingers[n] for n in LEAP_ACTUATORS])
+        q = np.array([fingers[n] for n in HAND_ACTUATORS])
         assert np.max(np.abs(q - demo["fingers"][k])) < 0.03
 
     # Nominal torque profile follows the demo's contact window.
@@ -209,7 +209,7 @@ def test_rbf_dmp_se3_warp_rotates_35deg_and_shifts_12cm_accurately() -> None:
         assert _pos_err(relative_pose(bay2, got2), relative_pose(bay1, got1)) < 1e-9
         assert _rot_deg(relative_pose(bay2, got2), relative_pose(bay1, got1)) < 1e-6
         np.testing.assert_allclose(
-            [fingers2[n] for n in LEAP_ACTUATORS], demo["fingers"][k], atol=0.03
+            [fingers2[n] for n in HAND_ACTUATORS], demo["fingers"][k], atol=0.03
         )
 
     # The goal wrist heading turns by the latch yaw.

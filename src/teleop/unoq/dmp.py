@@ -32,24 +32,15 @@ N_KERNELS = 30
 RIDGE = 1e-4
 WIDTH_SCALE = 0.65
 
-# Menagerie right LEAP hand actuators in model order (16 position servos).
-LEAP_ACTUATORS: tuple[str, ...] = (
-    "if_mcp_act",
-    "if_rot_act",
-    "if_pip_act",
-    "if_dip_act",
-    "mf_mcp_act",
-    "mf_rot_act",
-    "mf_pip_act",
-    "mf_dip_act",
-    "rf_mcp_act",
-    "rf_rot_act",
-    "rf_pip_act",
-    "rf_dip_act",
-    "th_cmc_act",
-    "th_axl_act",
-    "th_mcp_act",
-    "th_ipl_act",
+# Right Inspire RH56 hand actuators in model order (6 position servos: one per finger, whose
+# distal joint is coupled to it by an equality constraint, plus thumb flexion and thumb yaw).
+HAND_ACTUATORS: tuple[str, ...] = (
+    "pinky",
+    "ring",
+    "middle",
+    "index",
+    "thumb_proximal",
+    "thumb_yaw",
 )
 
 
@@ -216,7 +207,7 @@ def fit_rbf_dmp(
     part_sku_id: str = "ev_latch_v1",
     signature_id: str = "Jam_Sig_1",
     prototype: StallSignature | Sequence[float] | None = None,
-    actuator_names: Sequence[str] = LEAP_ACTUATORS,
+    actuator_names: Sequence[str] = HAND_ACTUATORS,
     skill_id: str | None = None,
 ) -> SkillPrimitive:
     """Fit a latch-frame RBF-DMP to one rescue in a single ``n_kernels``-square ridge solve."""

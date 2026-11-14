@@ -42,7 +42,7 @@ from teleop.sim.latch import LatchController, yaw_quat_wxyz
 from teleop.sim.torques import ExternalTorqueEstimator
 from teleop.types import Pose
 from teleop.unoq.dmp import (
-    LEAP_ACTUATORS,
+    HAND_ACTUATORS,
     compose_pose,
     evaluate_latch_frame,
     evaluate_rbf_dmp,
@@ -71,7 +71,8 @@ APPROACH_SPEED_MPS = 0.4
 COARSE_FACTOR = 2  # approach-only timestep multiplier (free space, no contacts)
 SETTLE_MAX_TICKS = 300  # 1.5 s to converge on an approach target
 APPROACH_ROT_SPEED = 1.5  # rad/s
-LIFT_HEIGHT_M = 0.14  # wrist height above the latch origin for free-space transits
+LIFT_HEIGHT_M = 0.18  # wrist height above the latch origin for free-space transits (clears
+# the curled Inspire index over the bolt hook)
 PRE_APPROACH_M = 0.04  # DMP pre-approach pose: this far above the DMP start, latch +Z
 
 # (dx m, dy m, dyaw deg) in the bay-local latch frame, spec 4.4.
@@ -198,10 +199,10 @@ class BayRig:
         self.ik = PandaDiffIK(model, p)
         self.torque = ExternalTorqueEstimator(model, p)
         self.latch = LatchController(model, data, p)
-        self._leap_act = {n: int(model.actuator(f"{p}{n}").id) for n in LEAP_ACTUATORS}
-        self._leap_qadr = {
+        self._hand_act = {n: int(model.actuator(f"{p}{n}").id) for n in HAND_ACTUATORS}
+        self._hand_qadr = {
             n: int(model.jnt_qposadr[int(model.actuator_trnid[a][0])])
-            for n, a in self._leap_act.items()
+            for n, a in self._hand_act.items()
         }
         self._latch_body = int(model.body(f"{p}latch_base").id)
         self._site = int(model.site(f"{p}wrist_site").id)
@@ -280,9 +281,9 @@ class BayRig:
         lo, hi = self._arm_range[:, 0], self._arm_range[:, 1]
         return bool(np.all(q >= lo - JOINT_LIMIT_TOL_RAD) and np.all(q <= hi + JOINT_LIMIT_TOL_RAD))
 
-    def leap_q(self) -> FloatArray:
+    def hand_q(self) -> FloatArray:
         qpos = np.asarray(self.data.qpos, dtype=np.float64)
-        return np.array([qpos[self._leap_qadr[n]] for n in LEAP_ACTUATORS], dtype=np.float64)
+        return np.array([qpos[self._hand_qadr[n]] for n in HAND_ACTUATORS], dtype=np.float64)
 
     # -- control
 
@@ -302,7 +303,7 @@ class BayRig:
 
     def set_fingers(self, fingers: Mapping[str, float] | None) -> None:
         for name, value in (fingers or {}).items():
-            self.data.ctrl[self._leap_act[name]] = value
+            self.data.ctrl[self._hand_act[name]] = value
 
 
 def step_physics(model: Any, data: Any, n: int = SUBSTEPS) -> None:
