@@ -1,7 +1,7 @@
 ---
 id: T-180
 title: Top-level README with setup and run instructions
-status: claimed
+status: in_review
 owner: ethan
 branch: docs/run-readme
 depends_on: [T-175, T-176]
