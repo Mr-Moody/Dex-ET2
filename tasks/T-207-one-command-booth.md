@@ -1,6 +1,6 @@
 ---
 id: T-207
-title: One-command booth launch: wiring, defaults and README
+title: "One-command booth launch: wiring, defaults and README"
 status: todo
 owner: null
 branch: null
