@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 
-from teleop.atc.types import ConsoleInputState, StallSignature
+from teleop.atc.types import BayState, ConsoleInputState, StallSignature
 from teleop.health.model import Level
 from teleop.health.panel import PanelCheck
 from teleop.unoq import protocol as P
@@ -201,4 +202,79 @@ def test_start_stop_runs_the_thread(board: UnoQServer) -> None:
         assert _wait(lambda: unoq.is_mock)
     finally:
         panel.stop()
+        unoq.close()
+
+
+def test_failed_serial_reopen_leaves_bridge_usable(
+    board: UnoQServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_: str | None) -> tuple[SoftwareMcu, str]:
+        raise OSError("COM7 busy")
+
+    monkeypatch.setattr("teleop.health.panel.open_console", broken)
+    mcu = SoftwareMcu()
+    bridge = McuConsoleBridge(mcu)
+    bridge.start()
+    unoq = SwitchableUnoQ(_client(board))
+    panel = _panel(unoq, board, local_bridge=bridge, serial_port="COM7")
+    try:
+        panel.reconnect()
+        assert "COM7 busy" in panel.status().detail
+        bridge.set_bay_state(1, BayState.STALLED)  # still the live port
+        assert mcu.led_states == {1: "STALLED"}
+        assert _wait(lambda: panel.status().level == Level.OK)
+    finally:
+        panel.stop()
+        bridge.close()
+        unoq.close()
+
+
+def test_serial_reopen_moves_bridge_to_new_port(
+    board: UnoQServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = SoftwareMcu()
+    monkeypatch.setattr("teleop.health.panel.open_console", lambda _: (fresh, "serial:COM7"))
+    bridge = McuConsoleBridge(SoftwareMcu())
+    bridge.set_bay_state(2, BayState.STALLED)
+    unoq = SwitchableUnoQ(_client(board))
+    panel = _panel(unoq, board, local_bridge=bridge, serial_port="COM7")
+    try:
+        panel.reconnect()
+        assert fresh.led_states == {2: "STALLED"}  # LED states resent on the new port
+        assert panel.status().detail.count("serial") == 0
+    finally:
+        panel.stop()
+        bridge.close()
+        unoq.close()
+
+
+def test_concurrent_reconnects_are_serialised(
+    board: UnoQServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active, peak = [0], [0]
+    guard = threading.Lock()
+
+    def slow_open(_: str | None) -> tuple[SoftwareMcu, str]:
+        with guard:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.05)  # a second open of the same COM port would fail on Windows
+        with guard:
+            active[0] -= 1
+        return SoftwareMcu(), "serial:COM7"
+
+    monkeypatch.setattr("teleop.health.panel.open_console", slow_open)
+    bridge = McuConsoleBridge(SoftwareMcu())
+    unoq = SwitchableUnoQ(_client(board))
+    panel = _panel(unoq, board, local_bridge=bridge, serial_port="COM7")
+    try:
+        threads = [threading.Thread(target=panel.reconnect) for _ in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        assert peak[0] == 1
+    finally:
+        panel.stop()
+        bridge.close()
         unoq.close()

@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 from teleop.health.model import Health, Level
 from teleop.unoq import protocol as P
@@ -69,6 +70,7 @@ class PanelCheck:
         self._last_attempt_ns = clock()  # startup already tried the board once
         self._hb_age_ms: int | None = None
         self._hb_at_ns = 0
+        self._serial_error = ""
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -108,12 +110,9 @@ class PanelCheck:
 
     def reconnect(self) -> None:
         """Reopen the local serial console (if any) and try the board now."""
-        if self._local_bridge is not None:
-            try:
-                self._reopen_serial(self._local_bridge)
-            except Exception as exc:
-                logger.warning("panel: cannot reopen the serial console (%s)", exc)
         with self._io_lock:
+            if self._local_bridge is not None:
+                self._reopen_serial(self._local_bridge)
             if self._unoq.is_mock:
                 self._try_board()
             else:
@@ -122,11 +121,20 @@ class PanelCheck:
                 self._probe_board()
 
     def _reopen_serial(self, bridge: McuConsoleBridge) -> None:
-        bridge.close()  # stops the reader and closes the transport
-        transport, kind = open_console(self._serial_port)
-        # McuConsoleBridge has no public transport setter; the stage keeps this bridge object.
-        bridge._transport = transport  # pyright: ignore[reportPrivateUsage]
-        bridge.start()
+        """Open the new transport first; only on success hand it to the live bridge."""
+        try:
+            transport, kind = open_console(self._serial_port)
+        except Exception as exc:  # pyserial raises its own SerialException
+            logger.warning("panel: cannot reopen the serial console (%s)", exc)
+            with self._lock:
+                self._serial_error = f"serial reopen failed: {exc}"
+            return
+        try:
+            bridge.reopen(transport)  # the old bridge object stays the stage's console
+        except Exception as exc:  # resending the LED states failed on the new port
+            logger.warning("panel: serial console reopened but LED resend failed (%s)", exc)
+        with self._lock:
+            self._serial_error = ""
         logger.info("panel: console reopened (%s)", kind)
 
     def _close_probe(self) -> None:
@@ -190,6 +198,12 @@ class PanelCheck:
         return None if age is None else age + (self._clock() - at) / 1e6
 
     def status(self) -> Health:
+        health = self._status()
+        with self._lock:
+            error = self._serial_error
+        return replace(health, detail=f"{health.detail}; {error}") if error else health
+
+    def _status(self) -> Health:
         if self._unoq.is_mock:
             return Health(
                 self.name,

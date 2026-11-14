@@ -265,12 +265,29 @@ class McuConsoleBridge:
             with contextlib.suppress(Exception):
                 close()
 
+    def reopen(self, transport: SerialLike) -> None:
+        """Switch to a freshly opened transport, close the old one and resend the LED states.
+
+        Writes are blocked only for the pointer swap. A running reader thread keeps going: it
+        reads ``self._transport`` per line, so it moves to the new transport by itself.
+        """
+        with self._write_lock:
+            old, self._transport = self._transport, transport
+        close = getattr(old, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+        self.resend_bay_states()
+
     def _read_loop(self) -> None:
         while not self._stop.is_set():
+            transport = self._transport
             try:
                 if self.pump() == 0:
                     time.sleep(0.001)
             except Exception:
+                if self._transport is not transport:
+                    continue  # the old transport was closed under us by reopen()
                 log.exception("mcu console: transport read failed")
                 time.sleep(0.1)
 
@@ -326,7 +343,7 @@ class McuConsoleBridge:
 
     def resend_bay_states(self) -> None:
         """Push every known LED state again, e.g. after the MCU reboots."""
-        for bay_id, token in sorted(self._led.items()):
+        for bay_id, token in sorted(list(self._led.items())):
             self._send(f"CMD:BAY_STATE:{bay_id}:{token}")
 
     def reset_rig(self) -> None:

@@ -11,7 +11,7 @@ import pytest
 from teleop.atc.coordinator import AtcCoordinator
 from teleop.atc.stage import StageController, UnoQConsolePoller
 from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive, StallSignature
-from teleop.unoq.client import UnoQClient
+from teleop.unoq.client import UnoQClient, UnoQError
 from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu
 from teleop.unoq.server import UnoQServer
 from teleop.unoq.switch import SwitchableUnoQ
@@ -98,6 +98,31 @@ def test_failover_retries_on_loopback(board: UnoQServer) -> None:
         assert skill_id == "ev_latch_v1/Jam_Sig_1/1"
     finally:
         unoq.close()
+
+
+def test_error_reply_on_board_propagates_without_swap(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    try:
+        with pytest.raises(UnoQError, match="classify_stall"):
+            unoq.classify_stall(SKU, (1.0, 2.0))  # bad stall vector: the node replies ok=false
+        assert unoq.is_mock is False
+        assert unoq.current.tcp_port == board.tcp_port
+    finally:
+        unoq.close()
+
+
+def test_replaying_skills_twice_adds_no_duplicate_samples(board: UnoQServer) -> None:
+    unoq = SwitchableUnoQ(_client(board))
+    with _server() as other:
+        try:
+            assert unoq.register_skill(_skill()) == 1
+            unoq.swap(_client(other))
+            unoq.swap(_client(board))  # back to a board that still holds the skill
+            unoq.swap(_client(other))
+            assert board.classifier.sample_count(SKU, "Jam_Sig_1") == 1
+            assert other.classifier.sample_count(SKU, "Jam_Sig_1") == 1
+        finally:
+            unoq.close()
 
 
 def test_swap_to_loopback_is_idempotent(board: UnoQServer) -> None:

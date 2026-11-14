@@ -17,7 +17,7 @@ from numpy.typing import ArrayLike
 
 from teleop.atc.types import ConsoleInputState, SkillPrimitive, StallMatch, StallSignature
 from teleop.types import Pose
-from teleop.unoq.client import UnoQClient, UnoQError
+from teleop.unoq.client import UnoQClient, UnoQTransportError
 from teleop.unoq.server import UnoQServer
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,8 @@ class SwitchableUnoQ:
     """Forwards to the current :class:`UnoQClient`; :meth:`swap` replaces it at runtime.
 
     Remembers every successful ``register_skill`` in order and replays them on each new node.
-    A board request failing with ``OSError``/``UnoQError`` swaps to a fresh loopback node and is
+    A board request failing in transport (``OSError``/``UnoQTransportError``; an error *reply*
+    propagates unchanged) swaps to a fresh loopback node and is
     retried there once.
     """
 
@@ -87,13 +88,23 @@ class SwitchableUnoQ:
             self._retire(old)
 
     def _to_loopback(self, expected: UnoQClient | None) -> UnoQClient | None:
-        """Swap to loopback (if current is still ``expected``); returns the old client."""
-        with self._swap_lock:
+        """Swap to loopback (if current is still ``expected``); returns the old client.
+
+        With ``expected`` (the request path) it never waits: if another swap is running, or
+        already replaced ``expected``, the caller just retries on whatever is current.
+        """
+        if expected is not None and self._client is not expected:
+            return None
+        if not self._swap_lock.acquire(blocking=expected is None):
+            return None
+        try:
             current = self._client
             if current.is_mock or (expected is not None and current is not expected):
                 return None
             logger.warning("unoq: board lost; switching to the local loopback node")
             return self._publish(self._loopback())
+        finally:
+            self._swap_lock.release()
 
     def _publish(self, new: UnoQClient) -> UnoQClient | None:
         """Replay skills on ``new`` outside the pointer lock, then swap; caller holds swap lock.
@@ -139,7 +150,7 @@ class SwitchableUnoQ:
             client = self._client
             try:
                 return op(client)
-            except (OSError, UnoQError) as exc:
+            except (OSError, UnoQTransportError) as exc:
                 if client.is_mock:
                     raise
                 logger.warning("unoq: board request failed (%s); retrying on loopback", exc)
