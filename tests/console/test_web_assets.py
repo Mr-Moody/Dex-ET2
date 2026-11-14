@@ -96,21 +96,63 @@ def test_frame_urls_are_always_revoked(tmp_path: Path) -> None:
     assert result["url"] == "u3" and result["pending"] is None
 
 
-def test_health_strip_skips_rebuild_when_unchanged() -> None:
+def test_health_reconnect_button_never_keeps_focus() -> None:
     js = _read("health.js")
-    assert "JSON.stringify(list)" in js and "lastSig" in js
+    assert '"mousedown"' in js and "preventDefault" in js
 
 
-_HEALTH_HARNESS = """
-const strip = { hidden: true, builds: 0, replaceChildren(...k) { this.builds++; } };
+# A minimal DOM: enough of Element for health.js to build pills and move nodes around.
+_FAKE_DOM = """
+class El {
+  constructor(tag) {
+    this.tag = tag; this.children = []; this.parent = null; this.dataset = {};
+    this.listeners = {}; this.hidden = false; this.disabled = false; this.title = "";
+    this._text = ""; this.builds = 0;
+  }
+  get textContent() { return this._text; }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  _adopt(k) { if (typeof k === "string") { const t = new El("#text"); t._text = k; k = t; }
+    if (k.parent) k.remove(); k.parent = this; return k; }
+  append(...ks) { for (const k of ks) this.children.push(this._adopt(k)); }
+  prepend(...ks) { for (const k of ks.reverse()) this.children.unshift(this._adopt(k)); }
+  remove() {
+    if (!this.parent) return;
+    const c = this.parent.children;
+    c.splice(c.indexOf(this), 1);
+    this.parent = null;
+  }
+  after(k) {
+    const p = this.parent;
+    k = p._adopt(k);
+    p.children.splice(p.children.indexOf(this) + 1, 0, k);
+  }
+  replaceChildren(...ks) { this.builds++; for (const c of this.children) c.parent = null;
+    this.children = []; this.append(...ks); }
+  setAttribute() {}
+  addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
+  find(cls) {
+    if (this.className === cls) return this;
+    for (const c of this.children) { const f = c.find(cls); if (f) return f; }
+    return null;
+  }
+}
+const strip = new El("section"); strip.hidden = true;
 const handlers = [];
 globalThis.document = {
   getElementById: () => strip,
   addEventListener: (_, f) => handlers.push(f),
-  createElement: () => ({ dataset: {}, append() {}, setAttribute() {}, addEventListener() {} }),
+  createElement: (tag) => new El(tag),
 };
 const toasts = [];
 globalThis.toast = (k, t) => toasts.push(t);
+const sent = [];
+globalThis.WebSocket = { OPEN: 1 };
+globalThis.ws = { readyState: 1, send: (m) => sent.push(JSON.parse(m)) };
+"""
+
+_HEALTH_HARNESS = (
+    _FAKE_DOM
+    + """
 %s
 const mk = (level) => [
   { name: "gloves", level, summary: "s", detail: "", can_reconnect: true, busy: false },
@@ -123,14 +165,85 @@ send(undefined);
 const r = { same, after: strip.builds, toasts: toasts.length, hidden: strip.hidden };
 console.log(JSON.stringify(r));
 """
+)
 
 
-def test_health_strip_rebuilds_only_on_change() -> None:
+def _node_json(script: str) -> object:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not installed")
-    script = _HEALTH_HARNESS % _read("health.js")
     out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
-    got = json.loads(out.stdout)
-    assert got == {"same": 1, "after": 2, "toasts": 1, "hidden": True}
+    return json.loads(out.stdout)
+
+
+def test_health_strip_rebuilds_only_on_change() -> None:
+    got = _node_json(_HEALTH_HARNESS % _read("health.js"))
+    assert got == {"same": 1, "after": 1, "toasts": 1, "hidden": True}
+
+
+_VOLATILE_HARNESS = (
+    _FAKE_DOM
+    + """
+%s
+const gloves = (n, extra) => ({ name: "gloves", level: "warn", summary: `no packets for ${n} s`,
+  detail: `streaming ${n} Hz`, can_reconnect: true, busy: false, ...extra });
+const panel = (n) => ({ name: "panel", level: "ok", summary: "UNO Q, buttons live",
+  detail: `MCU heartbeat ${n} ms ago`, can_reconnect: false, busy: false });
+const send = (health) => handlers[0]({ detail: { health } });
+send([gloves(1), panel(10)]);
+const pill = strip.children[0];
+const btn = pill.find("hpill__btn");
+const detail = pill.find("hpill__detail");
+const builds = strip.builds;
+send([gloves(2), panel(20)]); send([gloves(3), panel(30)]);
+const r = {
+  builds: strip.builds - builds,
+  samePill: strip.children[0] === pill,
+  sameBtn: pill.find("hpill__btn") === btn,
+  sameDetail: pill.find("hpill__detail") === detail,
+  summary: pill.find("hpill__sum").textContent,
+  detail: detail.textContent,
+  panelTitle: strip.children[1].title,
+};
+let prevented = false;
+for (const f of btn.listeners.mousedown || []) f({ preventDefault: () => { prevented = true; } });
+r.prevented = prevented;
+for (const f of btn.listeners.click || []) f({});
+r.sent = sent;
+send([gloves(3, { busy: true }), panel(40)]);
+r.busySameBtn = pill.find("hpill__btn") === btn;
+r.busyDisabled = btn.disabled;
+r.busySpin = !!btn.find("hpill__spin");
+send([gloves(4), panel(50)]);
+r.idleSpin = !!btn.find("hpill__spin");
+send([gloves(4, { level: "ok" }), panel(60)]);
+r.okBtn = !!pill.find("hpill__btn");
+r.okDetail = !!pill.find("hpill__detail");
+send([panel(70)]);
+r.after = strip.children.length;
+console.log(JSON.stringify(r));
+"""
+)
+
+
+def test_health_strip_updates_pills_in_place() -> None:
+    got = _node_json(_VOLATILE_HARNESS % _read("health.js"))
+    assert got == {
+        "builds": 0,  # volatile numbers in summary/detail never rebuild the strip
+        "samePill": True,
+        "sameBtn": True,  # a click mid-update still lands on the live button
+        "sameDetail": True,
+        "summary": "no packets for 3 s",
+        "detail": "streaming 3 Hz",
+        "panelTitle": "MCU heartbeat 30 ms ago",
+        "prevented": True,
+        "sent": [{"type": "reconnect", "target": "gloves"}],
+        "busySameBtn": True,
+        "busyDisabled": True,
+        "busySpin": True,
+        "idleSpin": False,
+        "okBtn": False,
+        "okDetail": False,
+        "after": 1,
+    }
