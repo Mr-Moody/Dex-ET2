@@ -112,6 +112,8 @@ class AtcConfig:
     act_checkpoint: Path | None = None  # models/act/<run>/ with gate.json
     act_device: str = "cuda"
     record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
+    skills: Path | None = None  # skill library file; live runs default to DEFAULT_SKILLS
+    fresh_skills: bool = False  # ignore (and back up) the saved library this run
     generate: int | None = None  # headless: generate N scripted rescue episodes
     seed: int | None = None  # None: STAGE_SEED with --script, else 0
     realism: float = DEFAULT_REALISM  # latch-pose error and gate randomization scale (0: off)
@@ -119,7 +121,8 @@ class AtcConfig:
     dummy_glove: bool = False  # TODO(rokoko-gloves-swap): temporary dummy UDP/UI operator
 
 
-_PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes"}
+_PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes", "skills"}
+DEFAULT_SKILLS = Path("data/skills/library.json")
 DISPLAYS = ("console", "viewer")
 BACKENDS = tuple(b.value for b in RecoveryBackend)
 
@@ -177,6 +180,8 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
         cfg.studio = studio_raw
     elif isinstance(studio_raw, dict):
         cfg.studio = StudioConfig(**cast("dict[str, Any]", studio_raw))
+    if raw.get("skills") is None and not cfg.headless:
+        cfg.skills = DEFAULT_SKILLS  # headless runs (stage golden, --generate) keep no library
     if cfg.display not in DISPLAYS:
         raise ValueError(f"display must be one of {DISPLAYS}, got {cfg.display!r}")
     if cfg.recovery_backend not in BACKENDS:
@@ -275,6 +280,18 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--act-checkpoint", type=Path, default=None, help="ACT run dir with gate.json")
     ap.add_argument("--act-device", default=None, help="torch device for ACT (default cuda)")
     ap.add_argument("--record-episodes", type=Path, default=None, help="LeRobot dataset dir")
+    ap.add_argument(
+        "--skills",
+        type=Path,
+        default=None,
+        help=f"skill library file (live default {DEFAULT_SKILLS}, none when --headless)",
+    )
+    ap.add_argument(
+        "--fresh-skills",
+        action="store_true",
+        default=None,
+        help="back up and ignore the saved skill library this run",
+    )
     ap.add_argument("--generate", type=int, default=None, help="headless: N scripted episodes")
     ap.add_argument(
         "--dummy-glove",
@@ -468,6 +485,7 @@ def _run_booth(
             return 1
         controller.coordinator.set_observer(sink_handle)
         stack.callback(_close_episodes, controller, sink_handle)
+    _setup_skills(cfg, controller, stack, sink_handle)
     if "--generate" in hooks:
         assert cfg.generate is not None
         n = int(hooks["--generate"](controller, sink_handle, cfg.generate, resolve_seed(cfg)))
@@ -551,6 +569,32 @@ def _close_act(controller: StageController) -> None:
 def _close_episodes(controller: StageController, sink_handle: Any) -> None:
     controller.coordinator.set_observer(None)
     sink_handle.close()
+
+
+def _setup_skills(
+    cfg: AtcConfig, controller: StageController, stack: contextlib.ExitStack, sink_handle: Any
+) -> None:
+    """Persist the deployed skill library to ``cfg.skills``; reload it unless ``--fresh-skills``."""
+    if cfg.skills is None:
+        return
+    from teleop.atc.skill_store import SkillStore
+
+    co = controller.coordinator
+    store = SkillStore(
+        cfg.skills, session=lambda: None if sink_handle is None else Path(sink_handle.root).name
+    )
+    stack.callback(store.close)
+    if cfg.fresh_skills:
+        report = store.reset(co)
+        suffix = f", old library kept as {report.backup}" if report.backup else ""
+        print(f"teleop atc: starting with no skills{suffix}")
+    else:
+        loaded = store.load(co)
+        print(
+            f"teleop atc: loaded {loaded.loaded} skills from {cfg.skills} "
+            f"(skipped {len(loaded.skipped)})"
+        )
+    co.skill_listeners.append(store.on_deployed)
 
 
 def _setup_recovery(cfg: AtcConfig, controller: StageController, load_act: Any) -> None:

@@ -43,7 +43,7 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -120,7 +120,7 @@ from teleop.sim.bays import (
 from teleop.sim.cells import CONVEYOR_SPEED_M_S, PACK_PITCH_M
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
-from teleop.unoq.client import UnoQClient
+from teleop.unoq.client import UnoQClient, UnoQError
 from teleop.unoq.dmp import HAND_ACTUATORS, compose_pose, mat_to_quat
 
 logger = logging.getLogger(__name__)
@@ -448,6 +448,8 @@ class AtcCoordinator:
         )
         self.routine = routine or ROUTINE
         self.library: dict[str, SkillPrimitive] = {}
+        # Called after a gate pass deploys a skill (T-231: the on-disk SkillStore).
+        self.skill_listeners: list[Callable[[SkillPrimitive], None]] = []
         self.time_s = 0.0
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="skill-gate"
@@ -1383,6 +1385,20 @@ class AtcCoordinator:
 
     # ------------------------------------------------------------------ validation + library
 
+    def reset_library(self) -> bool:
+        """Forget every deployed skill here and on the board; False if the board could not clear.
+
+        Rebinds ``library`` (never ``clear()``) so the control thread's ``library.get`` always sees
+        a whole dict; a bay already replaying a skill keeps its own skill object.
+        """
+        self.library = {}
+        try:
+            self.unoq.clear_skills(self.config.part_sku_id)
+        except UnoQError as exc:
+            logger.warning("atc: board skills not cleared (%s); redeploy the UNO Q app", exc)
+            return False
+        return True
+
     def gate_pending(self, bay_id: int) -> bool:
         """True while the bay's skill gate is running or waiting for its sim-time deadline."""
         return self._bays[bay_id].gate is not None
@@ -1469,6 +1485,11 @@ class AtcCoordinator:
         if report.passed:
             self.unoq.register_skill(skill)
             self.library[skill.skill_id] = skill
+            for listener in self.skill_listeners:
+                try:
+                    listener(skill)
+                except Exception:
+                    logger.exception("skill listener failed for %s", skill.skill_id)
             self._emit(
                 "SKILL_DEPLOYED",
                 bay,

@@ -572,6 +572,20 @@ def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: R
     assert rig.sink.kinds().count("SKILL_DEPLOYED") == 1
 
 
+def test_skill_listeners_hear_each_deploy_and_a_failing_one_cannot_break_the_gate(
+    rig: Rig,
+) -> None:
+    heard: list[SkillPrimitive] = []
+
+    def broken(skill: SkillPrimitive) -> None:
+        raise RuntimeError("listener bug")
+
+    rig.co.skill_listeners += [broken, heard.append]
+    _rescued_rig(rig)
+    assert [s.skill_id for s in heard] == list(rig.co.library)
+    assert rig.sink.kinds().count("SKILL_DEPLOYED") == 1
+
+
 def test_clean_cycles_after_a_rescue_keep_clearing(rig: Rig) -> None:
     """Clutch release pins every hand target; the next cycles must not inherit that posture."""
     co = rig.co
