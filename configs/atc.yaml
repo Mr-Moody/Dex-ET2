@@ -19,3 +19,6 @@ display: console           # console (browser CCTV wall, default) | viewer (MuJo
 console_port: 8765         # fleet ops console at http://127.0.0.1:<port>/
 console_fps: 30            # camera feed frame rate
 open_browser: true         # open the console page on start (false: just print the URL)
+recovery_backend: dmp      # dmp (default, learned DMP skills) | hybrid (gated ACT + DMP) | act; M cycles live
+act_checkpoint: null       # ACT run dir with gate.json, from `teleop eval` (hybrid / act)
+record_episodes: null      # directory: save every recovery as a LeRobot episode (off when null)

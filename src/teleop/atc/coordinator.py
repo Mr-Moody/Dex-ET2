@@ -50,6 +50,18 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.atc.recovery import (
+    BaySignals,
+    CoordinatorObserver,
+    DmpRecovery,
+    EpisodeStartSource,
+    RecoveryBackend,
+    RecoveryController,
+    RecoveryFactory,
+    RecoveryKind,
+    SmoothMove,
+    choose_recovery,
+)
 from teleop.atc.types import (
     BOLT_CLEARED_M,
     BaySnapshot,
@@ -69,16 +81,12 @@ from teleop.atc.validator import (
     TAU_MARGIN_NM,
     ApproachPlan,
     BayRig,
-    ReplayCommand,
-    SkillReplay,
     SkillValidator,
     ValidationReport,
-    blend_pose,
     lifted,
     local_axis_world,
     pose_position,
     step_physics,
-    torque_tube_ok,
     translate_pose,
 )
 from teleop.compliance.protocol import ComplianceKind, ComplianceSink, make_event
@@ -290,32 +298,15 @@ def _fingers_array(fingers: Mapping[str, float]) -> FloatArray:
     return np.array([fingers.get(n, 0.0) for n in HAND_ACTUATORS], dtype=np.float64)
 
 
-class _Move:
-    """Smoothstep wrist move between two world poses."""
+@dataclass
+class _Recovery:
+    """One autonomous recovery run in a bay: its controller, which backend, its DMP skill."""
 
-    def __init__(self, start: Pose, end: Pose, duration_s: float) -> None:
-        self.start, self.end, self.duration_s = start, end, max(duration_s, CONTROL_DT)
-        self.t = 0.0
-
-    def step(self) -> Pose:
-        self.t = min(self.t + CONTROL_DT, self.duration_s)
-        u = self.t / self.duration_s
-        return blend_pose(self.start, self.end, u * u * (3.0 - 2.0 * u))
-
-    @property
-    def done(self) -> bool:
-        return self.t >= self.duration_s
-
-
-class _Auto:
-    """Autonomous skill run: back off, blend into the DMP, replay under the torque tube."""
-
-    def __init__(self, skill: SkillPrimitive, backoff: _Move) -> None:
-        self.skill = skill
-        self.backoff: _Move | None = backoff
-        self.replay: SkillReplay | None = None
-        self.t = 0.0
-        self.last: ReplayCommand | None = None
+    controller: RecoveryController
+    kind: RecoveryKind
+    skill: SkillPrimitive | None = None
+    t: float = 0.0
+    error: str | None = None  # the controller raised: abort in the sense phase
 
 
 @dataclass
@@ -327,12 +318,14 @@ class _Bay:
     routine_t: float = 0.0
     hold_pose: Pose | None = None
     fingers: dict[str, float] = field(default_factory=dict[str, float])
-    move: _Move | None = None
+    move: SmoothMove | None = None
     detector: StallDetector = field(default_factory=StallDetector)
     indexer: RelativeClutchIndexer = field(default_factory=RelativeClutchIndexer)
     buffer: RescueTrajectoryBuffer | None = None
     clutch_held: bool = False
-    auto: _Auto | None = None
+    auto: _Recovery | None = None
+    fallback_skill: SkillPrimitive | None = None  # deployed DMP for this stall, if any
+    recording: bool = False  # an observer episode is open
     refused: bool = False
     signature: StallSignature | None = None
     pending: tuple[RescueTrajectory, StallSignature] | None = None
@@ -370,6 +363,9 @@ class AtcCoordinator:
         validator: SkillValidator | None = None,
         routine: RoutineSpec | None = None,
         bays: tuple[int, ...] = ACTIVE_BAYS,
+        recovery_backend: RecoveryBackend = RecoveryBackend.DMP,
+        act: RecoveryFactory | None = None,
+        observer: CoordinatorObserver | None = None,
     ) -> None:
         self.model = model
         self.data = data
@@ -385,6 +381,10 @@ class AtcCoordinator:
         self.last_classify_ms = 0.0
         self.last_report: ValidationReport | None = None
         self._queue: list[int] = []
+        self._backend = RecoveryBackend(recovery_backend)
+        self._act = act
+        self._observer = observer
+        self.backend_note = ""
         self._bays = {b: _Bay(b, BayRig(model, data, b)) for b in bays}
         for b in BACKGROUND_BAYS:
             with contextlib.suppress(KeyError):  # scene built without the background bays
@@ -406,6 +406,9 @@ class AtcCoordinator:
         include_background_bays: bool = False,
         config: CoordinatorConfig | None = None,
         validator: SkillValidator | None = None,
+        recovery_backend: RecoveryBackend = RecoveryBackend.DMP,
+        act: RecoveryFactory | None = None,
+        observer: CoordinatorObserver | None = None,
     ) -> AtcCoordinator:
         import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
@@ -421,12 +424,47 @@ class AtcCoordinator:
             hand_spec or load_hand("inspire"),
             config=config,
             validator=validator,
+            recovery_backend=recovery_backend,
+            act=act,
+            observer=observer,
         )
 
     # ------------------------------------------------------------------ public queries
 
     def rig(self, bay_id: int) -> BayRig:
         return self._bays[bay_id].rig
+
+    # ------------------------------------------------------------------ recovery backend
+
+    @property
+    def recovery_backend(self) -> RecoveryBackend:
+        return self._backend
+
+    @property
+    def act(self) -> RecoveryFactory | None:
+        return self._act
+
+    def set_recovery_backend(self, backend: RecoveryBackend) -> None:
+        """Switch backend from the next stall; a running recovery finishes on its own."""
+        backend = RecoveryBackend(backend)
+        if backend is self._backend:
+            return
+        self._backend = backend
+        self.backend_note = f"recovery backend {backend.value} (from the next stall)"
+        logger.info("atc: %s", self.backend_note)
+
+    def set_act(self, factory: RecoveryFactory | None) -> None:
+        self._act = factory
+
+    def set_observer(self, observer: CoordinatorObserver | None) -> None:
+        self._observer = observer
+
+    def recovery_name(self, bay_id: int) -> str | None:
+        """``"dmp"`` or ``"act"`` while the bay recovers autonomously, else ``None``."""
+        bay = self._bays[bay_id]
+        if bay.state != BayState.AUTONOMOUS_SKILL or bay.auto is None:
+            return None
+        return bay.auto.kind
 
     def state(self, bay_id: int) -> BayState:
         return self._bays[bay_id].state
@@ -478,6 +516,9 @@ class AtcCoordinator:
         they are applied once the hand is lifted clear of the latch and are never read back.
         """
         bay = self._bays[bay_id]
+        if bay.auto is not None:
+            bay.auto.controller.close()
+        self._end_episode(bay, False, "cycle restarted")
         rig = bay.rig
         wfl = rig.world_from_latch()
         start = compose_pose(wfl, self.routine.pose_at(0.0))
@@ -496,6 +537,7 @@ class AtcCoordinator:
         bay.fingers = fingers
         bay.move = None
         bay.auto = None
+        bay.fallback_skill = None
         bay.buffer = None
         bay.pending = None
         bay.clutch_held = False
@@ -628,8 +670,11 @@ class AtcCoordinator:
             and bay.move is None
         )
         if engaged and operator is not None:
+            if not bay.clutch_held:
+                self._start_episode(bay, "operator")
             cmd = bay.indexer.update(True, operator.glove_wrist, bay.rig.wrist_pose())
             if cmd is not None:
+                self._episode_tick(bay, cmd, operator.hand_targets)
                 self._command(bay, cmd, operator.hand_targets)
                 bay.hold_pose = cmd
                 if bay.buffer is not None:
@@ -655,6 +700,8 @@ class AtcCoordinator:
             if bay.buffer is not None
             else None
         )
+        cleared = bay.rig.bolt_x() >= BOLT_CLEARED_M
+        self._end_episode(bay, cleared, None if cleared else "bolt not cleared")
         if traj is not None and bay.signature is not None:
             bay.pending = (traj, bay.signature)
             bay.state = BayState.VALIDATING
@@ -662,29 +709,31 @@ class AtcCoordinator:
             logger.info("bay %d: rescue discarded (bolt not cleared), staying in hover", bay.bay_id)
 
     def _control_auto(self, bay: _Bay) -> None:
-        auto = bay.auto
-        assert auto is not None
-        if auto.backoff is not None:
-            pose = auto.backoff.step()
-            self._command(bay, pose)
-            if auto.backoff.done:
-                wfl = bay.rig.world_from_latch()
-                auto.replay = SkillReplay(
-                    auto.skill,
-                    wfl,
-                    start_wrist=pose,
-                    start_fingers=bay.fingers,
-                    blend_s=self.config.blend_s,
-                    hold_s=self.config.skill_hold_s,
-                )
-                auto.backoff = None
-                auto.t = 0.0
-            return
-        assert auto.replay is not None
-        cmd = auto.replay.command(auto.t)
-        auto.last = cmd
-        self._command(bay, cmd.wrist, cmd.fingers)
-        auto.t += CONTROL_DT
+        rec = bay.auto
+        assert rec is not None
+        try:
+            cmd = None if rec.error else rec.controller.command(bay.rig, self._signals(bay))
+        except Exception as exc:
+            logger.exception("bay %d: %s recovery controller failed", bay.bay_id, rec.kind)
+            rec.error = f"recovery error: {exc}"
+            cmd = None
+        if cmd is None:
+            self._hold(bay)
+            assert bay.hold_pose is not None
+            self._episode_tick(bay, bay.hold_pose, None)
+        else:
+            self._episode_tick(bay, cmd.wrist, cmd.fingers)
+            self._command(bay, cmd.wrist, cmd.fingers, v_cmd=cmd.v_cmd)
+        rec.t += CONTROL_DT
+
+    def _signals(self, bay: _Bay) -> BaySignals:
+        return BaySignals(
+            bay_id=bay.bay_id,
+            t_s=bay.auto.t if bay.auto is not None else 0.0,
+            tau_hand_inf=bay.tau_inf,
+            confidence=bay.confidence,
+            fingers=bay.fingers,
+        )
 
     # ------------------------------------------------------------------ sense phase
 
@@ -736,21 +785,20 @@ class AtcCoordinator:
             self._sense_auto(bay, x_bolt)
 
     def _sense_auto(self, bay: _Bay, x_bolt: float) -> None:
-        auto = bay.auto
-        assert auto is not None
+        rec = bay.auto
+        assert rec is not None
         if x_bolt >= BOLT_CLEARED_M:
             self._complete_autonomous(bay)
             return
-        if auto.replay is None or auto.last is None:
-            return
-        in_dmp = auto.t > auto.replay.blend_s + CONTROL_DT
-        timed_out = auto.t > auto.replay.total_s + self.config.skill_timeout_s
-        if in_dmp and not torque_tube_ok(
-            bay.tau_inf, auto.last.tau_demo, self.config.tau_margin, self.config.tau_hard_max
-        ):
-            self._abort_autonomous(bay, "torque tube violated")
-        elif timed_out:
-            self._abort_autonomous(bay, "skill timeout")
+        reason = rec.error
+        if reason is None:
+            try:
+                reason = rec.controller.check(bay.rig, self._signals(bay))
+            except Exception as exc:
+                logger.exception("bay %d: %s recovery check failed", bay.bay_id, rec.kind)
+                reason = f"recovery error: {exc}"
+        if reason is not None:
+            self._abort_autonomous(bay, reason)
 
     # ------------------------------------------------------------------ arm torque safety
 
@@ -788,6 +836,7 @@ class AtcCoordinator:
             return True
         self._bleed_off(bay)
         if phase == "rescue":
+            self._end_episode(bay, False, "arm torque limit")
             if bay.buffer is not None:
                 bay.buffer.finish(False)
             bay.clutch_held = False
@@ -833,27 +882,83 @@ class AtcCoordinator:
         self.last_classify_ms = (time.monotonic_ns() - t0) * 1e-6
         bay.match = match
         skill = self.library.get(skill_id) if skill_id is not None else None
-        if not match.is_ood and skill is not None:
-            self._start_autonomous(bay, skill)
+        bay.fallback_skill = skill if not match.is_ood else None
+        kind = self._pick_recovery(trigger.signature, dmp_available=bay.fallback_skill is not None)
+        if kind == "act":
+            self._start_act(bay, trigger.signature)
+            return
+        if kind == "dmp" and bay.fallback_skill is not None:
+            self._start_autonomous(bay, bay.fallback_skill)
             return
         refused = match.is_ood and math.isfinite(match.distance)
         self._escalate(bay, refused=refused, reason=trigger.reason)
 
-    def _start_autonomous(self, bay: _Bay, skill: SkillPrimitive) -> None:
-        wrist = bay.rig.wrist_pose()
-        ax = local_axis_world(bay.rig.world_from_latch(), 0)
-        backoff = _Move(
-            wrist, translate_pose(wrist, -self.config.backoff_m * ax), self.config.backoff_s
+    def _pick_recovery(self, z: StallSignature, *, dmp_available: bool) -> RecoveryKind | None:
+        act = self._act
+        covers = healthy = False
+        if self._backend is not RecoveryBackend.DMP:
+            why = "no ACT checkpoint loaded"
+            if act is not None:
+                try:
+                    healthy = act.healthy()
+                    covers = healthy and act.covers(z)
+                    why = act.unhealthy_reason or "unhealthy"
+                except Exception as exc:
+                    logger.exception("atc: ACT factory failed")
+                    healthy, why = False, f"error: {exc}"
+            if not healthy:
+                self._downgrade(why)
+        return choose_recovery(
+            self._backend, act_covers=covers, act_healthy=healthy, dmp_available=dmp_available
         )
-        bay.auto = _Auto(skill, backoff)
+
+    def _downgrade(self, why: str) -> None:
+        self._backend = RecoveryBackend.DMP
+        self.backend_note = f"ACT unavailable ({why}): back to dmp"
+        logger.warning("atc: %s", self.backend_note)
+
+    def _start_autonomous(self, bay: _Bay, skill: SkillPrimitive) -> None:
+        cfg = self.config
+        controller = DmpRecovery(
+            skill,
+            bay.rig,
+            backoff_m=cfg.backoff_m,
+            backoff_s=cfg.backoff_s,
+            blend_s=cfg.blend_s,
+            hold_s=cfg.skill_hold_s,
+            tau_margin=cfg.tau_margin,
+            tau_hard_max=cfg.tau_hard_max,
+            timeout_s=cfg.skill_timeout_s,
+        )
+        bay.auto = _Recovery(controller, "dmp", skill)
         bay.skill_id = skill.skill_id
         bay.state = BayState.AUTONOMOUS_SKILL
         bay.prev_cmd_pos = None
+        self._start_episode(bay, "dmp")
+
+    def _start_act(self, bay: _Bay, z: StallSignature) -> None:
+        assert self._act is not None
+        try:
+            controller = self._act.create(bay.rig, z)
+        except Exception as exc:
+            logger.exception("bay %d: ACT recovery could not start", bay.bay_id)
+            self._downgrade(f"error: {exc}")
+            if bay.fallback_skill is not None:
+                self._start_autonomous(bay, bay.fallback_skill)
+            else:
+                self._escalate(bay, refused=False, reason="ACT could not start")
+            return
+        bay.auto = _Recovery(controller, "act")
+        bay.skill_id = "act"
+        bay.state = BayState.AUTONOMOUS_SKILL
+        bay.hold_pose = bay.rig.wrist_pose()
+        bay.prev_cmd_pos = None
+        self._start_episode(bay, "act")
 
     def _retract_to_hover(self, bay: _Bay) -> None:
         wrist = bay.rig.wrist_pose()
         ax = local_axis_world(bay.rig.world_from_latch(), 0)
-        bay.move = _Move(
+        bay.move = SmoothMove(
             wrist, translate_pose(wrist, -self.config.retract_m * ax), self.config.retract_s
         )
         bay.hold_pose = wrist
@@ -889,36 +994,101 @@ class AtcCoordinator:
         self._submit_reasoning(kind, bay)
 
     def _abort_autonomous(self, bay: _Bay, reason: str) -> None:
-        logger.warning("bay %d: autonomous skill aborted (%s)", bay.bay_id, reason)
+        rec = bay.auto
+        kind = rec.kind if rec is not None else "dmp"
+        if rec is not None:
+            rec.controller.close()
+        self._end_episode(bay, False, reason)
         bay.auto = None
         bay.skill_id = None
+        if (
+            kind == "act"
+            and self._backend is not RecoveryBackend.ACT
+            and bay.fallback_skill is not None
+        ):
+            logger.warning(
+                "bay %d: ACT recovery aborted (%s), falling back to DMP", bay.bay_id, reason
+            )
+            self._start_autonomous(bay, bay.fallback_skill)
+            return
+        logger.warning("bay %d: autonomous skill aborted (%s)", bay.bay_id, reason)
         bay.outcome = f"aborted: {reason}"
         self._retract_to_hover(bay)
         bay.refused = False
         bay.state = BayState.QUEUED
         self._queue.append(bay.bay_id)
+        metadata: dict[str, Any] = {"reason": reason, "queue": list(self._queue)}
+        if kind == "act":
+            metadata["backend"] = "act"
         self._emit(
             "STALL_ALERT",
             bay,
             f"bay {bay.bay_id} autonomous skill aborted ({reason}), escalated to operator",
-            {"reason": reason, "queue": list(self._queue)},
+            metadata,
         )
         self._submit_reasoning("STALL_ALERT", bay)
 
     def _complete_autonomous(self, bay: _Bay) -> None:
-        skill = bay.auto.skill if bay.auto is not None else None
+        rec = bay.auto
+        if rec is not None:
+            rec.controller.close()
+        self._end_episode(bay, True, None)
+        skill = rec.skill if rec is not None else None
+        act = rec is not None and rec.kind == "act"
         bay.auto = None
         bay.outcome = "cleared autonomously"
         bay.state = BayState.NOMINAL
         bay.routine_active = False
         bay.hold_pose = bay.rig.wrist_pose()
         bay.prev_cmd_pos = None
+        by = "the ACT policy" if act else (skill.skill_id if skill else "?")
+        metadata: dict[str, Any] = {
+            "autonomous": True,
+            "skill_id": skill.skill_id if skill else None,
+        }
+        if act:
+            metadata["backend"] = "act"
         self._emit(
             "RESCUE_LOGGED",
             bay,
-            f"bay {bay.bay_id} cleared autonomously by {skill.skill_id if skill else '?'}",
-            {"autonomous": True, "skill_id": skill.skill_id if skill else None},
+            f"bay {bay.bay_id} cleared autonomously by {by}",
+            metadata,
         )
+
+    # ------------------------------------------------------------------ episode observer
+
+    def _start_episode(self, bay: _Bay, source: EpisodeStartSource) -> None:
+        if self._observer is None:
+            return
+        bay.recording = True
+        try:
+            self._observer.on_episode_start(
+                bay.bay_id,
+                source,
+                None if bay.match is None else bay.match.signature_id,
+                bay.signature,
+            )
+        except Exception:
+            logger.exception("episode observer failed")
+
+    def _episode_tick(self, bay: _Bay, wrist: Pose, fingers: Mapping[str, float] | None) -> None:
+        if self._observer is None or not bay.recording:
+            return
+        try:
+            self._observer.on_tick(bay.bay_id, bay.rig, wrist, {**bay.fingers, **(fingers or {})})
+        except Exception:
+            logger.exception("episode observer failed")
+
+    def _end_episode(self, bay: _Bay, success: bool, reason: str | None) -> None:
+        if not bay.recording:
+            return
+        bay.recording = False
+        if self._observer is None:
+            return
+        try:
+            self._observer.on_episode_end(bay.bay_id, success, reason)
+        except Exception:
+            logger.exception("episode observer failed")
 
     # ------------------------------------------------------------------ queue
 
