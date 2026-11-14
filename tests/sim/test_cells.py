@@ -17,6 +17,7 @@ from teleop.sim.cells import (
     WAREHOUSE_FLOOR_Z,
     WAREHOUSE_ROOF_Z,
     cctv_camera_name,
+    cell_bounds,
 )
 from teleop.sim.hands import load_hand
 
@@ -87,6 +88,21 @@ def test_warehouse_has_conveyors_battery_packs_and_sustainable_elements(
     assert any("greenwall" in g for g in geom_names)
     assert any("planter_bush" in g for g in geom_names)
     assert any("bin_cells" in g for g in geom_names)
+    for prop in ("stage_w_n_stack_", "forklift_", "control_desk_", "drums_n_", "fire_w_"):
+        assert any(f"warehouse/{prop}" in g for g in geom_names), prop
+
+
+def test_floor_dressing_stays_clear_of_the_bay_cells(scene: tuple[Any, Any]) -> None:
+    model, _ = scene
+    props = ("stage_", "forklift_", "control_desk_", "drums_")
+    for i in range(model.ngeom):
+        name = str(model.geom(i).name)
+        if not name.startswith(tuple(f"warehouse/{p}" for p in props)):
+            continue
+        x, y = (float(v) for v in model.geom_pos[i][:2])
+        for k in CONVEYOR_BAYS:
+            x_lo, x_hi, y_lo, y_hi = cell_bounds(k)
+            assert not (x_lo < x < x_hi and y_lo < y < y_hi), (name, k)
 
 
 def test_open_warehouse_has_no_enclosing_cell_walls(scene: tuple[Any, Any]) -> None:
