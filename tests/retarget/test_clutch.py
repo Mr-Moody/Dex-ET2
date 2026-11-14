@@ -16,7 +16,6 @@ from teleop.retarget.clutch import (
     TOP_TILT_RAD,
     RelativeClutchIndexer,
     RescueTrajectoryBuffer,
-    add_rescue_cameras,
     bleed_off_targets,
     compose_split_view,
     read_leap_q,
@@ -279,10 +278,8 @@ def test_successful_clutch_rescue_transforms_wrist_into_local_latch_frame() -> N
 
 @needs_models
 def test_split_rescue_cameras_are_orthographic_over_each_active_latch() -> None:
+    # The fleet scene adds both active bays' rescue cameras itself (``build_four_bay_spec``).
     spec = build_four_bay_spec(CANONICAL_LATCH, BAY2_LATCH, include_background_bays=False)
-    for bay, local in ((1, CANONICAL_LATCH), (2, BAY2_LATCH)):
-        names = add_rescue_cameras(spec, f"bay{bay}", latch_world_pose(bay, local))
-        assert names == rescue_camera_names(f"bay{bay}")
     model = spec.compile()
     data = mj.MjData(model)
     mj.mj_forward(model, data)
@@ -314,7 +311,7 @@ def test_split_rescue_cameras_are_orthographic_over_each_active_latch() -> None:
 @needs_models
 def test_split_view_renders_orange_flap_in_top_inset(offscreen_render_ok: None) -> None:
     spec = build_four_bay_spec(include_background_bays=False)
-    top, side = add_rescue_cameras(spec, "bay1", latch_world_pose(1, CANONICAL_LATCH))
+    top, side = rescue_camera_names("bay1")
     model = spec.compile()
     data = mj.MjData(model)
     reset_robot_home(model, data, 1)
