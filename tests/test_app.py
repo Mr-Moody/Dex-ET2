@@ -262,6 +262,7 @@ def test_record_two_short_episodes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             "leap",
             "--source",
             "synthetic",
+            "--headless",
             "--cameras",
             '[{"name": "front", "width": 32, "height": 32}]',
         ]
