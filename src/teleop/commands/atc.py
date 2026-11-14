@@ -54,6 +54,7 @@ logger = logging.getLogger("teleop.atc")
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "atc.yaml"
 CONTROL_HZ = 60
+HUD_OVERLAY_HZ = 10.0  # viewer text refresh; each set_texts waits for a rendered frame
 
 
 @dataclass
@@ -284,20 +285,42 @@ def _run(cfg: AtcConfig, controller: StageController) -> int:
     return 0 if director.ok else 1
 
 
-def _run_viewer(cfg: AtcConfig, controller: StageController, operator: Any) -> None:
-    import mujoco.viewer  # pyright: ignore[reportMissingTypeStubs]
+def _run_viewer(
+    cfg: AtcConfig,
+    controller: StageController,
+    operator: Any,
+    launch: Any = None,
+) -> None:
+    """Drive the passive viewer at ``CONTROL_HZ``.
 
+    ``viewer.set_texts`` must never run under ``viewer.lock()``: MuJoCo's ``set_texts`` spins
+    until the render thread has consumed the previous text request, and the render thread needs
+    that lock, so calling it under the lock freezes the app at 100% CPU. Each call also waits
+    for a rendered frame, so the overlay is refreshed at ``HUD_OVERLAY_HZ`` and only on change.
+    """
+    if launch is None:
+        import mujoco.viewer  # pyright: ignore[reportMissingTypeStubs]
+
+        launch = mujoco.viewer.launch_passive  # pyright: ignore
     co = controller.coordinator
-    launch: Any = mujoco.viewer.launch_passive  # pyright: ignore
     with launch(co.model, co.data, key_callback=controller.on_key) as viewer:
+        next_overlay_s = 0.0
+        last_overlay: Any = None
 
         def step(_: int) -> bool:
+            nonlocal next_overlay_s, last_overlay
             if not viewer.is_running():
                 return False
             sample = operator()
             with viewer.lock():
                 controller.tick(sample)
-                viewer.set_texts(hud_overlays(controller.hud_view()))
+                overlay = None
+                if co.time_s >= next_overlay_s:
+                    next_overlay_s = co.time_s + 1.0 / HUD_OVERLAY_HZ
+                    overlay = hud_overlays(controller.hud_view())
+            if overlay is not None and overlay != last_overlay:
+                viewer.set_texts(overlay)  # outside the lock (see docstring)
+                last_overlay = overlay
             viewer.sync()
             return True
 
