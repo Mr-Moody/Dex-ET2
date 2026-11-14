@@ -36,6 +36,10 @@ class UnoQError(RuntimeError):
     """The node answered ``{"ok": false}`` or the connection failed."""
 
 
+class UnoQTransportError(UnoQError):
+    """The connection failed (not connected, socket error, closed): the node may be gone."""
+
+
 def _tolist(a: ArrayLike) -> list[Any]:
     return np.asarray(a, dtype=np.float64).tolist()
 
@@ -134,7 +138,7 @@ class UnoQClient:
     def request(self, message: Mapping[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         """One TCP request/response round trip. Raises ``UnoQError`` on ``ok: false``."""
         if self._tcp is None or self._reader is None:
-            raise UnoQError("not connected")
+            raise UnoQTransportError("not connected")
         with self._lock:
             try:
                 if timeout_s is not None:
@@ -142,12 +146,12 @@ class UnoQClient:
                 self._tcp.sendall(P.encode(dict(message)))
                 line = self._reader.readline()
             except OSError as exc:
-                raise UnoQError(f"{message.get('op')}: {exc}") from exc
+                raise UnoQTransportError(f"{message.get('op')}: {exc}") from exc
             finally:
                 if timeout_s is not None:
                     self._tcp.settimeout(self.timeout_s)
         if not line:
-            raise UnoQError(f"{message.get('op')}: connection closed")
+            raise UnoQTransportError(f"{message.get('op')}: connection closed")
         reply = P.decode(line)
         if not reply.get("ok"):
             raise UnoQError(str(reply.get("error", "request failed")))
@@ -167,7 +171,7 @@ class UnoQClient:
         """Smooth one glove sample over UDP. On a lost or late datagram, returns the input."""
         raw_joints = {str(k): float(v) for k, v in (joints or {}).items()}
         if self._udp is None:
-            raise UnoQError("not connected")
+            raise UnoQTransportError("not connected")
         rid = next(self._udp_ids)
         msg: dict[str, Any] = {
             "op": P.OP_FILTER_STEP,

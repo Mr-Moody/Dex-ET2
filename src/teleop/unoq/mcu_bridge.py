@@ -265,12 +265,29 @@ class McuConsoleBridge:
             with contextlib.suppress(Exception):
                 close()
 
+    def reopen(self, transport: SerialLike) -> None:
+        """Switch to a freshly opened transport, close the old one and resend the LED states.
+
+        Writes are blocked only for the pointer swap. A running reader thread keeps going: it
+        reads ``self._transport`` per line, so it moves to the new transport by itself.
+        """
+        with self._write_lock:
+            old, self._transport = self._transport, transport
+        close = getattr(old, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+        self.resend_bay_states()
+
     def _read_loop(self) -> None:
         while not self._stop.is_set():
+            transport = self._transport
             try:
                 if self.pump() == 0:
                     time.sleep(0.001)
             except Exception:
+                if self._transport is not transport:
+                    continue  # the old transport was closed under us by reopen()
                 log.exception("mcu console: transport read failed")
                 time.sleep(0.1)
 
@@ -321,13 +338,17 @@ class McuConsoleBridge:
         if self._led.get(bay_id) == token:
             return
         line = format_bay_state(bay_id, state)
-        self._send(line)
-        self._led[bay_id] = token  # only after a successful write, so a failed one is retried
+        with self._write_lock:  # write + record atomically w.r.t. resend_bay_states
+            self._transport.write((line + "\n").encode("ascii"))
+            self._led[bay_id] = token  # only after a successful write: a failed one is retried
 
     def resend_bay_states(self) -> None:
         """Push every known LED state again, e.g. after the MCU reboots."""
-        for bay_id, token in sorted(self._led.items()):
-            self._send(f"CMD:BAY_STATE:{bay_id}:{token}")
+        # Under the write lock for the copy and the writes: a newer set_bay_state cannot be
+        # overwritten on the MCU by a stale resend (the lock is not reentrant: no _send here).
+        with self._write_lock:
+            for bay_id, token in sorted(list(self._led.items())):
+                self._transport.write(f"CMD:BAY_STATE:{bay_id}:{token}\n".encode("ascii"))
 
     def reset_rig(self) -> None:
         """Re-arm the physical fault rig for the next pallet cycle (sends CMD:RESET_RIG)."""

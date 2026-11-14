@@ -239,8 +239,15 @@ class UnoQServer:
         return P.ok(fit_ms=skill.fit_ms, skill=skill.to_dict())
 
     def _register_skill(self, req: dict[str, Any]) -> dict[str, Any]:
-        """Add a gate-validated skill to the library; its stall prototype becomes matchable."""
+        """Add a gate-validated skill to the library; its stall prototype becomes matchable.
+
+        Idempotent per ``skill_id``: a replayed skill (laptop swap back to this node) adds no
+        duplicate prototype sample.
+        """
         skill = SkillPrimitive.from_dict(req["skill"])
+        if skill.skill_id in self.skills:
+            n = self.classifier.sample_count(skill.part_sku_id, skill.signature_id)
+            return P.ok(skill_id=skill.skill_id, signature_samples=n)
         self.skills[skill.skill_id] = skill
         z = np.asarray(skill.prototype.as_vector(), dtype=np.float64)
         self.classifier.register_prototype(skill.part_sku_id, skill.signature_id, z)
