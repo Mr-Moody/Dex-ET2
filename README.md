@@ -9,6 +9,97 @@ and an LLM reasoning co-pilot (Kimi K3.1 Pro on Verda).
 See `PROJECT_BRIEF.md` for the pitch and
 `docs/superpowers/specs/2026-11-14-atc-fleet-rescue-design.md` for the design.
 
+## How it works
+
+Everything runs locally in one Python process. MuJoCo does all the physics and all the 3D
+rendering. The browser is only a display and a keyboard.
+
+```
+ Rokoko gloves ──UDP──▶ Studio source ─▶ retarget + relative clutch ─┐
+ (or synthetic/replay)                                               │ operator input
+                                                                     ▼
+ ┌──────────────────────── main thread, 60 Hz ────────────────────────────────────┐
+ │  StageController ─▶ AtcCoordinator ─▶ MuJoCo physics (Bays 1-2: Panda + LEAP)  │
+ │                        │  C(t) stall detection, FIFO rescue queue, torque tube │
+ │                        ├─▶ UNO Q (UDP/TCP, or in-process mock):                │
+ │                        │     1-Euro filter, Mahalanobis stall classifier,      │
+ │                        │     30-kernel RBF-DMP skill fit                       │
+ │                        ├─▶ SkillValidator: 3 headless rollouts before deploy   │
+ │                        ├─▶ compliance sink (thread) ─▶ hash-chained log/Solana │
+ │                        └─▶ reasoner (worker threads) ─▶ Verda Kimi K3.1 Pro    │
+ │  after each tick: SimSnapshot ─▶ latest-value slot                             │
+ └──────────────────────────────────┬─────────────────────────────────────────────┘
+                                    ▼
+ render thread: own copy of the MuJoCo model, posed from the snapshot
+                (Bays 3-4 from a canned background cycle), offscreen mujoco.Renderer
+                per-bay CCTV cameras ─▶ JPEG
+                                    ▼
+ console server (127.0.0.1:8765): static page + WebSocket
+     ──▶ telemetry JSON and JPEG frames ──▶ browser
+     ◀── key presses (same handler as the MuJoCo viewer) ◀──
+```
+
+### A rescue, step by step
+
+1. **Routine.** Bays 1 and 2 run a routine one-finger push to unlatch the slide-bolt.
+2. **Stall.** A fault (a jammed flap or a pinned bolt) makes the confidence C(t) fall below 0.3
+   for 300 ms. The coordinator judges this from contact only (bolt travel, external torque,
+   wrist speed). It never reads the fault state directly.
+3. **Classify.** The stall signature goes to the UNO Q classifier.
+   - **Known signature:** the bay replays the learned skill inside a torque safety tube.
+   - **Unseen signature:** the bay retracts to a safe hover and joins the rescue queue.
+   - **Out-of-distribution (Mahalanobis distance > 3.0):** the stall is refused and escalated
+     to a human.
+4. **Rescue.** The operator selects the bay and holds the clutch. The gloves then drive that
+   bay's wrist and fingers, and the rescue is recorded.
+5. **Learn.** The UNO Q fits the recording as a dynamic movement primitive (a learned movement
+   skill) in under 20 ms. `SkillValidator` replays it in three perturbed headless simulations,
+   and it is added to the fleet library only if all three pass.
+6. **Reuse.** Bay 2, with a rotated and shifted latch, clears the same jam on its own with the
+   skill warped into its frame. The pinned-bolt negative control is refused.
+7. **Record and explain.** Every step emits compliance events (a signed, hash-chained log,
+   optionally anchored on Solana). It also sends reasoning requests to Kimi, which writes the
+   operator guidance and audit rationale shown in the console. Neither one can block the 60 Hz
+   loop. If they are offline, they fall back to local output.
+
+### Display modes
+
+- **Browser console (default).** The MuJoCo render thread produces fixed CCTV-style feeds plus a
+  fleet dashboard. The browser shows the feeds as streamed JPEG images. It does not render 3D
+  itself.
+- **MuJoCo viewer (`--display viewer`).** MuJoCo's own interactive 3D window with a text HUD.
+  You can orbit the camera and inspect contacts. The simulation is identical.
+- **Headless (`--headless`).** No rendering. Used for CI and quick checks.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Language and tooling | Python 3.12, [uv](https://docs.astral.sh/uv/), ruff, pyright (strict), pytest + hypothesis |
+| Physics and rendering | [MuJoCo](https://mujoco.org/) 4: physics, offscreen `mujoco.Renderer` for console feeds, passive viewer |
+| Robots | Franka Panda and LEAP Hand (16-DoF) from MuJoCo Menagerie, a custom sprung slide-bolt latch (MJCF) |
+| Control | Damped least-squares differential IK, `mj_inverse` external-torque estimation, NumPy |
+| Glove input | Rokoko Smartglove II via Rokoko Studio custom streaming (JSON v3 over UDP) |
+| Edge device | Arduino UNO Q: the Python service on its Linux side (UDP stream + TCP ops), the STM32 MCU sketch for the operator console. A loopback mock runs in-process without the board |
+| Skill learning | 1-Euro filter, Mahalanobis classifier, 30-kernel RBF dynamic movement primitives |
+| Compliance | SHA-256 hash-chained JSONL log, Ed25519 signatures, Solana Memo anchoring (`solders`) |
+| Reasoning | Verda Inference API (OpenAI-compatible chat completions), model `kimi-k3-1-pro`, stdlib `urllib` |
+| Ops console | Plain HTML/CSS/JS (no framework, no three.js, no CDN), 2D `<canvas>` sparklines, `websockets` server, Pillow JPEG encoding |
+| Datasets (original pipeline) | LeRobot dataset format (`train` dependency group) |
+
+Code map:
+
+| Path | Contents |
+|---|---|
+| `src/teleop/atc/` | Coordinator, stage script and keys, text HUD, skill validator |
+| `src/teleop/sim/` | Scene and bay builders, latch, IK, torque estimator, fixed-rate loop |
+| `src/teleop/console/` | Snapshot, render worker, telemetry adapter, server, `web/` front end |
+| `src/teleop/unoq/` | Edge service: filter, classifier, DMP, client/server, MCU bridge |
+| `src/teleop/compliance/` | Compliance sink protocol and the Solana implementation |
+| `src/teleop/reasoning/` | Reasoner protocol and the Verda (Kimi) implementation |
+| `src/teleop/input/`, `retarget/`, `wrist/` | Glove sources, retargeting, relative clutch, wrist tracking |
+| `src/teleop/commands/` | `teleop` subcommands |
+
 ## Setup
 
 You need [uv](https://docs.astral.sh/uv/). It installs Python 3.12 for you.
