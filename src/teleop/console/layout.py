@@ -31,6 +31,9 @@ SPLIT_MAIN = (680, 540)
 STRIP = (384, 216)
 ZOOM_MIN, ZOOM_MAX = 0.5, 4.0
 PAN_LIMIT = 2.5
+ROT_LIMIT = 4.0
+
+CamPose5 = tuple[float, float, float, float, float]  # (zoom, pan_x, pan_y, rot_x, rot_y)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,30 +47,32 @@ class FeedSpec:
     zoom: float = 1.0
     pan_x: float = 0.0
     pan_y: float = 0.0
+    rot_x: float = 0.0
+    rot_y: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class ViewState:
-    """Operator-chosen layout, pinned bay, per-bay camera angles, tile order and zoom/pan."""
+    """Operator-chosen layout, pinned bay, per-bay camera angles, tile order and zoom/pan/orbit."""
 
     mode: LayoutMode = "auto"
     pinned_bay: int | None = None
     cameras: Mapping[int, str] = field(default_factory=dict[int, str])
     bay_order: tuple[int, ...] = (1, 2, 3, 4)
-    zooms: Mapping[str, tuple[float, float, float]] = field(
-        default_factory=dict[str, tuple[float, float, float]]
-    )
+    zooms: Mapping[str, CamPose5] = field(default_factory=dict[str, CamPose5])
 
     def camera_for(self, bay: int, default: str = CCTV_SUFFIX) -> str:
         cam = self.cameras.get(bay, default)
         return cam if cam in VALID_VIEWS else default
 
-    def zoom_for(self, camera_name: str) -> tuple[float, float, float]:
-        z, px, py = self.zooms.get(camera_name, (1.0, 0.0, 0.0))
+    def zoom_for(self, camera_name: str) -> CamPose5:
+        z, px, py, rx, ry = self.zooms.get(camera_name, (1.0, 0.0, 0.0, 0.0, 0.0))
         return (
             min(ZOOM_MAX, max(ZOOM_MIN, float(z))),
             min(PAN_LIMIT, max(-PAN_LIMIT, float(px))),
             min(PAN_LIMIT, max(-PAN_LIMIT, float(py))),
+            min(ROT_LIMIT, max(-ROT_LIMIT, float(rx))),
+            min(ROT_LIMIT, max(-ROT_LIMIT, float(ry))),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,9 +82,9 @@ class ViewState:
             "cameras": {str(k): v for k, v in self.cameras.items() if v in VALID_VIEWS},
             "bay_order": list(self.bay_order),
             "zooms": {
-                k: [round(v[0], 3), round(v[1], 3), round(v[2], 3)]
+                k: [round(v[0], 3), round(v[1], 3), round(v[2], 3), round(v[3], 3), round(v[4], 3)]
                 for k, v in self.zooms.items()
-                if abs(v[0] - 1.0) > 1e-3 or abs(v[1]) > 1e-3 or abs(v[2]) > 1e-3
+                if abs(v[0] - 1.0) > 1e-3 or any(abs(c) > 1e-3 for c in v[1:])
             },
         }
 
@@ -93,10 +98,12 @@ def _feed(
     state: ViewState | None = None,
 ) -> FeedSpec:
     cam_name = f"bay{bay}/{suffix}"
-    zoom, px, py = (
-        state.zoom_for(cam_name) if state is not None and role != "strip" else (1.0, 0.0, 0.0)
+    z, px, py, rx, ry = (
+        state.zoom_for(cam_name)
+        if state is not None and role != "strip"
+        else (1.0, 0.0, 0.0, 0.0, 0.0)
     )
-    return FeedSpec(slot, cam_name, bay, role, size[0], size[1], zoom, px, py)
+    return FeedSpec(slot, cam_name, bay, role, size[0], size[1], z, px, py, rx, ry)
 
 
 def _ordered_bays(bays: Sequence[int], state: ViewState | None) -> list[int]:
