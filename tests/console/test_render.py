@@ -155,6 +155,53 @@ def test_renderer_does_not_touch_physics_model(
     assert q3 == pytest.approx(0.0, abs=1.0)  # physics data untouched by the background player
 
 
+@needs_models
+def test_wrist_feed_uses_metric_near_plane(
+    offscreen_render_ok: None, scene: tuple[Any, Any]
+) -> None:
+    """The warehouse is ~37 m across, so MuJoCo's extent-relative near plane sits ~0.37 m out
+    and would clip the hand and latch from the wrist feed. Wrist feeds get the policy cameras'
+    metric planes; world-fixed feeds and the renderer's model keep their own planes."""
+    from teleop.console.layout import FeedSpec
+    from teleop.policy.cameras import WRIST_ZNEAR_M
+    from teleop.sim.bays import wrist_camera_name
+
+    model, data = scene
+    r = FeedRenderer(model, None)
+    extent = float(r.model.stat.extent)
+    znear0 = float(r.model.vis.map.znear)
+    seen: dict[str, float] = {}
+    make = r._renderer  # pyright: ignore[reportPrivateUsage]
+
+    class Spy:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        def update_scene(self, d: Any, camera: str) -> None:
+            seen[camera] = float(r.model.vis.map.znear) * extent  # metres
+            self.inner.update_scene(d, camera)
+
+        def render(self) -> Any:
+            return self.inner.render()
+
+    r._renderer = lambda w, h: Spy(make(w, h))  # type: ignore[method-assign]
+    wrist = wrist_camera_name(1)
+    world = feed_layout([1, 2, 3, 4], None)[0]
+    feeds = [
+        FeedSpec(0, wrist, 1, "main", 64, 48),
+        FeedSpec(1, world.camera, world.bay, "tile", 64, 48),
+    ]
+    try:
+        frames, _ = r.render(SimSnapshot.capture(data, _view(1), 0.0), feeds, 0.0)
+    finally:
+        r.close()
+    assert [s for s, _ in frames] == [0, 1]
+    assert seen[wrist] == pytest.approx(WRIST_ZNEAR_M)
+    assert seen[world.camera] == pytest.approx(znear0 * extent)
+    assert seen[world.camera] > 0.1  # the world feed really does keep the coarse plane
+    assert float(r.model.vis.map.znear) == znear0  # restored after every frame
+
+
 # ------------------------------------------------------------------ worker
 #
 # Worker logic (telemetry before frames, strip throttling, error recovery) is tested with a
