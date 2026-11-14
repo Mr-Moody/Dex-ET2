@@ -19,7 +19,7 @@ from typing import Any
 import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
 from teleop.atc.types import N_BAYS, LatchPose
-from teleop.sim.cells import add_cell, apply_visual_style, look_at_xyaxes
+from teleop.sim.cells import add_cell, add_warehouse, apply_visual_style, look_at_xyaxes
 from teleop.sim.hands import REPO_ROOT, load_hand
 from teleop.sim.ik import ARM_JOINTS, PANDA_HOME
 from teleop.sim.latch import add_latch_to_spec
@@ -276,11 +276,11 @@ def _add_bay(spec: Any, bay_id: int, local_latch: LatchPose, *, collide: bool) -
 
 
 def _add_overview_camera(spec: Any, include_background: bool) -> None:
-    """High bird's-eye view down into the open-top cells (the passive viewer's fallback)."""
-    target = (0.3, 0.0 if include_background else -2.0, 0.0)
-    pos = (0.3, target[1] - 4.5, 9.0)
+    """Elevated mezzanine view across the battery-recycling warehouse and twin conveyors."""
+    target = (0.45, 0.15 if include_background else -1.8, -0.05)
+    pos = (0.45, -5.85, 3.45 if include_background else 2.65)
     spec.worldbody.add_camera(
-        name=OVERVIEW_CAMERA, pos=list(pos), xyaxes=look_at_xyaxes(pos, target), fovy=60.0
+        name=OVERVIEW_CAMERA, pos=list(pos), xyaxes=look_at_xyaxes(pos, target), fovy=56.0
     )
 
 
@@ -292,6 +292,7 @@ def build_four_bay_spec(
     from teleop.retarget.clutch import add_rescue_cameras
 
     spec = _new_spec("atc_four_bay")
+    add_warehouse(spec, include_background_bays)
     poses = {1: bay1_pose, 2: bay2_pose}
     if include_background_bays:
         poses.update({bay_id: CANONICAL_LATCH for bay_id in BACKGROUND_BAYS})
