@@ -19,6 +19,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.atc.hud import ConveyorStatus
+from teleop.sim.cells import CONVEYOR_SPEED_M_S
+
 DEFAULT_CYCLE_PATH = Path(__file__).parent / "data" / "background_cycle.npz"
 BLEND_S = 0.5
 PHASE_OFFSETS: dict[int, float] = {3: 0.37, 4: 0.71}
@@ -26,6 +29,8 @@ LATCH_JOINTS = frozenset({"bolt_slide", "flap_hinge"})  # snap at the wrap: a ne
 SAMPLE_HZ = 30.0
 RECORD_DWELL_S = 1.0
 SOURCE_BAY = 1
+_BG_FEED_IN_END_S = 1.32
+_BG_FEED_OUT_START_S = 3.25
 
 FloatArray = NDArray[np.float64]
 
@@ -131,6 +136,8 @@ class BackgroundPlayer:
             col += width
         # bay -> list of (cycle column, qpos address, width)
         self._maps: dict[int, list[tuple[int, int, int]]] = {}
+        self._last_t: dict[int, float] = {}
+        self._belt_dist: dict[int, float] = {}
         for bay in bays:
             mapping: list[tuple[int, int, int]] = []
             for name, adr, width in _bay_joints(model, bay):
@@ -153,6 +160,43 @@ class BackgroundPlayer:
             for col, adr, width in mapping:
                 data.qpos[adr : adr + width] = q[col : col + width]
             out[bay] = conf
+        return out
+
+    def conveyor_statuses(self, wall_t: float, *, estop: bool = False) -> dict[int, ConveyorStatus]:
+        """Compute segmented conveyor belt status (feed in -> pause -> advance out) for Bays 3-4."""
+        dur = self.cycle.duration_s
+        out: dict[int, ConveyorStatus] = {}
+        for bay in self._maps:
+            t_eff = self._last_t.get(bay, wall_t) if estop else wall_t
+            self._last_t[bay] = t_eff
+            phase = PHASE_OFFSETS.get(bay, 0.0) * dur
+            t_total = max(0.0, t_eff + phase)
+            t_in = t_total % dur if dur > 0.0 else 0.0
+            feed_out_dur = max(0.0, dur - _BG_FEED_OUT_START_S)
+            feed_per_cycle = (_BG_FEED_IN_END_S + feed_out_dur) * CONVEYOR_SPEED_M_S
+            n_cycles = int(t_total // dur) if dur > 0.0 else 0
+            if t_in < _BG_FEED_IN_END_S:
+                mode = "feeding"
+                pack_dy = -(_BG_FEED_IN_END_S - t_in) * CONVEYOR_SPEED_M_S
+                cycle_dist = t_in * CONVEYOR_SPEED_M_S
+            elif t_in < _BG_FEED_OUT_START_S:
+                mode = "paused"
+                pack_dy = 0.0
+                cycle_dist = _BG_FEED_IN_END_S * CONVEYOR_SPEED_M_S
+            else:
+                mode = "feeding"
+                pack_dy = (t_in - _BG_FEED_OUT_START_S) * CONVEYOR_SPEED_M_S
+                cycle_dist = (
+                    _BG_FEED_IN_END_S + (t_in - _BG_FEED_OUT_START_S)
+                ) * CONVEYOR_SPEED_M_S
+            belt_dist = n_cycles * feed_per_cycle + cycle_dist
+            self._belt_dist[bay] = belt_dist
+            out[bay] = ConveyorStatus(
+                bay_id=bay,
+                mode="estop" if estop else mode,
+                belt_dist_m=belt_dist,
+                pack_dy_m=pack_dy,
+            )
         return out
 
 

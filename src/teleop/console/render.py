@@ -29,11 +29,21 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from teleop.atc.hud import ConveyorStatus
 from teleop.console.background import BackgroundCycle, BackgroundPlayer
 from teleop.console.layout import FeedSpec, ViewState, feed_layout
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
-from teleop.sim.cells import WALL_HEIGHT_M, cell_bounds
+from teleop.sim.cells import (
+    BEACON_ESTOP_RGBA,
+    BEACON_FEED_RGBA,
+    BEACON_PAUSE_RGBA,
+    CONVEYOR_BAYS,
+    CONVEYOR_CLEAT_PITCH_M,
+    WAREHOUSE_BOUNDS,
+    WAREHOUSE_FLOOR_Z,
+    WAREHOUSE_ROOF_Z,
+)
 from teleop.unoq.dmp import mat_to_quat
 
 mj: Any = _mujoco
@@ -119,6 +129,32 @@ def _qrot_wxyz(
     )
 
 
+def _bay_conveyor_rig(
+    model: Any,
+) -> tuple[dict[int, list[tuple[int, float]]], dict[int, list[tuple[int, float]]], dict[int, int]]:
+    cleats: dict[int, list[tuple[int, float]]] = {k: [] for k in CONVEYOR_BAYS}
+    bodies: dict[int, list[tuple[int, float]]] = {k: [] for k in CONVEYOR_BAYS}
+    beacons: dict[int, int] = {}
+    for i in range(int(model.ngeom)):
+        name = str(model.geom(i).name)
+        for k in CONVEYOR_BAYS:
+            if name.startswith(f"conveyor_cleat_bay{k}_"):
+                cleats[k].append((i, float(model.geom_pos[i][1])))
+            elif name == f"bay{k}/conveyor_beacon":
+                beacons[k] = i
+    for b in range(int(model.nbody)):
+        name = str(model.body(b).name)
+        for k in CONVEYOR_BAYS:
+            if name in (
+                f"bay{k}/cell_jig_pack",
+                f"bay{k}/latch_base",
+                f"conveyor_bay{k}_in_pack",
+                f"conveyor_bay{k}_out_pack",
+            ):
+                bodies[k].append((b, float(model.body_pos[b][1])))
+    return cleats, bodies, beacons
+
+
 class FeedRenderer:
     """Renders feeds to JPEG. Construct and use on one thread (it owns GL contexts)."""
 
@@ -129,9 +165,20 @@ class FeedRenderer:
         self.data: Any = mj.MjData(self.model)
         self.background = background
         self.quality = quality
+        self.bg_conveyors: dict[int, ConveyorStatus] = {}
         self._renderers: dict[tuple[int, int], Any] = {}
         self._bay_lights = _bay_lights(self.model)
+        self._bay_shadow_lights: dict[int, list[int]] = {
+            b: [i for i in ids if bool(self.model.light_castshadow[i])]
+            for b, ids in self._bay_lights.items()
+        }
+        self._all_bay_shadows: frozenset[int] = frozenset(
+            i for ids in self._bay_shadow_lights.values() for i in ids
+        )
+        self._bay_cleats, self._bay_moving_bodies, self._bay_beacons = _bay_conveyor_rig(self.model)
         self._base_active = np.array(self.model.light_active, dtype=np.uint8).copy()
+        self._base_zfar = float(self.model.vis.map.zfar)
+        self._extent = max(float(self.model.stat.extent), 1e-3)
         self._base_cam_fovy = np.array(self.model.cam_fovy, dtype=np.float64).copy()
         self._base_cam_pos = np.array(self.model.cam_pos, dtype=np.float64).copy()
         self._base_cam_quat = np.array(self.model.cam_quat, dtype=np.float64).copy()
@@ -196,8 +243,9 @@ class FeedRenderer:
                 self.model.cam_quat[cid] = q_orb
                 continue
 
-            # World-frame cell cameras (cctv, top_ortho, side_ortho): turntable orbit + view pan.
-            d0 = 0.60 if is_ortho else 1.64
+            # World-frame warehouse & bay cameras (overview, cctv, top_ortho, side_ortho).
+            is_overview = feed.camera == "overview"
+            d0 = 0.60 if is_ortho else (6.95 if is_overview else 1.85)
             fwd0 = np.array(_qrot_wxyz(q0, (0.0, 0.0, -1.0)), dtype=np.float64)
             pivot0 = pos0 + d0 * fwd0
             r0 = pos0 - pivot0
@@ -223,19 +271,22 @@ class FeedRenderer:
                 r_orb = r0
                 q_orb = q0
 
-            pan_scale = fovy0 if is_ortho else 1.15
+            pan_scale = fovy0 if is_ortho else (2.80 if is_overview else 1.15)
             dp = np.array(
                 _qrot_wxyz(q_orb, (-feed.pan_x * pan_scale * aspect, feed.pan_y * pan_scale, 0.0)),
                 dtype=np.float64,
             )
             pivot = pivot0 + dp
             pos_new = pivot + r_orb
-            if not is_ortho and feed.bay in (1, 2, 3, 4):
-                x0, x1, y0, y1 = cell_bounds(feed.bay)
-                margin = 0.12
+            if not is_ortho and (is_overview or feed.bay in (1, 2, 3, 4)):
+                x0, x1, y0, y1 = WAREHOUSE_BOUNDS
+                margin = 0.22
                 pos_new[0] = min(x1 - margin, max(x0 + margin, float(pos_new[0])))
                 pos_new[1] = min(y1 - margin, max(y0 + margin, float(pos_new[1])))
-                pos_new[2] = min(WALL_HEIGHT_M - margin, max(margin, float(pos_new[2])))
+                pos_new[2] = min(
+                    WAREHOUSE_ROOF_Z - margin,
+                    max(WAREHOUSE_FLOOR_Z + margin, float(pos_new[2])),
+                )
                 q_final = _look_at_wxyz(pos_new, pivot) if rotated else q_orb
             else:
                 q_final = q_orb
@@ -255,9 +306,40 @@ class FeedRenderer:
         if not self._bay_lights:
             active[:] = self._base_active
             return
-        active[:] = 0
-        for i in self._bay_lights.get(bay, []):
+        # Keep warehouse daylight and non-shadow workstation fills active so background bays
+        # and the warehouse stay lit, while paying for at most one shadow map per rendered feed.
+        active[:] = self._base_active
+        for i in self._all_bay_shadows:
+            active[i] = 0
+        target_bay = 1 if bay == 0 else bay
+        for i in self._bay_shadow_lights.get(target_bay, []):
             active[i] = self._base_active[i]
+
+    def _animate_conveyors(self, snap: SimSnapshot, wall_t: float) -> None:
+        bg_conveyors = (
+            self.background.conveyor_statuses(wall_t) if self.background is not None else {}
+        )
+        self.bg_conveyors = bg_conveyors
+        statuses: dict[int, ConveyorStatus] = {**bg_conveyors}
+        for c in snap.view.conveyors:
+            statuses[c.bay_id] = c
+        for bay in CONVEYOR_BAYS:
+            st = statuses.get(bay)
+            if st is None:
+                continue
+            shift = st.belt_dist_m % CONVEYOR_CLEAT_PITCH_M
+            for gid, base_y in self._bay_cleats[bay]:
+                self.model.geom_pos[gid, 1] = base_y + shift
+            for bid, base_y in self._bay_moving_bodies[bay]:
+                self.model.body_pos[bid, 1] = base_y + st.pack_dy_m
+            beacon = self._bay_beacons.get(bay)
+            if beacon is not None:
+                rgba = (
+                    BEACON_ESTOP_RGBA
+                    if st.mode == "estop"
+                    else (BEACON_FEED_RGBA if st.mode == "feeding" else BEACON_PAUSE_RGBA)
+                )
+                self.model.geom_rgba[beacon] = rgba
 
     def render(
         self, snap: SimSnapshot, feeds: Sequence[FeedSpec], wall_t: float
@@ -268,12 +350,19 @@ class FeedRenderer:
             d.mocap_pos[:] = snap.mocap_pos
             d.mocap_quat[:] = snap.mocap_quat
         conf = self.background.apply(d, wall_t) if self.background is not None else {}
+        self._animate_conveyors(snap, wall_t)
         self._apply_zoom_pan(feeds)
         mj.mj_kinematics(self.model, d)
         mj.mj_camlight(self.model, d)
         frames: list[tuple[int, bytes]] = []
         for feed in feeds:
             self._light_only(feed.bay)
+            cam_id = int(self.model.camera(feed.camera).id)
+            is_ortho = int(self.model.cam_projection[cam_id]) == int(
+                mj.mjtProjection.mjPROJ_ORTHOGRAPHIC
+            )
+            # Clip distant stations along the same conveyor line out of orthographic close-ups.
+            self.model.vis.map.zfar = (1.15 / self._extent) if is_ortho else self._base_zfar
             r = self._renderer(feed.width, feed.height)
             r.update_scene(d, feed.camera)  # every feed shows the full arm and hand
             pixels = r.render()
@@ -329,6 +418,7 @@ class RenderWorker(threading.Thread):
         self.stats = RenderStats()
         self._stop_event = threading.Event()
         self._bg_conf: Mapping[int, float] = {}
+        self._bg_conveyors: Mapping[int, ConveyorStatus] = {}
         self._view_lock = threading.Lock()
         self._view_state: ViewState | None = None
         self._dummy_status = dummy_status
@@ -355,6 +445,7 @@ class RenderWorker(threading.Thread):
             self._bg_conf,
             view_state=vstate,
             dummy_status=dstat,
+            background_conveyors=self._bg_conveyors,
         )
         self.server.publish_telemetry(msg)
 
@@ -422,6 +513,7 @@ class RenderWorker(threading.Thread):
         for slot, jpeg in frames:
             self.server.publish_frame(slot, layout_id, jpeg)
         self._bg_conf = conf
+        self._bg_conveyors = getattr(self._renderer, "bg_conveyors", {})
         self.stats.frames += 1
         self.stats.total_frame_ms += (time.perf_counter() - t0) * 1000.0
         return self.frame_period - (time.monotonic() - tick)

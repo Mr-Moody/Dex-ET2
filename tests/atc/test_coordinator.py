@@ -740,3 +740,44 @@ def test_arm_torque_breach_in_autonomous_replay_aborts_retracts_and_escalates(
     assert co.rig(2).bolt_x() < BOLT_CLEARED_M
     assert co.outcome(2) == "aborted: arm torque limit"
     assert len(rig.sink.events) == n_events + 1  # no further alerts
+
+
+def test_conveyor_feeds_in_pauses_advances_and_estops_concerned_bay_only(rig: Rig) -> None:
+    co = rig.co
+    co.tick()
+    assert co.conveyor_status(1).mode == "feeding"
+    assert co.conveyor_status(1).pack_dy_m < 0.0
+
+    # Once the arm finishes approach and starts pushing, the belt pauses at the workstation.
+    for _ in range(400):
+        co.tick()
+        if co.in_routine(1):
+            break
+    assert co.in_routine(1)
+    assert co.conveyor_status(1).mode == "paused"
+    assert co.conveyor_status(1).pack_dy_m == pytest.approx(0.0)
+
+    # On clearance, the belt advances the finished pack forward.
+    for _ in range(400):
+        co.tick()
+        if co.outcome(1) == "cleared":
+            break
+    assert co.outcome(1) == "cleared"
+    dist_before = co.conveyor_status(1).belt_dist_m
+    for _ in range(20):
+        co.tick()
+    assert co.conveyor_status(1).mode == "feeding"
+    assert co.conveyor_status(1).belt_dist_m > dist_before
+    assert co.conveyor_status(1).pack_dy_m > 0.0
+
+    # An emergency stall on Bay 1 stops ONLY Bay 1's segmented belt; Bay 2 keeps operating.
+    co.start_cycle(1, flap_jammed=True)
+    rig.run_until(1, {BayState.RESCUE})
+    st1 = co.conveyor_status(1)
+    assert st1.mode == "estop"
+    dist_estop = st1.belt_dist_m
+    for _ in range(15):
+        co.tick()
+    assert co.conveyor_status(1).mode == "estop"
+    assert co.conveyor_status(1).belt_dist_m == pytest.approx(dist_estop)
+    assert co.conveyor_status(2).mode != "estop"

@@ -29,10 +29,23 @@ const STATE_COLOR = {
   STANDBY: "--standby",
 };
 const VIEW_TEXT = {
-  cctv: "Cell camera",
+  overview: "Mezzanine camera",
+  cctv: "Conveyor station",
   wrist_cam: "Wrist cam",
   top_ortho: "Top view",
   side_ortho: "Side view",
+};
+const BAY_ZONE = {
+  0: "4 Segmented Conveyors · 4 Stations",
+  1: "Belt 1 · SW Station",
+  2: "Belt 2 · SE Station",
+  3: "Belt 3 · NW Station",
+  4: "Belt 4 · NE Station",
+};
+const BELT_TEXT = {
+  feeding: "Belt feeding",
+  paused: "Belt paused",
+  estop: "Belt E-STOP",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -335,29 +348,34 @@ function attachDragEvents(el, bayId, role) {
 }
 
 function feedTile(bayId, camera, role, bayInfo) {
+  const isOverview = bayId === 0 || camera === "overview";
   const el = document.createElement("div");
   el.className = `feed feed--${role}`;
   el.dataset.bay = String(bayId);
   el.dataset.camera = camera || "";
   el.tabIndex = 0;
-  const view = camera ? camera.split("/")[1] : "cctv";
+  const view = isOverview ? "overview" : (camera ? camera.split("/")[1] : "cctv");
   const isPinned = role === "main";
   if (isPinned) el.classList.add("is-pinned");
+  const title = isOverview ? "Plant Overview" : `Bay ${bayId}`;
+  const zone = BAY_ZONE[bayId] || "";
   el.innerHTML = `
     <img alt="" data-cam="${camera || ""}">
     <div class="feed__top">
-      <span class="feed__name">Bay ${bayId}</span>
+      <span class="feed__name">${title}</span>
+      ${zone ? `<span class="feed__zone">${zone}</span>` : ""}
       <span class="feed__view">${VIEW_TEXT[view] || ""}</span>
       <button type="button" class="feed__zoom" hidden title="Scroll: zoom · Shift+drag: pan · Right-drag: rotate · Click to reset">1.0×</button>
-      <span class="feed__state"></span>
+      <span class="feed__state">${isOverview ? "Live warehouse" : ""}</span>
       <span class="feed__conf"></span>
     </div>
     <div class="feed__tools"></div>
     <div class="feed__bottom">
       <span class="feed__rec">REC</span>
       <time class="feed__time"></time>
+      ${isOverview ? "" : '<span class="feed__belt" hidden></span>'}
       <span class="feed__armed" hidden></span>
-      <span class="feed__replay"></span>
+      <span class="feed__replay">${isOverview ? "EV battery disassembly recycling line" : ""}</span>
     </div>
     <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>`;
 
@@ -365,7 +383,7 @@ function feedTile(bayId, camera, role, bayInfo) {
   el.querySelector(".feed__zoom").addEventListener("click", stop(() => resetCamZoom(camera)));
 
   const tools = el.querySelector(".feed__tools");
-  if (role === "tile") {
+  if (role === "tile" && !isOverview) {
     for (const [camKey, label] of CAM_BTNS) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -389,7 +407,7 @@ function feedTile(bayId, camera, role, bayInfo) {
       tools.append(zb);
     }
   }
-  if (role !== "strip" && bayInfo && !bayInfo.background && bayInfo.state !== "STANDBY") {
+  if (!isOverview && role !== "strip" && bayInfo && !bayInfo.background && bayInfo.state !== "STANDBY") {
     const jamBtn = document.createElement("button");
     jamBtn.type = "button";
     jamBtn.className = "ftool ftool--warn";
@@ -400,14 +418,21 @@ function feedTile(bayId, camera, role, bayInfo) {
   const pinBtn = document.createElement("button");
   pinBtn.type = "button";
   pinBtn.className = `ftool${isPinned ? " is-active" : ""}`;
-  pinBtn.textContent = isPinned ? "Unpin" : "Pin";
-  pinBtn.addEventListener("click", stop(() => (isPinned ? setLayoutMode("grid", null) : setLayoutMode("pin", bayId))));
+  pinBtn.textContent = isPinned ? (isOverview ? "4-Up" : "Unpin") : "Pin";
+  pinBtn.addEventListener(
+    "click",
+    stop(() => (isPinned ? setLayoutMode("grid", null) : setLayoutMode("pin", bayId)))
+  );
   tools.append(pinBtn);
 
-  el.addEventListener("click", () => selectBay(bayId));
-  el.addEventListener("dblclick", (e) => { e.stopPropagation(); togglePinBay(bayId); });
-  el.addEventListener("keydown", (e) => { if (e.key === "Enter") selectBay(bayId); });
-  attachDragEvents(el, bayId, role);
+  if (!isOverview) {
+    el.addEventListener("click", () => selectBay(bayId));
+    el.addEventListener("dblclick", (e) => { e.stopPropagation(); togglePinBay(bayId); });
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter") selectBay(bayId); });
+    attachDragEvents(el, bayId, role);
+  } else {
+    el.addEventListener("dblclick", (e) => { e.stopPropagation(); setLayoutMode("grid", null); });
+  }
   attachZoomPan(el, camera, role);
   return el;
 }
@@ -448,41 +473,47 @@ function buildWall(t) {
   const order = (t.view && t.view.bay_order) || currentOrder();
   const mains = t.feeds.filter((x) => x.role === "main");
 
-  wall.classList.remove("is-rescue", "is-pin");
+  wall.classList.remove("is-rescue", "is-pin", "is-overview");
 
   if (mains.length > 0) {
     const focusBay = mains[0].bay;
-    const isRescueFocus = !!(t.rescue && t.rescue.bay === focusBay);
-    wall.classList.add(isRescueFocus ? "is-rescue" : "is-pin");
+    const isOverviewFocus = focusBay === 0 || mains[0].camera === "overview";
+    const isRescueFocus = !isOverviewFocus && !!(t.rescue && t.rescue.bay === focusBay);
+    wall.classList.add(isOverviewFocus ? "is-overview" : (isRescueFocus ? "is-rescue" : "is-pin"));
 
     const head = document.createElement("div");
     head.className = "takeover";
-    const focusInfo = bayMap.get(focusBay);
-    const refusedBay = focusInfo && focusInfo.state === "OOD_ESCALATED";
-    const subtitle = isRescueFocus
-      ? refusedBay ? "refused stall" : "operator rescue"
-      : "pinned focus";
-    head.innerHTML = `<h2>Bay ${focusBay} · ${subtitle}</h2>`;
+    if (isOverviewFocus) {
+      head.innerHTML =
+        "<h2>Plant Overview · Sustainable EV Battery Recycling Warehouse</h2>";
+    } else {
+      const focusInfo = bayMap.get(focusBay);
+      const refusedBay = focusInfo && focusInfo.state === "OOD_ESCALATED";
+      const subtitle = isRescueFocus
+        ? refusedBay ? "refused stall" : "operator rescue"
+        : "pinned focus";
+      head.innerHTML = `<h2>Bay ${focusBay} (${BAY_ZONE[focusBay] || ""}) · ${subtitle}</h2>`;
 
-    const camGroup = document.createElement("div");
-    camGroup.className = "takeover__views";
-    const activeCam =
-      mains.length > 1
-        ? (mains[0].camera.endsWith("/wrist_cam") ? "wrist_split" : "split")
-        : (mains[0].camera.split("/")[1] || "cctv");
-    for (const [camKey, label] of [
-      ...CAM_BTNS,
-      ["wrist_split", "Wrist + Top"],
-      ["split", "Top + Side"],
-    ]) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = `vbtn${activeCam === camKey ? " is-active" : ""}`;
-      btn.textContent = label;
-      btn.addEventListener("click", () => setBayCamera(focusBay, camKey));
-      camGroup.append(btn);
+      const camGroup = document.createElement("div");
+      camGroup.className = "takeover__views";
+      const activeCam =
+        mains.length > 1
+          ? (mains[0].camera.endsWith("/wrist_cam") ? "wrist_split" : "split")
+          : (mains[0].camera.split("/")[1] || "cctv");
+      for (const [camKey, label] of [
+        ...CAM_BTNS,
+        ["wrist_split", "Wrist + Top"],
+        ["split", "Top + Side"],
+      ]) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `vbtn${activeCam === camKey ? " is-active" : ""}`;
+        btn.textContent = label;
+        btn.addEventListener("click", () => setBayCamera(focusBay, camKey));
+        camGroup.append(btn);
+      }
+      head.append(camGroup);
     }
-    head.append(camGroup);
 
     const spacer = document.createElement("span");
     spacer.className = "takeover__spacer";
@@ -561,7 +592,13 @@ function buildWall(t) {
 function updateWall(t) {
   const bays = new Map(t.bays.map((b) => [b.id, b]));
   for (const el of $("wall").querySelectorAll(".feed")) {
-    const b = bays.get(Number(el.dataset.bay));
+    const bayNum = Number(el.dataset.bay);
+    if (bayNum === 0) {
+      const time = el.querySelector(".feed__time");
+      if (time) time.textContent = t.wall;
+      continue;
+    }
+    const b = bays.get(bayNum);
     if (!b) continue;
     if (el.dataset.state !== "STANDBY" || b.state !== "STANDBY") el.dataset.state = b.state;
     el.classList.toggle("is-selected", t.selected_bay === b.id && t.mode !== "rescue");
@@ -578,6 +615,15 @@ function updateWall(t) {
       const f = b.fault;
       armed.hidden = !f;
       armed.textContent = f ? (FAULT_TEXT[f.phase] || {})[f.kind] || "Fault" : "";
+    }
+    const belt = el.querySelector(".feed__belt");
+    if (belt) {
+      const mode = b.conveyor && b.conveyor.mode;
+      belt.hidden = !mode;
+      if (mode) {
+        belt.dataset.mode = mode;
+        belt.textContent = BELT_TEXT[mode] || mode;
+      }
     }
   }
   if (t.mode === "rescue" && t.rescue) {
@@ -966,6 +1012,8 @@ function syncViewBar() {
   const t = ui.telemetry;
   const vmode = (t && t.view && t.view.mode) || ui.view.mode;
   const pinned = t && t.view ? t.view.pinned_bay : ui.view.pinnedBay;
+  const ovBtn = $("view-overview");
+  if (ovBtn) ovBtn.classList.toggle("is-active", vmode === "overview");
   $("view-grid").classList.toggle("is-active", vmode === "grid");
   $("view-auto").classList.toggle("is-active", vmode === "auto");
   for (const btn of $("pin-bar").querySelectorAll(".vbtn--pin")) {
@@ -1163,6 +1211,12 @@ function selectBay(bayId) {
 }
 
 function initViewBar() {
+  const ovBtn = $("view-overview");
+  if (ovBtn) {
+    ovBtn.addEventListener("click", () =>
+      setLayoutMode(ui.view.mode === "overview" ? "auto" : "overview", null)
+    );
+  }
   $("view-grid").addEventListener("click", () => setLayoutMode("grid", null));
   $("view-auto").addEventListener("click", () => setLayoutMode("auto", null));
   const pinBar = $("pin-bar");

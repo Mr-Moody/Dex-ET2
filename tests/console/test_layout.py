@@ -76,3 +76,19 @@ def test_force_equal_grid_and_custom_bay_order() -> None:
         (2, "bay4/cctv", 4, "tile"),
         (3, "bay2/cctv", 2, "tile"),
     ]
+
+
+def test_warehouse_overview_layout() -> None:
+    from teleop.console.layout import ViewState
+
+    vs = ViewState(mode="overview", zooms={"overview": (1.5, 0.1, -0.1, 0.2, 0.0)})
+    f = feed_layout([1, 2, 3, 4], None, vs)
+    assert (f[0].slot, f[0].camera, f[0].bay, f[0].role) == (0, "overview", 0, "main")
+    assert (f[0].width, f[0].height) == MAIN
+    assert f[0].zoom == 1.5
+    assert [(s.slot, s.camera, s.bay, s.role) for s in f[1:]] == [
+        (1, "bay1/cctv", 1, "strip"),
+        (2, "bay2/cctv", 2, "strip"),
+        (3, "bay3/cctv", 3, "strip"),
+        (4, "bay4/cctv", 4, "strip"),
+    ]

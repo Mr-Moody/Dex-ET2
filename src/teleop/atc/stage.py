@@ -697,6 +697,7 @@ class StageController:
             unoq=self.unoq_label,
             actions=tuple(self.actions),
             faults=self._faults_view(),
+            conveyors=co.conveyors(),
         )
 
     def _faults_view(self) -> tuple[tuple[int, str, str], ...]:

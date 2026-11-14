@@ -488,6 +488,11 @@ def _run_viewer(
 
         launch = mujoco.viewer.launch_passive  # pyright: ignore
     co = controller.coordinator
+    bg_player = None
+    if getattr(controller, "background_bays", ()):
+        from teleop.console.background import BackgroundPlayer, load_cycle
+
+        bg_player = BackgroundPlayer(load_cycle(), co.model)
     with launch(co.model, co.data, key_callback=controller.on_key) as viewer:
         next_overlay_s = 0.0
         last_overlay: Any = None
@@ -499,6 +504,12 @@ def _run_viewer(
             sample = operator()
             with viewer.lock():
                 controller.tick(sample)
+                if bg_player is not None:
+                    import mujoco as _mj  # pyright: ignore[reportMissingTypeStubs]
+
+                    mj_any: Any = _mj
+                    bg_player.apply(co.data, co.time_s)
+                    mj_any.mj_kinematics(co.model, co.data)
                 overlay = None
                 if co.time_s >= next_overlay_s:
                     next_overlay_s = co.time_s + 1.0 / HUD_OVERLAY_HZ

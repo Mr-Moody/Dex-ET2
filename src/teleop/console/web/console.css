@@ -59,16 +59,31 @@ body {
   align-items: center;
   gap: 12px;
   padding: 0 16px;
+  border-top: 2px solid var(--nominal);
   border-bottom: 1px solid var(--hair);
-  background: var(--panel);
+  background: linear-gradient(90deg, #1b2823 0%, var(--panel) 36%, var(--panel) 100%);
 }
 .bar__site { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .bar__mark {
   flex: none;
   width: 14px; height: 14px;
-  background: repeating-linear-gradient(-45deg, var(--safety) 0 4px, #111 4px 8px);
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--nominal) 0 55%, var(--safety) 55% 100%);
 }
 .bar h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.01em; white-space: nowrap; }
+.bar__eco {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 3px;
+  border: 1px solid rgb(63 178 127 / 0.5);
+  background: rgb(63 178 127 / 0.14);
+  color: #6ce0ac;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
 .bar__line { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar__badge {
   flex: none;
@@ -301,9 +316,10 @@ body {
   grid-template-rows: 1fr 1fr;
 }
 
-/* focus / rescue mode: 1 big stage on the left + 3 other bays stacked on the right */
+/* focus / rescue / warehouse overview mode: 1 big stage on the left + bays stacked on the right */
 .wall.is-rescue,
-.wall.is-pin {
+.wall.is-pin,
+.wall.is-overview {
   grid-template-columns: minmax(0, 1fr) clamp(195px, 23%, 305px);
   grid-template-rows: auto minmax(0, 1fr);
   padding: 12px;
@@ -317,6 +333,10 @@ body {
 }
 .wall.is-pin {
   border: 2px solid var(--hair);
+  margin: 4px var(--gap) 0;
+}
+.wall.is-overview {
+  border: 2px solid rgb(63 178 127 / 0.5);
   margin: 4px var(--gap) 0;
 }
 @keyframes takeover { from { opacity: 0.4; transform: scale(0.985); } to { opacity: 1; transform: none; } }
@@ -365,12 +385,24 @@ body {
   grid-row: 2;
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
   gap: var(--gap);
   min-width: 0;
   min-height: 0;
 }
 .strip.is-drop-target { outline: 2px dashed var(--safety); outline-offset: 2px; }
+.feed__zone {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgb(25 46 37 / 0.82);
+  border: 1px solid rgb(63 178 127 / 0.42);
+  color: #8ee5be;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.feed--strip .feed__zone { display: none; }
 
 /* ---------------------------------------------------------------- camera feed */
 
@@ -448,6 +480,35 @@ body {
 .feed__rec::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--stalled); animation: rec 1.6s steps(2, jump-none) infinite; }
 @keyframes rec { 50% { opacity: 0.2; } }
 .feed__replay { margin-left: auto; }
+.feed__belt {
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--hair);
+  background: rgb(20 26 28 / 0.85);
+  color: var(--muted);
+  text-shadow: none;
+}
+.feed__belt[data-mode="feeding"] {
+  border-color: rgb(63 178 127 / 0.7);
+  background: rgb(22 64 46 / 0.85);
+  color: #7eeab7;
+}
+.feed__belt[data-mode="paused"] {
+  border-color: rgb(242 183 5 / 0.6);
+  background: rgb(56 46 16 / 0.82);
+  color: #f6cf5d;
+}
+.feed__belt[data-mode="estop"] {
+  border-color: var(--stalled);
+  background: rgb(118 20 26 / 0.92);
+  color: #ffd3d6;
+  animation: alarm 1s ease-in-out infinite;
+}
+.feed--strip .feed__belt { display: none; }
 .feed__armed {
   padding: 1px 8px;
   border: 1px solid var(--safety);
@@ -705,7 +766,7 @@ body {
   body { grid-template-rows: auto auto auto; }
   .desk { grid-template-columns: 1fr; }
   .wall { grid-template-columns: 1fr; grid-auto-rows: 56vw; grid-template-rows: none; }
-  .wall.is-rescue, .wall.is-pin { grid-template-columns: 1fr; grid-template-rows: auto 58vw auto; }
+  .wall.is-rescue, .wall.is-pin, .wall.is-overview { grid-template-columns: 1fr; grid-template-rows: auto 58vw auto; }
   .focus-stage { grid-column: 1; grid-row: 2; }
   .strip { grid-column: 1; grid-row: 3; grid-template-columns: repeat(3, 1fr); grid-template-rows: 100px; }
   .rail { border-left: 0; }

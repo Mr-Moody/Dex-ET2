@@ -50,6 +50,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from teleop.atc.hud import ConveyorMode, ConveyorStatus
 from teleop.atc.recovery import (
     BaySignals,
     CoordinatorObserver,
@@ -105,6 +106,7 @@ from teleop.sim.bays import (
     build_four_bay_scene,
     reset_robot_home,
 )
+from teleop.sim.cells import CONVEYOR_FEED_TRAVEL_M, CONVEYOR_SPEED_M_S
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
@@ -346,6 +348,9 @@ class _Bay:
     prev_cmd_pos: FloatArray | None = None
     prev_wrist_pos: FloatArray | None = None
     outcome: str = ""
+    belt_mode: ConveyorMode = "feeding"
+    belt_dist_m: float = 0.0
+    pack_dy_m: float = -CONVEYOR_FEED_TRAVEL_M
 
 
 class AtcCoordinator:
@@ -504,6 +509,18 @@ class AtcCoordinator:
     def outcome(self, bay_id: int) -> str:
         return self._bays[bay_id].outcome
 
+    def conveyor_status(self, bay_id: int) -> ConveyorStatus:
+        bay = self._bays[bay_id]
+        return ConveyorStatus(
+            bay_id=bay_id,
+            mode=bay.belt_mode,
+            belt_dist_m=bay.belt_dist_m,
+            pack_dy_m=bay.pack_dy_m,
+        )
+
+    def conveyors(self) -> tuple[ConveyorStatus, ...]:
+        return tuple(self.conveyor_status(b) for b in sorted(self._bays))
+
     # ------------------------------------------------------------------ cycle control
 
     def start_cycle(
@@ -545,6 +562,8 @@ class AtcCoordinator:
         bay.match = None
         bay.skill_id = None
         bay.outcome = ""
+        bay.pack_dy_m = -CONVEYOR_FEED_TRAVEL_M
+        bay.belt_mode = "feeding"
         bay.breach_lock = False
         bay.trigger_reason = ""
         bay.confidence = 1.0
@@ -575,7 +594,38 @@ class AtcCoordinator:
         for bay in self._bays.values():
             self._sense(bay)
         self._promote()
+        self._update_conveyors(console)
         return self.snapshots()
+
+    def _update_conveyors(self, console: ConsoleInputState) -> None:
+        step = CONVEYOR_SPEED_M_S * CONTROL_DT
+        for bay in self._bays.values():
+            if console.estop or bay.state in (
+                BayState.STALLED,
+                BayState.QUEUED,
+                BayState.RESCUE,
+                BayState.OOD_ESCALATED,
+                BayState.VALIDATING,
+            ):
+                bay.belt_mode = "estop"
+                continue
+            if (
+                bay.state == BayState.NOMINAL
+                and bay.approach is not None
+                and bay.approach.index < 2
+            ):
+                bay.belt_mode = "feeding"
+                prev = bay.pack_dy_m
+                bay.pack_dy_m = min(0.0, prev + step)
+                bay.belt_dist_m += max(0.0, bay.pack_dy_m - prev)
+                continue
+            if bay.state == BayState.NOMINAL and not bay.routine_active and bool(bay.outcome):
+                bay.belt_mode = "feeding"
+                bay.pack_dy_m = min(0.30, bay.pack_dy_m + step)
+                bay.belt_dist_m += step
+                continue
+            bay.belt_mode = "paused"
+            bay.pack_dy_m = 0.0
 
     # ------------------------------------------------------------------ control phase
 
@@ -768,9 +818,12 @@ class AtcCoordinator:
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
                 bay.outcome = "cleared"
-                # Hold where the wrist is, not at the push target that leads it: a held lead
-                # keeps driving the bolt into its end stop through the stiff Inspire finger.
-                bay.hold_pose = rig.wrist_pose()
+                # Lift slightly clear of the bolt hook so the conveyor can advance the cleared pack.
+                wrist = rig.wrist_pose()
+                bay.hold_pose = wrist
+                bay.move = SmoothMove(
+                    wrist, translate_pose(wrist, np.array([0.0, 0.0, 0.08])), 0.25
+                )
                 bay.detector.reset()
                 return
             trigger = bay.detector.update(
@@ -1039,7 +1092,9 @@ class AtcCoordinator:
         bay.outcome = "cleared autonomously"
         bay.state = BayState.NOMINAL
         bay.routine_active = False
-        bay.hold_pose = bay.rig.wrist_pose()
+        wrist = bay.rig.wrist_pose()
+        bay.hold_pose = wrist
+        bay.move = SmoothMove(wrist, translate_pose(wrist, np.array([0.0, 0.0, 0.08])), 0.25)
         bay.prev_cmd_pos = None
         by = "the ACT policy" if act else (skill.skill_id if skill else "?")
         metadata: dict[str, Any] = {
