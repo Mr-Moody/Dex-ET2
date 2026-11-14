@@ -396,6 +396,9 @@ class McuConsoleBridge:
                         off = s.powered_off
                     else:
                         self._power_restore_pending = False
+                    # "No bay" (e.g. after an MCU reboot) keeps the last selection: compare
+                    # against that, or every heartbeat would look like a fresh change.
+                    bay = bay if bay is not None else s.selected_bay
                     if (s.selected_bay, s.clutch, s.estop, s.powered_off) != (
                         bay,
                         clutch,
@@ -404,7 +407,7 @@ class McuConsoleBridge:
                     ):
                         self._raw = replace(
                             s,
-                            selected_bay=bay if bay is not None else s.selected_bay,
+                            selected_bay=bay,
                             clutch=clutch,
                             estop=estop,
                             powered_off=off,
@@ -564,6 +567,14 @@ class McuConsoleBridge:
             self._raw = replace(self._raw, fault_rig_latched=False, timestamp_ns=self._clock())
             self._rig_edge_pending = False
         self._send(RESET_RIG_CMD)
+
+    def set_power_mask(self, off: Iterable[int]) -> None:
+        """Set which bays are cut (``CMD:POWER_MASK``), e.g. after the keyboard E-stop.
+
+        The state follows when the MCU echoes ``POWER`` lines, so a heartbeat already in flight
+        cannot make the change flicker.
+        """
+        self._send(f"CMD:POWER_MASK:{power_mask(off)}")
 
     def set_joy_map(self, code: str) -> None:
         """Use ``code`` (bays for stick X+, X-, Y+, Y-) now and after every MCU reboot."""
