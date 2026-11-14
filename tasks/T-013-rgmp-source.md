@@ -1,7 +1,7 @@
 ---
 id: T-013
 title: Rokoko SDK RGMP/RCSP source (stretch)
-status: blocked
+status: done
 owner: null
 branch: null
 depends_on: [T-012]
@@ -13,7 +13,7 @@ claimed_at: null
 
 Acceptance (from the plan):
 
-- [ ] test_split_frames_across_reads
-- [ ] test_decode_packed_unaligned_floats
-- [ ] test_disconnect_prefix_3
-- [ ] hypothesis fuzz: parse_frames never raises on random bytes
+- [x] test_split_frames_across_reads
+- [x] test_decode_packed_unaligned_floats
+- [x] test_disconnect_prefix_3
+- [x] hypothesis fuzz: parse_frames never raises on random bytes
