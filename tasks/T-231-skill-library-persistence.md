@@ -1,12 +1,12 @@
 ---
 id: T-231
 title: Persist the DMP skill library across runs
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: claude-code
+branch: feat/console-pages-data-collection
 depends_on: [T-230]
 plan: docs/superpowers/plans/2026-11-14-console-pages-data-collection.md
-claimed_at: null
+claimed_at: '2026-11-14T19:14:23+00:00'
 ---
 
 - [ ] `atc/skill_store.py`: load, atomic save on deploy, reset with backup

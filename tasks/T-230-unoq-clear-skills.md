@@ -1,7 +1,7 @@
 ---
 id: T-230
 title: Board clear_skills op to forget a SKU's skills and prototypes
-status: claimed
+status: in_review
 owner: claude-code
 branch: feat/console-pages-data-collection
 depends_on: []
