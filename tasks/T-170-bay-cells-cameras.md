@@ -1,7 +1,7 @@
 ---
 id: T-170
 title: Enclosed bay cells, lighting, per-bay CCTV and live rescue cameras
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: feat/bay-cells
 depends_on: []
