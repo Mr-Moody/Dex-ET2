@@ -143,3 +143,17 @@ def test_parse_audit(answer: dict[str, Any], status: str, tag: str | None) -> No
 def test_subsample_keeps_ends_and_order() -> None:
     assert subsample(list(range(10))) == [0, 2, 4, 5, 7, 9]
     assert subsample([1, 2]) == [1, 2]
+
+
+def test_atc_command_reviewer_feeds_console_audit_and_episode_sink() -> None:
+    from types import SimpleNamespace
+
+    from teleop.commands.atc import _audit_reviewer  # pyright: ignore[reportPrivateUsage]
+
+    controller, sink = SimpleNamespace(audit=None), FakeSink()
+    ccfg = CopilotConfig(gemini_api_key="test-key")
+    reviewer = _audit_reviewer(ccfg, controller, sink)  # pyright: ignore[reportArgumentType]
+    assert isinstance(reviewer, AuditReviewer) and reviewer._episode_sink is sink  # pyright: ignore[reportPrivateUsage]
+    reviewer._on_update(AuditReport("bay1-001", "pending", 1, "s", "ep"))  # pyright: ignore[reportPrivateUsage, reportOptionalCall]
+    reviewer.close()
+    assert controller.audit is not None and controller.audit["status"] == "pending"

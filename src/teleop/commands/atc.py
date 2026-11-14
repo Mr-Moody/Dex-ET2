@@ -553,7 +553,7 @@ def _run_booth(
         controller.coordinator.set_observer(sink_handle)
         stack.callback(_close_episodes, controller, sink_handle)
     if not cfg.headless:  # headless runs (CI, --generate) stay physics-only and deterministic
-        _setup_copilot(cfg, controller, stack)
+        _setup_copilot(cfg, controller, stack, sink_handle)
     if "--generate" in hooks:
         assert cfg.generate is not None
         n = int(hooks["--generate"](controller, sink_handle, cfg.generate, resolve_seed(cfg)))
@@ -596,12 +596,17 @@ def _run_booth(
 
 
 def _setup_copilot(
-    cfg: AtcConfig, controller: StageController, stack: contextlib.ExitStack
+    cfg: AtcConfig,
+    controller: StageController,
+    stack: contextlib.ExitStack,
+    episode_sink: Any = None,
 ) -> None:
     """Attach the Tier 2 grasp gate: Gemini, else local Gemma, else nothing (physics only).
 
     Advisory side effects only: the gate can withhold a skill from the Fleet Library and speaks
-    its verdict; it never sends console keys or commands a robot.
+    its verdict; it never sends console keys or commands a robot. With Gemini, the gate also
+    hands each judged rescue to the silent Tier 3 audit, whose report feeds the console card
+    (``controller.audit``) and tags the recorded episode for ``teleop process``.
     """
     from teleop.copilot.config import CopilotConfig
     from teleop.copilot.gate import build_grasp_gate
@@ -618,10 +623,25 @@ def _setup_copilot(
     speaker = _copilot_speaker(ccfg) if use_gemini and cfg.audio else None
     if speaker is not None:
         stack.callback(speaker.close)
-    gate = build_grasp_gate(ccfg, use_gemini=use_gemini, speaker=speaker)
+    reviewer = _audit_reviewer(ccfg, controller, episode_sink) if use_gemini else None
+    if reviewer is not None:
+        stack.callback(reviewer.close)  # after the gate (LIFO): the gate submits to it
+    gate = build_grasp_gate(ccfg, use_gemini=use_gemini, speaker=speaker, audit_reviewer=reviewer)
     stack.callback(gate.close)
     controller.coordinator.grasp_gate = gate
     logger.info("atc: grasp gate %s (%s)", gate.source, gate.model)
+
+
+def _audit_reviewer(ccfg: Any, controller: StageController, episode_sink: Any) -> Any:
+    """The Tier 3 Argon audit (Gemini only; never spoken). ``episode_sink`` may be None."""
+    from teleop.copilot.gemini import GeminiClient
+    from teleop.copilot.review import AuditReport, AuditReviewer
+
+    def on_update(report: AuditReport) -> None:
+        controller.audit = report.to_dict()  # read by the HUD view -> console telemetry
+
+    client = GeminiClient(ccfg.gemini_api_key, no_images=ccfg.no_images)
+    return AuditReviewer(client, cfg=ccfg, on_update=on_update, episode_sink=episode_sink)
 
 
 def _copilot_speaker(ccfg: Any) -> Any:
