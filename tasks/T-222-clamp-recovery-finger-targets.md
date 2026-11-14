@@ -1,12 +1,12 @@
 ---
 id: T-222
 title: Clamp recovery finger targets to the hand's ctrlrange so DMP episodes pass QC
-status: in_review
-owner: claude-code
-branch: fix/clamp-recovery-finger-targets
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: null
-claimed_at: '2026-11-14T19:39:29+00:00'
+claimed_at: null
 ---
 
 Found by an end-to-end run (`teleop atc --headless --script --record-episodes`, then
