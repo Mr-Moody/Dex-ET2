@@ -80,7 +80,7 @@ body {
   display: flex;
   align-items: center;
   gap: 1.1rem;
-  min-height: 2.9rem;
+  height: 2.9rem;  /* fixed: status changes must never resize the screen */
   padding: 0 16px;
   border-top: 2px solid var(--nominal);
   border-bottom: 1px solid var(--hair);
@@ -344,16 +344,19 @@ kbd {
 .takeover {
   grid-column: 1 / -1;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;  /* one row: Back to grid never drops down; the camera switch shrinks/scrolls */
   align-items: center;
   gap: 8px 1rem;
+  min-height: 2.2rem;  /* clutch / timer text changes must not change the row height */
 }
-.takeover h2 { font-size: var(--t-l); font-weight: 600; white-space: nowrap; }
+.takeover h2 { font-size: var(--t-l); font-weight: 600; white-space: nowrap; flex: none; }
 .takeover h2 span { color: var(--muted); font-weight: 400; }
-.takeover__views { margin-left: auto; }
+.takeover__views { margin-left: auto; min-width: 0; flex: 0 1 auto; overflow-x: auto; scrollbar-width: none; }
+.takeover .vbtn--solo { flex: none; }
 .takeover__spacer { display: none; }
 .takeover__timer { display: inline-flex; align-items: baseline; gap: 0.45rem; color: var(--muted); font-size: var(--t-xs); }
-.takeover__timer b { color: var(--text); font-size: var(--t-xl); font-weight: 300; min-width: 3.4em; }
+.takeover__timer { flex: none; white-space: nowrap; }
+.takeover__timer b { color: var(--text); font-size: var(--t-xl); font-weight: 300; min-width: 3.6em; display: inline-block; font-variant-numeric: tabular-nums; }
 .clutch {
   padding: 0.15rem 0.8rem;
   border: 2px solid var(--rescue);
@@ -361,6 +364,10 @@ kbd {
   font-size: var(--t-m);
   font-weight: 600;
   white-space: nowrap;
+  flex: none;
+  min-width: 9.2em;  /* "held" and "released" occupy the same width */
+  padding: 0.15rem 0.5rem;
+  text-align: center;
 }
 .clutch.is-held { background: var(--rescue); color: var(--ink); }
 

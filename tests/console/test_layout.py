@@ -23,12 +23,12 @@ def test_grid_layout_sorts_and_skips_absent_bays() -> None:
 
 def test_rescue_layout() -> None:
     f = feed_layout([1, 2, 3, 4], 2)
-    assert (f[0].slot, f[0].camera, f[0].role) == (0, "bay2/top_ortho", "main")
-    assert (f[1].slot, f[1].camera, f[1].role) == (1, "bay2/side_ortho", "main")
+    # An anomaly keeps the bay's existing camera (CCTV); it never opens Top + Side by itself.
+    assert (f[0].slot, f[0].camera, f[0].role) == (0, "bay2/cctv", "main")
     assert (f[0].width, f[0].height) == MAIN
-    assert [s.camera for s in f[2:]] == [f"bay{k}/cctv" for k in (1, 2, 3, 4)]
-    assert [s.slot for s in f[2:]] == [2, 3, 4, 5]
-    assert all(s.role == "strip" and (s.width, s.height) == STRIP for s in f[2:])
+    assert [s.camera for s in f[1:]] == [f"bay{k}/cctv" for k in (1, 2, 3, 4)]
+    assert [s.slot for s in f[1:]] == [1, 2, 3, 4]
+    assert all(s.role == "strip" and (s.width, s.height) == STRIP for s in f[1:])
 
 
 def test_rescue_of_absent_bay_falls_back_to_grid() -> None:

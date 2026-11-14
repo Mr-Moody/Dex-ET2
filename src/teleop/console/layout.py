@@ -157,11 +157,10 @@ def feed_layout(
             tiles.append(_feed(i, b, cam, "tile", TILE, view_state))
         return tuple(tiles)
 
-    default_focus_cam = SPLIT_VIEW if focus_bay == rescue_bay else CCTV_SUFFIX
+    # Focusing a bay (double-click, or an anomaly auto-focusing the rescue bay) keeps the camera the
+    # operator already had on it; it never opens Top + Side unless they chose that themselves.
     focus_cam = (
-        view_state.camera_for(focus_bay, default_focus_cam)
-        if view_state is not None
-        else default_focus_cam
+        view_state.camera_for(focus_bay, CCTV_SUFFIX) if view_state is not None else CCTV_SUFFIX
     )
     split_sz = SPLIT_MAIN if view_state is not None else MAIN
     if focus_cam == SPLIT_VIEW:

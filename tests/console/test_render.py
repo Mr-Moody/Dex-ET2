@@ -133,9 +133,9 @@ def test_renders_rescue_feeds(offscreen_render_ok: None, scene: tuple[Any, Any])
         )
     finally:
         r.close()
-    assert [s for s, _ in frames] == [0, 1, 2, 3, 4, 5]
+    assert [s for s, _ in frames] == [0, 1, 2, 3, 4]
     assert _decode(frames[0][1]).size == (960, 540)
-    assert _decode(frames[2][1]).size == (384, 216)
+    assert _decode(frames[1][1]).size == (384, 216)
     assert conf == {}
 
 
@@ -283,9 +283,9 @@ def test_worker_frames_follow_telemetry_layout() -> None:
         grid_id = server.telemetry[0]["layout_id"]
         assert rescue_id == grid_id + 1
         rescue_frames = [f for f in server.frames if f[1] == rescue_id]
-        assert {s for s, _, _ in rescue_frames} == {0, 1, 2, 3, 4, 5}
-        # Slot 0 means "bay1/cctv" in the grid and "bay1/top_ortho" in rescue: never mixed up.
-        assert all(j.endswith(b"top_ortho") for s, _, j in rescue_frames if s == 0)
+        assert {s for s, _, _ in rescue_frames} == {0, 1, 2, 3, 4}
+        # Slot 0 is the focused bay (cctv, same view as the grid) with the other bays in the strip.
+        assert all(j.endswith(b"bay1/cctv") for s, _, j in rescue_frames if s == 0)
         assert all(
             j.endswith(b"bay1/cctv") for s, lid, j in server.frames if s == 0 and lid == grid_id
         )
