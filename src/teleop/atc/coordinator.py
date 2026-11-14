@@ -55,6 +55,7 @@ from teleop.atc.estimate import (
     POSE_SIGMA_YAW_RAD,
     LatchEstimate,
     LatchEstimator,
+    touch_correct,
 )
 from teleop.atc.types import (
     BOLT_CLEARED_M,
@@ -215,7 +216,7 @@ ROUTINE = RoutineSpec(
     yaw=-2.2,
     pitch=0.0,
     roll=-0.4,
-    start_x=0.0019,
+    start_x=-0.0021,
     y=0.023,
     z=0.1163,
     fingers={
@@ -281,6 +282,66 @@ class StallDetector:
         )
 
 
+# --------------------------------------------------------------------------- touch detector
+
+ENCODER_TOUCH_M = 0.0005  # bolt encoder travel that counts as a touch
+WRIST_TOUCH_NM = 0.15  # compliant-wrist push torque that counts as a touch (tuned)
+TOUCH_LOG_LEN = 64
+
+
+class TouchDetector:
+    """Fingertip touch on the bolt hook from the bolt encoder or the compliant-wrist springs.
+
+    Fires once per arming (``reset``): on the first tick the bolt has moved more than
+    ``encoder_m`` from where it was when armed, or after ``ticks`` consecutive ticks of wrist
+    push torque above ``wrist_nm``. A freely sliding bolt barely loads the wrist, so the encoder
+    catches the clean-cycle touch and the wrist catches a blocked (pinned) bolt. Only sensors:
+    the encoder ``x_bolt`` and the rig's own wrist spring deflection.
+    """
+
+    def __init__(
+        self, encoder_m: float = ENCODER_TOUCH_M, wrist_nm: float = WRIST_TOUCH_NM, ticks: int = 2
+    ) -> None:
+        self.encoder_m = encoder_m
+        self.wrist_nm = wrist_nm
+        self.ticks = ticks
+        self.armed = True
+        self._x0: float | None = None
+        self._high = 0
+
+    def reset(self) -> None:
+        """Arm: the next update sets the encoder baseline."""
+        self.armed = True
+        self._x0 = None
+        self._high = 0
+
+    def disarm(self) -> None:
+        self.armed = False
+        self._x0 = None
+        self._high = 0
+
+    def update(self, x_bolt: float, wrist_push_nm: float) -> bool:
+        if not self.armed:
+            return False
+        if self._x0 is None:
+            self._x0 = x_bolt
+        self._high = self._high + 1 if wrist_push_nm > self.wrist_nm else 0
+        if x_bolt - self._x0 > self.encoder_m or self._high >= self.ticks:
+            self.disarm()
+            return True
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class TouchEvent:
+    """A HUD / log-feed entry for an accepted touch correction (not a compliance event)."""
+
+    bay_id: int
+    correction_mm: float
+    time_s: float
+    kind: str = "TOUCH_CORRECTED"
+
+
 # --------------------------------------------------------------------------- operator input
 
 
@@ -338,6 +399,8 @@ class _Bay:
     fingers: dict[str, float] = field(default_factory=dict[str, float])
     move: _Move | None = None
     detector: StallDetector = field(default_factory=StallDetector)
+    touch: TouchDetector = field(default_factory=TouchDetector)
+    last_touch: LatchEstimate | None = None
     indexer: RelativeClutchIndexer = field(default_factory=RelativeClutchIndexer)
     buffer: RescueTrajectoryBuffer | None = None
     clutch_held: bool = False
@@ -398,6 +461,7 @@ class AtcCoordinator:
             self.config.seed, self.config.pose_sigma_xy_m, self.config.pose_sigma_yaw_rad
         )
         self._cycles: dict[int, int] = {}
+        self._touch_log: deque[TouchEvent] = deque(maxlen=TOUCH_LOG_LEN)
         self._bays = {b: _Bay(b, BayRig(model, data, b)) for b in bays}
         for b in BACKGROUND_BAYS:
             with contextlib.suppress(KeyError):  # scene built without the background bays
@@ -486,6 +550,14 @@ class AtcCoordinator:
     def cycle_count(self, bay_id: int) -> int:
         return self._cycles[bay_id]
 
+    def last_touch(self, bay_id: int) -> LatchEstimate | None:
+        """The estimate produced by this cycle's last touch (accepted or rejected), if any."""
+        return self._bays[bay_id].last_touch
+
+    def touch_events(self) -> tuple[TouchEvent, ...]:
+        """Recent ``TOUCH_CORRECTED`` entries for the HUD and log feed, oldest first."""
+        return tuple(self._touch_log)
+
     # ------------------------------------------------------------------ cycle control
 
     def start_cycle(
@@ -536,6 +608,8 @@ class AtcCoordinator:
         bay.prev_cmd_pos = None
         bay.prev_wrist_pos = None
         bay.detector.reset()
+        bay.touch.disarm()  # armed when the routine starts, after the latch reset
+        bay.last_touch = None
         bay.indexer.reset()
         if bay_id in self._queue:
             self._queue.remove(bay_id)
@@ -636,9 +710,14 @@ class AtcCoordinator:
         if plan.done and (bay.rig.reached(pose) or bay.settle_ticks >= SETTLE_MAX_TICKS):
             bay.approach = None
             bay.settle_ticks = 0
+            if bay.pending_latch is not None:  # never arm on a stale bolt from the last cycle
+                jam, pin = bay.pending_latch
+                bay.pending_latch = None
+                bay.rig.reset_latch(flap_jammed=jam, bolt_pinned=pin)
             bay.routine_active = True
             bay.routine_t = 0.0
             bay.detector.reset()
+            bay.touch.reset()
             bay.prev_cmd_pos = None
 
     def _control_rescue(
@@ -705,6 +784,7 @@ class AtcCoordinator:
                 )
                 auto.backoff = None
                 auto.t = 0.0
+                bay.touch.reset()  # backed off the hook: arm for the replay's touch
             return
         assert auto.replay is not None
         cmd = auto.replay.command(auto.t)
@@ -742,6 +822,10 @@ class AtcCoordinator:
             return
 
         if bay.state == BayState.NOMINAL and bay.routine_active:
+            # The routine target is recomposed from the estimate every tick, so a correction
+            # lands through the push-lead clamp without an extra blend.
+            if bay.touch.update(x_bolt, rig.wrist_push_torque()):
+                self._apply_touch(bay, x_bolt)
             if x_bolt >= BOLT_CLEARED_M:
                 bay.routine_active = False
                 bay.outcome = "cleared"
@@ -769,6 +853,8 @@ class AtcCoordinator:
             return
         if auto.replay is None or auto.last is None:
             return
+        if bay.touch.update(x_bolt, bay.rig.wrist_push_torque()) and self._apply_touch(bay, x_bolt):
+            auto.replay.rebase(bay.rig.world_from_latch(), auto.t)
         in_dmp = auto.t > auto.replay.blend_s + CONTROL_DT
         timed_out = auto.t > auto.replay.total_s + self.config.skill_timeout_s
         if in_dmp and not torque_tube_ok(
@@ -846,10 +932,37 @@ class AtcCoordinator:
     def last_trigger_reason(self, bay_id: int) -> str:
         return self._bays[bay_id].trigger_reason
 
+    # ------------------------------------------------------------------ touch re-localization
+
+    def _apply_touch(self, bay: _Bay, x_bolt: float) -> bool:
+        """Correct the estimate's push axis from the index tip at a touch. True if accepted.
+
+        Reads only proprioception (index tip forward kinematics) and the bolt encoder. An
+        outlier correction is rejected and logged, and the estimate is kept.
+        """
+        rig = bay.rig
+        bay.touch.disarm()
+        est = touch_correct(rig.estimate, rig.index_tip_world(), x_bolt)
+        bay.last_touch = est
+        rig.set_estimate(est)  # a rejected touch keeps the pose and records the outlier
+        if est.rejected_correction_m is not None:
+            logger.warning(
+                "bay %d touch rejected: correction %.1f mm is an outlier, estimate kept",
+                bay.bay_id,
+                est.rejected_correction_m * 1e3,
+            )
+            return False
+        shift_mm = (est.last_correction_m or 0.0) * 1e3
+        logger.info("bay %d touched latch: pose corrected %.1f mm", bay.bay_id, shift_mm)
+        self._touch_log.append(TouchEvent(bay.bay_id, shift_mm, self.time_s))
+        return True
+
     # ------------------------------------------------------------------ stall handling
 
     def _on_stall(self, bay: _Bay, trigger: StallTrigger) -> None:
         cfg = self.config
+        if bay.touch.armed:  # the stall is itself a touch: correct before retract or back-off
+            self._apply_touch(bay, bay.rig.bolt_x())
         bay.state = BayState.STALLED
         bay.routine_active = False
         bay.signature = trigger.signature
@@ -871,6 +984,7 @@ class AtcCoordinator:
         backoff = _Move(
             wrist, translate_pose(wrist, -self.config.backoff_m * ax), self.config.backoff_s
         )
+        bay.touch.disarm()  # re-armed once the back-off has unloaded the wrist
         bay.auto = _Auto(skill, backoff)
         bay.skill_id = skill.skill_id
         bay.state = BayState.AUTONOMOUS_SKILL
@@ -1080,5 +1194,7 @@ __all__ = [
     "RoutineSpec",
     "StallDetector",
     "StallTrigger",
+    "TouchDetector",
+    "TouchEvent",
     "compute_confidence",
 ]

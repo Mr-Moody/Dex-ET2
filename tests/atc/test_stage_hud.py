@@ -229,7 +229,6 @@ def unoq() -> Iterator[object]:
 
 
 @needs_models
-@pytest.mark.xfail(strict=True, reason="needs touch correction (Task 3)")
 def test_atc_headless_scripted_6_beat_stage_run_completes(unoq: object) -> None:
     from teleop.atc.stage import BEATS, StageController, StageDirector
     from teleop.unoq.client import UnoQClient

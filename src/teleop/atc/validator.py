@@ -31,6 +31,7 @@ from teleop.atc.estimate import LatchEstimate
 from teleop.atc.types import BOLT_CLEARED_M, LatchPose, SkillPrimitive
 from teleop.sim.bays import (
     CANONICAL_LATCH,
+    WRIST_COMPLIANCE_AXES,
     bay_prefix,
     build_single_bay_scene,
     latch_world_pose,
@@ -209,6 +210,7 @@ class BayRig:
         self._site = int(model.site(f"{p}wrist_site").id)
         self._index_tip_site = int(model.site(f"{p}right_index_tip").id)
         self._bolt_qadr = int(model.joint(f"{p}bolt_slide").qposadr[0])
+        self._wrist_comp = [int(model.joint(f"{p}{n}").id) for n in WRIST_COMPLIANCE_AXES]
         self.estimate = LatchEstimate(self.true_world_latch(), 0.0, 0.0, 0.0)
         arm = [model.joint(n) for n in self.torque.joint_names[:7]]
         self._arm_range = np.array([model.jnt_range[int(j.id)] for j in arm], dtype=np.float64)
@@ -275,6 +277,30 @@ class BayRig:
 
     def tau_ext(self) -> FloatArray:
         return self.torque.estimate(self.data)
+
+    def wrist_push_torque(self) -> float:
+        """Compliant-wrist spring torque that resists a push along the estimated latch +X, Nm.
+
+        The two sprung wrist hinges are the wrist force/torque sensor: their spring torque
+        ``-stiffness * q`` (the rig's own joint positions, proprioception) is projected on
+        ``unit(r x u)``, the torque axis a contact force along the push axis ``u`` (estimated
+        latch +X) at the index tip loads about the flange (``r`` = flange to index tip). A finger
+        pushed back by an obstacle reads positive; free motion stays near zero.
+        """
+        m, d = self.model, self.data
+        u = local_axis_world(self.world_from_latch(), 0)
+        anchor = np.asarray(d.xanchor[self._wrist_comp[0]], dtype=np.float64)
+        n: FloatArray = np.asarray(np.cross(self.index_tip_world() - anchor, u), dtype=np.float64)
+        norm = float(np.linalg.norm(n))
+        if norm < 1e-9:
+            return 0.0
+        n = n / norm
+        total = 0.0
+        for j in self._wrist_comp:
+            q = float(d.qpos[int(m.jnt_qposadr[j])])
+            axis = np.asarray(d.xaxis[j], dtype=np.float64)
+            total += -float(m.jnt_stiffness[j]) * q * float(np.dot(axis, n))
+        return total
 
     def tau_hand_inf(self, tau: FloatArray | None = None) -> float:
         """``|tau_ext|_inf`` over the hand finger joints only (arm joints come first in ``tau``)."""
@@ -367,11 +393,36 @@ class SkillReplay:
         self._start_wrist = start_wrist
         self._start_fingers = dict(start_fingers or {})
         self.total_s = self.blend_s + skill.duration_s + hold_s
+        # Touch re-anchoring: the frame blends from _rebase_from to world_from_latch.
+        self._rebase_from: Pose | None = None
+        self._rebase_t = 0.0
+        self._rebase_s = 0.0
+
+    def rebase(self, world_from_latch: Pose, t_s: float, blend_s: float = 0.2) -> None:
+        """Continue the replay in a corrected latch frame, blended over ``blend_s`` from ``t_s``.
+
+        The frame (not the wrist) is blended with a smoothstep, so the command is continuous at
+        ``t_s`` and the rest of the replay runs fully in the new frame after ``blend_s``.
+        """
+        self._rebase_from = self.frame_at(t_s)
+        self._rebase_t = t_s
+        self._rebase_s = max(blend_s, 1e-9)
+        self.world_from_latch = world_from_latch
+
+    def frame_at(self, t_s: float) -> Pose:
+        """The latch frame the replay uses at ``t_s`` (mid-rebase it is a blend)."""
+        if self._rebase_from is None:
+            return self.world_from_latch
+        u = min(max((t_s - self._rebase_t) / self._rebase_s, 0.0), 1.0)
+        if u >= 1.0:
+            return self.world_from_latch
+        return blend_pose(self._rebase_from, self.world_from_latch, u * u * (3.0 - 2.0 * u))
 
     def command(self, t_s: float) -> ReplayCommand:
         sk = self.skill
+        frame = self.frame_at(t_s)
         if t_s < self.blend_s and self._start_wrist is not None:
-            wrist0, fingers0, _ = evaluate_rbf_dmp(sk, 1.0, self.world_from_latch)
+            wrist0, fingers0, _ = evaluate_rbf_dmp(sk, 1.0, frame)
             u = min(max(t_s / self.blend_s, 0.0), 1.0)
             a = u * u * (3.0 - 2.0 * u)
             fingers = {
@@ -388,7 +439,7 @@ class SkillReplay:
             if self._latch_cache is not None:
                 self._latch_cache[key] = hit
         local, fingers, tau_demo = hit
-        wrist = compose_pose(self.world_from_latch, local)
+        wrist = compose_pose(frame, local)
         return ReplayCommand(wrist, fingers, tau_demo, t_s >= self.total_s)
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Iterator
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,8 +21,10 @@ from teleop.atc.coordinator import (
     CoordinatorConfig,
     OperatorInput,
     StallDetector,
+    TouchDetector,
     compute_confidence,
 )
+from teleop.atc.estimate import HOOK_BACK_X_M, INDEX_PAD_RADIUS_M, POSE_SIGMA_XY_M
 from teleop.atc.types import (
     BOLT_CLEARED_M,
     BayState,
@@ -34,12 +37,14 @@ from teleop.atc.validator import (
     SkillReplay,
     SkillValidator,
     lifted,
+    pose_position,
     step_physics,
     torque_tube_ok,
+    translate_pose,
 )
 from teleop.compliance.protocol import ComplianceEvent
 from teleop.reasoning.protocol import ReasoningContext, ReasoningVerdict
-from teleop.sim.bays import PANDA_XML
+from teleop.sim.bays import CANONICAL_LATCH, PANDA_XML, build_single_bay_scene
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
@@ -380,7 +385,6 @@ def test_additive_torque_tube_allows_free_space_zero_demo_torque_and_aborts_on_e
     assert "STALL_ALERT" in tight.sink.kinds()
 
 
-@pytest.mark.xfail(strict=True, reason="needs touch correction (Task 3)")
 def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> None:
     co = rig.co
     co.start_cycle(1, flap_jammed=True)
@@ -432,7 +436,6 @@ def test_single_active_fifo_queue_serializes_concurrent_bay_stalls(rig: Rig) -> 
     assert len(co.rescue_slot_holders()) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="needs touch correction (Task 3)")
 def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg_12cm(
     rig: Rig, validator: SkillValidator
 ) -> None:
@@ -480,7 +483,7 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
     assert elapsed < 1.0, f"validation gate took {elapsed:.3f}s"
 
     # Bay 2 sits at +12 cm / +35 deg relative to Bay 1's latch frame.
-    l1, l2 = co.rig(1).world_latch(), co.rig(2).world_latch()
+    l1, l2 = co.rig(1).true_world_latch(), co.rig(2).true_world_latch()  # scene layout
     assert math.degrees(l2.yaw_rad - l1.yaw_rad) == pytest.approx(35.0)
     assert math.hypot(0.08, 0.09) == pytest.approx(0.12, abs=0.001)
 
@@ -519,7 +522,6 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_3_rollouts_and_bay2_clears_35deg
         assert co.peak_arm_ratio(bay_id) < co.config.arm_torque_margin
 
 
-@pytest.mark.xfail(strict=True, reason="needs touch correction (Task 3)")
 def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: Rig) -> None:
     co = rig.co
     _rescued_rig(rig)
@@ -554,7 +556,6 @@ def test_negative_control_pinned_bolt_at_x0_rejected_as_ood_and_escalates(rig: R
     assert rig.sink.kinds().count("SKILL_DEPLOYED") == 1
 
 
-@pytest.mark.xfail(strict=True, reason="needs touch correction (Task 3)")
 def test_clean_cycles_after_a_rescue_keep_clearing(rig: Rig) -> None:
     """Clutch release pins every hand target; the next cycles must not inherit that posture."""
     co = rig.co
@@ -725,7 +726,6 @@ def test_arm_torque_breach_in_rescue_discards_recording_and_locks_out_clutch(rig
     assert len(rig.sink.events) == n_events  # no discarded-rescue event, no validation
 
 
-@pytest.mark.xfail(strict=True, reason="needs touch correction (Task 3)")
 def test_arm_torque_breach_in_autonomous_replay_aborts_retracts_and_escalates(
     rig: Rig,
 ) -> None:
@@ -786,3 +786,138 @@ def test_zero_sigma_reproduces_true_frame_cycles(unoq, hand_spec, validator):
     for _ in range(600):
         co.tick()
     assert co.outcome(1) == co.outcome(2) == "cleared"
+
+
+# --------------------------------------------------------------------------- touch re-localization
+
+
+def _x_err(co: AtcCoordinator, bay_id: int) -> float:
+    """|estimate - truth| along the latch push axis (test-only ground-truth read)."""
+    est, truth = co.estimate(bay_id).pose, co.rig(bay_id).true_world_latch()
+    axis = np.array([math.cos(truth.yaw_rad), math.sin(truth.yaw_rad), 0.0])
+    return abs(float(np.dot(np.subtract(est.position, truth.position), axis)))
+
+
+def _routine_index_gap_m() -> float:
+    """Index-pad-surface to hook-back-face gap along latch +X at the routine start pose.
+
+    Kinematic: the fingers are set to ``ROUTINE.fingers`` (servoed proximal joints at their
+    targets, coupled distal joints through their joint equalities, compliant wrist at rest) and
+    the index tip offset from the wrist site is carried into the latch frame by the routine
+    start pose, with the bolt at 0.
+    """
+    import mujoco as _mujoco
+
+    mujoco: Any = _mujoco
+    m = build_single_bay_scene(CANONICAL_LATCH)
+    d = mujoco.MjData(m)
+    for name, q in ROUTINE.fingers.items():
+        jnt = int(m.actuator_trnid[int(m.actuator(f"bay1/{name}").id)][0])
+        d.qpos[int(m.jnt_qposadr[jnt])] = q
+    for i in range(int(m.neq)):
+        if int(m.eq_type[i]) == int(mujoco.mjtEq.mjEQ_JOINT) and int(m.eq_obj2id[i]) >= 0:
+            c0, c1 = float(m.eq_data[i][0]), float(m.eq_data[i][1])
+            q_driver = float(d.qpos[int(m.jnt_qposadr[int(m.eq_obj2id[i])])])
+            d.qpos[int(m.jnt_qposadr[int(m.eq_obj1id[i])])] = c0 + c1 * q_driver
+    mujoco.mj_kinematics(m, d)
+    wrist_id, tip_id = int(m.site("bay1/wrist_site").id), int(m.site("bay1/right_index_tip").id)
+    r_wrist = np.asarray(d.site_xmat[wrist_id]).reshape(3, 3)
+    tip_in_wrist = r_wrist.T @ (np.asarray(d.site_xpos[tip_id]) - np.asarray(d.site_xpos[wrist_id]))
+    start = ROUTINE.pose_at(0.0)
+    assert start.position is not None
+    tip_x = float(np.asarray(start.position)[0] + (ROUTINE.rotation() @ tip_in_wrist)[0])
+    return HOOK_BACK_X_M - (tip_x + INDEX_PAD_RADIUS_M)
+
+
+def test_touch_detector_encoder_and_wrist_paths() -> None:
+    d = TouchDetector(wrist_nm=0.5)
+    assert not d.update(0.0, 0.1) and not d.update(0.0004, 0.2)
+    assert d.update(0.0006, 0.0)
+    assert not d.update(0.01, 0.0)  # fires once per arming
+    d.reset()
+    assert not d.update(0.0, 0.6) and d.update(0.0, 0.6)  # two consecutive wrist ticks
+
+
+def test_touch_detector_encoder_is_relative_to_the_bolt_at_arming() -> None:
+    d = TouchDetector(wrist_nm=0.5)
+    assert not d.update(0.035, 0.0)  # armed on a stalled bolt: its offset is not a touch
+    assert not d.update(0.0354, 0.0)
+    assert d.update(0.0356, 0.0)
+    d.reset()
+    assert not d.update(0.0, 0.6) and not d.update(0.0, 0.1) and not d.update(0.0, 0.6)
+
+
+def test_no_false_touch_in_approach_or_lift(rig: Rig) -> None:  # Review Focus 2
+    co = rig.co
+    co.rig(1).set_bolt_x(0.06)  # the previous cycle left the bolt pushed out
+    co.start_cycle(1)
+    for _ in range(80):  # still approaching, the bolt was just reset
+        co.tick()
+        assert co.last_touch(1) is None or co.in_routine(1)
+    for _ in range(600):  # the routine arms the detector only on the reset bolt
+        co.tick()
+        if co.in_routine(1):
+            break
+    assert co.in_routine(1) and co.rig(1).bolt_x() < 0.0005 and co.last_touch(1) is None
+
+
+def test_routine_touch_shrinks_estimate_error_to_mm(rig: Rig) -> None:
+    co = rig.co
+    co.start_cycle(1)
+    err0 = _x_err(co, 1)  # |estimate - truth| along the latch axis; test-only truth read
+    for _ in range(600):
+        co.tick()
+        if co.outcome(1):
+            break
+    assert co.outcome(1) == "cleared" and co.last_touch(1) is not None
+    assert _x_err(co, 1) < 0.0015 and _x_err(co, 1) < err0
+
+
+def test_routine_touch_target_jump_is_bounded_by_lead_plus_correction(rig: Rig) -> None:
+    co = rig.co
+    bay = co._bays[1]  # noqa: SLF001 - commanded target history, no public accessor
+    co.start_cycle(1)
+    worst = 0.0
+    prev: np.ndarray | None = None
+    for _ in range(600):
+        co.tick()
+        if co.in_routine(1) and bay.prev_cmd_pos is not None:
+            if prev is not None:
+                worst = max(worst, float(np.linalg.norm(bay.prev_cmd_pos - prev)))
+            prev = np.array(bay.prev_cmd_pos)
+        if co.outcome(1):
+            break
+    touch = co.last_touch(1)
+    assert touch is not None and touch.last_correction_m is not None
+    assert worst <= co.config.push_lead_limit_m + abs(touch.last_correction_m)
+
+
+def test_pinned_bolt_touch_via_wrist_still_escalates(rig: Rig) -> None:  # Review Focus 3
+    _rescued_rig(rig)  # a known jam prototype, so the pinned signature is refused as OOD
+    rig.stall_bay(1, bolt_pinned=True)
+    assert rig.co.state(1) == BayState.OOD_ESCALATED
+    assert rig.co.last_touch(1) is not None
+
+
+def test_routine_standoff_clears_hook_at_3_sigma() -> None:
+    gap = _routine_index_gap_m()  # kinematic, from tip offsets at ROUTINE.fingers
+    assert gap - 3 * POSE_SIGMA_XY_M >= 0.003
+
+
+def test_replay_rebase_blends_to_the_corrected_frame(rig: Rig) -> None:
+    _rescued_rig(rig)
+    skill = next(iter(rig.co.library.values()))
+    wfl = rig.co.rig(1).world_from_latch()
+    shifted = translate_pose(wfl, (0.004, 0.0, 0.0))
+    replay, ref = SkillReplay(skill, wfl), SkillReplay(skill, shifted)
+
+    def at(r: SkillReplay, t: float) -> np.ndarray:
+        return pose_position(r.command(t).wrist)
+
+    t0 = 0.5
+    p_old = at(replay, t0)
+    replay.rebase(shifted, t0, blend_s=0.2)
+    np.testing.assert_allclose(at(replay, t0), p_old, atol=1e-9)  # no jump at the touch
+    mid, old_mid = at(replay, t0 + 0.1), at(SkillReplay(skill, wfl), t0 + 0.1)
+    assert np.linalg.norm(mid - old_mid) > 1e-4 and np.linalg.norm(mid - at(ref, t0 + 0.1)) > 1e-4
+    np.testing.assert_allclose(at(replay, t0 + 0.25), at(ref, t0 + 0.25), atol=1e-9)

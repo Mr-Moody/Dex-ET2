@@ -20,7 +20,7 @@ POSE_SIGMA_YAW_RAD = math.radians(1.5)
 TOUCH_SIGMA_M = 0.001
 MAX_TOUCH_SIGMAS = 4.0
 HOOK_BACK_X_M = HOOK_POS[0] - HOOK_HALF[0]  # hook back face in the latch frame at x_bolt = 0
-INDEX_PAD_RADIUS_M = 0.006  # index pad centre to surface (tuned in Task 3)
+INDEX_PAD_RADIUS_M = 0.0144  # index tip site to its hook contact along latch +X (tuned)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +60,8 @@ def touch_correct(est: LatchEstimate, index_tip_world: ArrayLike, x_bolt: float)
     origin = np.asarray(est.pose.position, dtype=float)
     tip = np.asarray(index_tip_world, dtype=float)
     shift = float(np.dot(tip - origin, axis) + INDEX_PAD_RADIUS_M - HOOK_BACK_X_M - x_bolt)
-    if abs(shift) > MAX_TOUCH_SIGMAS * est.sigma_x_m:
+    # Floored at the touch sigma: an exact placement (sigma 0) still takes a mm-level touch.
+    if abs(shift) > MAX_TOUCH_SIGMAS * max(est.sigma_x_m, TOUCH_SIGMA_M):
         return replace(est, rejected_correction_m=shift)
     x, y, z = est.pose.position
     pose = LatchPose(

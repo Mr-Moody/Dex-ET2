@@ -69,3 +69,14 @@ def test_outlier_touch_is_rejected():
     tip = local_point(est.pose, HOOK_BACK_X_M - INDEX_PAD_RADIUS_M + 0.013, 0.0, 0.05)
     out = touch_correct(est, tip, 0.0)
     assert out.pose == est.pose and out.rejected_correction_m == pytest.approx(0.013)
+
+
+def test_outlier_gate_is_floored_at_the_touch_sigma():
+    # An exact placement (sigma 0) still accepts a touch inside 4 touch sigmas (4 mm).
+    est = LatchEstimate(CANONICAL_LATCH, 0.0, 0.0, 0.0)
+    tip = local_point(est.pose, HOOK_BACK_X_M - INDEX_PAD_RADIUS_M + 0.0007, 0.0, 0.05)
+    moved = touch_correct(est, tip, 0.0)
+    assert moved.touch_corrected and moved.last_correction_m == pytest.approx(0.0007)
+    far = local_point(est.pose, HOOK_BACK_X_M - INDEX_PAD_RADIUS_M + 0.0045, 0.0, 0.05)
+    out = touch_correct(est, far, 0.0)
+    assert out.pose == est.pose and out.rejected_correction_m == pytest.approx(0.0045)
