@@ -1,0 +1,197 @@
+"""Turns the stage ``HudView`` into the console's telemetry JSON (10 Hz).
+
+Adds what the HUD does not keep: a per-bay C(t) history for the sparklines, a timestamped
+event log derived from state transitions, the gate result and the Solana/reasoner lines,
+background bays (replayed canned cycle, ``replayed: true``) and absent bays (``STANDBY``).
+``layout_id`` increments whenever the feed layout changes, so the page can drop frames that
+were rendered for the previous layout.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
+from typing import Any
+
+from teleop.atc.hud import STATE_LABELS, HudView
+from teleop.atc.types import N_BAYS, BaySnapshot, BayState
+from teleop.console.layout import FeedSpec
+
+THRESHOLD = 0.3
+HISTORY_LEN = 150  # 15 s at 10 Hz
+EVENT_LOG_LEN = 50
+STANDBY = "STANDBY"
+
+_TRANSITIONS: dict[BayState, tuple[str, str]] = {
+    BayState.STALLED: ("alert", "Bay {k} stalled · C(t) {c:.2f}"),
+    BayState.QUEUED: ("warn", "Bay {k} queued #{pos}"),
+    BayState.RESCUE: ("info", "Operator took control of Bay {k}"),
+    BayState.VALIDATING: ("info", "Bay {k}: validating learned skill"),
+    BayState.AUTONOMOUS_SKILL: ("ok", "Bay {k}: replaying learned skill"),
+    BayState.OOD_ESCALATED: ("alert", "Bay {k}: unseen jam, skill transfer refused"),
+    BayState.NOMINAL: ("ok", "Bay {k} back to nominal"),
+}
+
+
+class TelemetryAdapter:
+    def __init__(
+        self,
+        bays_present: Sequence[int],
+        background: Sequence[int],
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
+        self.bays_present = frozenset(bays_present)
+        self.background = frozenset(background) & self.bays_present
+        self._clock = clock
+        self._history: dict[int, deque[float]] = {
+            k: deque(maxlen=HISTORY_LEN) for k in range(1, N_BAYS + 1)
+        }
+        self._events: deque[dict[str, Any]] = deque(maxlen=EVENT_LOG_LEN)
+        self._states: dict[int, BayState] = {}
+        self._gate_key: tuple[Any, ...] | None = None
+        self._lines: dict[str, str] = {}
+        self._feeds: tuple[FeedSpec, ...] | None = None
+        self.layout_id = 0
+
+    # ------------------------------------------------------------------ events
+
+    def _log(self, sim_t: float, wall: str, bay: int | None, level: str, text: str) -> None:
+        self._events.append(
+            {"sim_t": round(sim_t, 3), "wall": wall, "bay": bay, "level": level, "text": text}
+        )
+
+    def _track_state(self, snap: BaySnapshot, sim_t: float, wall: str) -> None:
+        prev = self._states.get(snap.bay_id, BayState.NOMINAL)
+        self._states[snap.bay_id] = snap.state
+        if snap.state == prev:
+            return
+        level, template = _TRANSITIONS[snap.state]
+        pos = (snap.queue_position or 0) + 1
+        text = template.format(k=snap.bay_id, c=snap.confidence, pos=pos)
+        self._log(sim_t, wall, snap.bay_id, level, text)
+
+    def _track_gate(self, view: HudView, sim_t: float, wall: str) -> None:
+        g = view.gate
+        key = (g.ok, g.passed, g.total, g.elapsed_s)
+        if g.ok is None or key == self._gate_key:
+            self._gate_key = key if g.ok is not None else self._gate_key
+            return
+        self._gate_key = key
+        verdict = "passed" if g.ok else "FAILED"
+        elapsed = f"{g.elapsed_s:.2f}" if g.elapsed_s is not None else "?"
+        text = f"Skill gate {g.passed}/{g.total} {verdict} in {elapsed} s"
+        self._log(sim_t, wall, None, "ok" if g.ok else "alert", text)
+
+    def _track_line(self, name: str, line: str, sim_t: float, wall: str) -> None:
+        prev = self._lines.get(name)
+        self._lines[name] = line
+        if prev is not None and line != prev:
+            self._log(sim_t, wall, None, "info", line)
+
+    # ------------------------------------------------------------------ build
+
+    def _bay_entry(
+        self, k: int, snaps: Mapping[int, BaySnapshot], background_confidence: Mapping[int, float]
+    ) -> dict[str, Any]:
+        hist = self._history[k]
+        if k in snaps:
+            s = snaps[k]
+            hist.append(round(s.confidence, 3))
+            return {
+                "id": k,
+                "state": s.state.value,
+                "label": STATE_LABELS[s.state],
+                "confidence": round(s.confidence, 3),
+                "history": list(hist),
+                "queue_position": s.queue_position,
+                "skill": s.active_skill_id,
+                "background": False,
+                "replayed": False,
+            }
+        if k in self.background:
+            c = round(float(background_confidence.get(k, 1.0)), 3)
+            hist.append(c)
+            return {
+                "id": k,
+                "state": BayState.NOMINAL.value,
+                "label": STATE_LABELS[BayState.NOMINAL],
+                "confidence": c,
+                "history": list(hist),
+                "queue_position": None,
+                "skill": None,
+                "background": True,
+                "replayed": True,
+            }
+        return {
+            "id": k,
+            "state": STANDBY,
+            "label": STANDBY,
+            "confidence": 0.0,
+            "history": [],
+            "queue_position": None,
+            "skill": None,
+            "background": k in self.background,
+            "replayed": False,
+        }
+
+    def build(
+        self,
+        view: HudView,
+        sim_t: float,
+        feeds: Sequence[FeedSpec],
+        background_confidence: Mapping[int, float],
+    ) -> dict[str, Any]:
+        """One telemetry message. Call at the telemetry rate: each call adds a history sample."""
+        wall = self._clock().strftime("%H:%M:%S")
+        feeds_t = tuple(feeds)
+        if self._feeds is not None and feeds_t != self._feeds:
+            self.layout_id += 1
+        self._feeds = feeds_t
+
+        snaps = {s.bay_id: s for s in view.bays if s.bay_id in self.bays_present}
+        for s in snaps.values():
+            self._track_state(s, sim_t, wall)
+        self._track_gate(view, sim_t, wall)
+        self._track_line("compliance", view.compliance, sim_t, wall)
+        self._track_line("reasoning", view.reasoning, sim_t, wall)
+
+        g = view.gate
+        gate = None
+        if any(v is not None for v in (g.fit_ms, g.passed, g.total, g.ok)):
+            gate = {
+                "fit_ms": g.fit_ms,
+                "passed": g.passed,
+                "total": g.total,
+                "elapsed_s": g.elapsed_s,
+                "ok": g.ok,
+            }
+        r = view.rescue
+        rescue = (
+            None
+            if r.bay_id is None
+            else {"bay": r.bay_id, "clutch": r.clutch_engaged, "elapsed_s": r.elapsed_s}
+        )
+        return {
+            "type": "telemetry",
+            "layout_id": self.layout_id,
+            "sim_t": round(sim_t, 3),
+            "wall": wall,
+            "threshold": THRESHOLD,
+            "mode": "rescue" if any(f.role == "main" for f in feeds_t) else "grid",
+            "feeds": [
+                {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role} for f in feeds_t
+            ],
+            "bays": [
+                self._bay_entry(k, snaps, background_confidence) for k in range(1, N_BAYS + 1)
+            ],
+            "queue": list(view.queue),
+            "selected_bay": view.selected_bay,
+            "rescue": rescue,
+            "gate": gate,
+            "events": list(self._events),
+            "compliance": view.compliance,
+            "reasoning": view.reasoning,
+            "beat": view.beat,
+            "unoq": view.unoq,
+        }
