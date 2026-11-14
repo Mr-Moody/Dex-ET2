@@ -31,7 +31,7 @@ def _view(*snaps: BaySnapshot, **kw: object) -> HudView:
         queue=(),
         background_bays=(3, 4),
         compliance="SOLANA  no events yet",
-        reasoning="NEMOTRON  idle",
+        reasoning="TRIAGE  idle",
     )
     return replace(base, **kw)  # type: ignore[arg-type]
 
@@ -191,6 +191,16 @@ def test_background_bays_marked_replayed() -> None:
     assert b3["state"] == "NOMINAL" and b3["replayed"] is True and b3["background"] is True
     assert b3["confidence"] == 0.91
     assert _bay(msg, 4)["confidence"] == 1.0  # no sample yet
+
+
+def test_bays_report_power_cut_by_the_estop() -> None:
+    view = _view(_snap(1, powered=False), _snap(2), powered_off=frozenset({1, 3}))
+    msg = _adapter().build(view, 1.0, GRID, {})
+    assert _bay(msg, 1)["powered"] is False
+    assert _bay(msg, 2)["powered"] is True
+    assert _bay(msg, 3)["powered"] is False  # replayed bay frozen by the E-stop
+    assert _bay(msg, 4)["powered"] is True
+    assert msg["powered_off"] == [1, 3]
 
 
 def test_layout_id_bumps_on_layout_change() -> None:

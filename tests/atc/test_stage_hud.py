@@ -117,7 +117,7 @@ def _view() -> HudView:
         rescue=RescueStatus(bay_id=1, clutch_engaged=True, elapsed_s=7.25),
         gate=GateStatus(fit_ms=11.4, passed=3, total=3, elapsed_s=0.28, ok=True),
         compliance="SOLANA VALIDATION_GATE bay 1 #3f2a9c1e0b7d [anchored]",
-        reasoning="NEMOTRON bay 1: Novel jam, operator rescue requested",
+        reasoning="TRIAGE bay 1: Novel jam, operator rescue requested",
         beat="3 Operator rescue",
         unoq="UNO Q loopback",
     )
@@ -155,7 +155,7 @@ def test_hud_formats_bay_states_confidence_and_fifo_queue() -> None:
         "QUEUE",
         "UNO Q DMP fit: 11.4 ms",
         "SOLANA VALIDATION_GATE",
-        "NEMOTRON bay 1",
+        "TRIAGE bay 1",
         "3 Operator rescue",
     ):
         assert needle in text
@@ -200,6 +200,19 @@ def test_keymap_and_console_merge_mirror_hardware() -> None:
     estop = ConsoleInputState(selected_bay=None, estop=True, timestamp_ns=50)
     assert not merge_console([hardware, estop]).clutch  # any E-stop drops the clutch
     assert merge_console([]) == ConsoleInputState()
+
+
+def test_estop_key_and_merge_cut_power_per_bay() -> None:
+    assert KEYMAP[ord("E")] is StageAction.ESTOP
+    hardware = ConsoleInputState(
+        selected_bay=2, clutch=True, timestamp_ns=200, powered_off=frozenset({2})
+    )
+    keyboard = ConsoleInputState(timestamp_ns=100, powered_off=frozenset({4}))
+    merged = merge_console([keyboard, hardware])
+    assert merged.powered_off == frozenset({2, 4})  # any console's cut holds
+    assert not merged.clutch  # the clutch never drives a cut bay
+    other = dataclasses.replace(hardware, selected_bay=1, powered_off=frozenset())
+    assert merge_console([keyboard, other]).clutch  # cuts elsewhere do not block Bay 1
 
 
 def test_audio_cues_follow_compliance_events_and_stay_silent_when_disabled() -> None:
@@ -304,7 +317,7 @@ def test_atc_command_headless_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     from teleop.commands import atc
 
     monkeypatch.chdir(tmp_path)  # compliance audit log lands in tmp_path/outputs
-    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "UNOQ_HOST"):
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "UNOQ_HOST"):
         monkeypatch.delenv(var, raising=False)
     rc = atc.main(
         [
@@ -398,7 +411,7 @@ def test_cli_seed_reaches_coordinator(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(StageController, "build", staticmethod(spy))
     monkeypatch.chdir(tmp_path)
-    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "UNOQ_HOST"):
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "UNOQ_HOST"):
         monkeypatch.delenv(var, raising=False)
     base = [
         "--headless",

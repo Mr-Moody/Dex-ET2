@@ -4,7 +4,7 @@ A fleet supervisor for EV-battery disassembly. Four MuJoCo bays run Franka Panda
 hands that unlatch a sprung slide-bolt latch. When a bay stalls, an operator rescues it with
 Rokoko gloves. An Arduino UNO Q (or a local mock) learns the rescue as a skill, a headless
 simulation gate checks it, and the fleet reuses it. The pipeline also has a compliance chain
-and an LLM reasoning co-pilot (Kimi K3.1 Pro on Verda).
+and a Gemini operator copilot (`docs/copilot.md`).
 
 See `PROJECT_BRIEF.md` for the pitch and
 `docs/superpowers/specs/2026-11-14-atc-fleet-rescue-design.md` for the design.
@@ -29,7 +29,7 @@ flowchart TD
     GATE["SkillValidator<br/>3 headless rollouts"]
     UNOQ["UNO Q edge node or mock<br/>filter · classifier · DMP fit"]
     SOL["Compliance sink<br/>hash-chained log → Solana"]
-    KIMI["Reasoner<br/>Verda · Kimi K3.1 Pro"]
+    TRI["Triage reasoner<br/>offline, rule-based"]
 
     GLOVES -->|"Studio JSON over UDP"| RET
     RET --> COORD
@@ -37,7 +37,7 @@ flowchart TD
     COORD --> GATE
     COORD <-->|"UDP / TCP"| UNOQ
     COORD -->|"events"| SOL
-    COORD -->|"contexts"| KIMI
+    COORD -->|"contexts"| TRI
 ```
 
 **Display pipeline.** After every tick the loop drops a snapshot. A separate render thread draws
@@ -126,9 +126,9 @@ Both unseen and refused stalls go to a human through the same queue. The differe
 6. **Reuse.** Bay 2, with a rotated and shifted latch, clears the same jam on its own with the
    skill warped into its frame. The pinned-bolt negative control is refused.
 7. **Record and explain.** Every step emits compliance events (a signed, hash-chained log,
-   optionally anchored on Solana). It also sends reasoning requests to Kimi, which writes the
-   operator guidance and audit rationale shown in the console. Neither one can block the 60 Hz
-   loop. If they are offline, they fall back to local output.
+   optionally anchored on Solana). It also sends reasoning contexts to the triage reasoner, which writes
+   the operator guidance and audit rationale shown in the console. Neither one can block the
+   60 Hz loop.
 
 ### Display modes
 
@@ -151,7 +151,6 @@ Both unseen and refused stalls go to a human through the same queue. The differe
 | Edge device | Arduino UNO Q: the Python service on its Linux side (UDP stream + TCP ops), the STM32 MCU sketch for the operator console. A loopback mock runs in-process without the board |
 | Skill learning | 1-Euro filter, Mahalanobis classifier, 30-kernel RBF dynamic movement primitives |
 | Compliance | SHA-256 hash-chained JSONL log, Ed25519 signatures, Solana Memo anchoring (`solders`) |
-| Reasoning | Verda Inference API (OpenAI-compatible chat completions), model `kimi-k3-1-pro`, stdlib `urllib` |
 | Ops console | Plain HTML/CSS/JS (no framework, no three.js, no CDN), 2D `<canvas>` sparklines, `websockets` server, Pillow JPEG encoding |
 | Datasets (original pipeline) | LeRobot dataset format (`train` dependency group) |
 
@@ -164,7 +163,7 @@ Code map:
 | `src/teleop/console/` | Snapshot, render worker, telemetry adapter, server, `web/` front end |
 | `src/teleop/unoq/` | Edge service: filter, classifier, DMP, client/server, MCU bridge |
 | `src/teleop/compliance/` | Compliance sink protocol and the Solana implementation |
-| `src/teleop/reasoning/` | Reasoner protocol and the Verda (Kimi) implementation |
+| `src/teleop/reasoning/` | Reasoner protocol and the offline triage reasoner |
 | `src/teleop/input/`, `retarget/`, `wrist/` | Glove sources, retargeting, relative clutch, wrist tracking |
 | `src/teleop/commands/` | `teleop` subcommands |
 
@@ -187,15 +186,9 @@ its keys are unset, so the demo runs with an empty `.env`.
 
 | Variable | Purpose | If unset |
 |---|---|---|
-| `VERDA_API_KEY` | Verda **Inference API** key (not the Cloud API client ID/secret) | Built-in deterministic reasoner text |
-| `VERDA_BASE_URL` | `https://inference.verda.com/v1` | That default |
-| `NEMOTRON_MODEL` | `kimi-k3-1-pro` (the variable name is historical) | That default |
 | `SOLANA_RPC_URL`, `SOLANA_KEYPAIR_PATH` | Compliance chain | Local hash-chained audit log |
 | `UNOQ_HOST`, `UNOQ_PORT`, `UNOQ_SERIAL_PORT` | Real UNO Q edge node | In-process loopback mock |
 | `HOTSPOT_PASSWORD` | Laptop hotspot for the gloves (Windows) | Hotspot light stays off; fatal only with an explicit `--hotspot` |
-
-Kimi must be enabled for your project in the Verda Console under Inference. Otherwise requests
-return `subscription_required` and the reasoner quietly uses its offline text.
 
 ## Run the demo
 
@@ -302,8 +295,6 @@ A typical manual run:
 
 | Command | What it does |
 |---|---|
-| `uv run python -m teleop.reasoning.nemotron status` | Show reasoner mode, endpoint and model |
-| `uv run python -m teleop.reasoning.nemotron demo` | Send three sample events to Kimi |
 | `uv run python scripts/console_preview.py` | Ops console with fake telemetry, no MuJoCo |
 | `uv run teleop unoq --serve` | Run the UNO Q edge service on its own |
 | `uv run teleop sim` | Original two-hand lift-cube teleop scene |
@@ -312,15 +303,10 @@ A typical manual run:
 
 Every command takes `--help`.
 
-The reasoner `demo` is working when each result shows `(kimi-k3-1-pro, ~2000 ms)`. If it shows
-`placeholder:...`, the key is missing or Kimi is not enabled.
-
 ## Troubleshooting
 
 - **`... panda_nohand.xml missing`**: run `uv run python scripts/fetch_models.py`.
 - **MuJoCo window misbehaves on Wayland**: prefix the command with `GLFW_PLATFORM=x11`.
-- **Reasoner stays `offline`**: `VERDA_API_KEY` is not being read. Run from the repo root or
-  pass `--env-file`.
 - **`pyright` reports missing `lerobot`**: run `uv sync --all-extras --all-groups`.
 
 ## Contributing

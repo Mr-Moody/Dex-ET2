@@ -82,8 +82,9 @@ body {
   gap: 1.1rem;
   min-height: 2.9rem;
   padding: 0 16px;
+  border-top: 2px solid var(--nominal);
   border-bottom: 1px solid var(--hair);
-  background: var(--panel);
+  background: linear-gradient(90deg, #1b2823 0%, var(--panel) 36%, var(--panel) 100%);
 }
 .bar__site { flex: none; display: flex; align-items: center; gap: 10px; }
 .bar__views, .bar__live { flex: none; }
@@ -857,3 +858,33 @@ kbd {
   animation: hpill-spin 800ms linear infinite;
 }
 @keyframes hpill-spin { to { transform: rotate(360deg); } }
+
+/* robot power cut by the console E-stop (latched until pressed again on that bay) */
+.feed__power {
+  position: absolute; inset: 0;
+  z-index: 2;
+  display: none; place-content: center; text-align: center;
+  gap: 0.25rem;
+  background: rgb(118 20 26 / 0.38);
+  color: var(--text);
+  pointer-events: none;
+}
+.feed__power strong { font-size: var(--t-l); font-weight: 700; letter-spacing: 0.06em; color: #fff; }
+.feed.is-powered-off { border-color: var(--stalled); }
+.feed.is-powered-off .feed__power { display: grid; }
+.feed--strip .feed__power strong { font-size: var(--t-m); }
+.feed--strip .feed__power span { display: none; }
+
+.feed__zone { color: var(--muted); white-space: nowrap; }
+.feed--strip .feed__zone { display: none; }
+
+.bar__badge {
+  flex: none;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--attn);
+  color: var(--attn);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.bar__badge[hidden] { display: none; }

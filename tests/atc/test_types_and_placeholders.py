@@ -1,4 +1,4 @@
-"""Shared ATC contracts and the offline Solana / Verda Nemotron placeholders (T-100)."""
+"""Shared ATC contracts and the offline Solana placeholder and the triage reasoner (T-100)."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from teleop.reasoning import (
     FleetReasoner,
     ReasoningContext,
     ReasoningVerdict,
-    VerdaNemotronPlaceholder,
+    TriageReasoner,
 )
 from teleop.sim.hands import load_hand
 
@@ -243,17 +243,15 @@ def _ctx(**kw: object) -> ReasoningContext:
     return ReasoningContext(**base)  # type: ignore[arg-type]
 
 
-def test_nemotron_placeholder_is_deterministic_and_per_bay(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("VERDA_API_KEY", raising=False)
-    monkeypatch.setenv("NEMOTRON_MODEL", "nvidia/nemotron-test")
-    r = VerdaNemotronPlaceholder.from_env()
+def test_triage_reasoner_is_deterministic_and_per_bay():
+    r = TriageReasoner()
     assert isinstance(r, FleetReasoner)
     assert r.latest_verdict(1) is None
     r.submit(_ctx())
     v1 = r.latest_verdict(1)
     assert isinstance(v1, ReasoningVerdict)
     assert "Bay 1" in v1.headline and "3.5 cm" in v1.headline
-    assert v1.model == "placeholder:nvidia/nemotron-test"
+    assert v1.model == "triage"
     assert v1.latency_ms >= 0.0
     r.submit(_ctx())
     v2 = r.latest_verdict(1)
@@ -264,8 +262,8 @@ def test_nemotron_placeholder_is_deterministic_and_per_bay(monkeypatch: pytest.M
     r.close()
 
 
-def test_nemotron_placeholder_explains_ood_refusal_and_validation():
-    r = VerdaNemotronPlaceholder()
+def test_triage_reasoner_explains_ood_refusal_and_validation():
+    r = TriageReasoner()
     r.submit(_ctx(event_kind="OOD_REFUSAL", bay_id=2, x_bolt_m=0.0, mahalanobis_distance=7.4))
     ood = r.latest_verdict(2)
     assert ood is not None
@@ -285,12 +283,11 @@ def test_nemotron_placeholder_explains_ood_refusal_and_validation():
     )
     gate = r.latest_verdict(1)
     assert gate is not None and "3/3" in gate.headline
-    assert r.model == "placeholder:offline"
+    assert r.model == "triage"
 
 
-def test_placeholder_gate_verdict_uses_the_gate_threshold(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("VERDA_API_KEY", raising=False)
-    r = VerdaNemotronPlaceholder.from_env()
+def test_triage_gate_verdict_uses_the_gate_threshold():
+    r = TriageReasoner()
     for passed, word in ((18, "PASS"), (17, "FAIL")):
         r.submit(
             _ctx(

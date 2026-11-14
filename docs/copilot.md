@@ -91,15 +91,13 @@ The flags `--no-images` and `--mute` become `CopilotConfig.no_images` and `Copil
 |---|---|---|
 | Live call-outs: telemetry plus one JPEG → JSON | `gemini-4-hydrogen`, thinking `low` | The fast Gemini 4 model, multimodal, with structured output. Thinking defaults to `high`, which is too slow for a call-out, so the client sends `low`. `minimal` and `thinkingBudget` are HTTP 400 on Gemini 4, so the client offers neither. Fallback: `gemini-3.8-flash`. |
 | Deep review: telemetry plus up to 6 JPEGs → JSON | `gemini-4-argon`, thinking `low` | The strongest Gemini 4 model for multi-frame spatial reasoning: telling a clean latch clearance from a fragile scrape or a pinned bolt. It runs off the critical path (90 s timeout, at most 20 reviews an hour). Thinking is `low` for speed; set `COPILOT_REVIEW_THINKING=high` for harder cases. Paid tier only. The introductory price ends 30 Nov 2026. |
-| Speech | `gemini-3.8-flash-lite-tts`, voice `Kore` | The low-latency Gemini TTS tier, on the same key and client. It returns 24 kHz, 16-bit mono PCM, which the client wraps in a WAV. If speech takes more than 4 s, `T-212` falls back to the system voice. |
+| Speech | `gemini-3.8-flash-lite-tts`, voice `Kore` | The low-latency Gemini TTS tier, on the same key and client. It returns 24 kHz, 16-bit mono PCM, which the client wraps in a WAV. If speech takes more than 1.5 s, `T-212` falls back to the system voice. |
 | Offline backup (`T-214`) | `gemma4:e4b` | The largest multimodal Gemma that runs on this laptop's CPU and Iris Xe next to the simulation. Used for call-outs only, never for reviews. |
 
 Speech uses a dedicated TTS model rather than the text models.
 
 Other models were considered and rejected for `T-210`:
 - **DeepSeek Flash and ElevenLabs** each need a second vendor key and a second client.
-- **Kimi** already backs the fleet reasoner (`teleop.reasoning`). Using another model family here
-  gives an independent second opinion.
 
 `T-214`'s OpenAI-compatible client can point at other providers later without code changes.
 
@@ -251,3 +249,150 @@ COPILOT_REVIEW_MODEL=gemini-4-argon
 COPILOT_TTS_MODEL=gemini-3.8-flash-lite-tts
 COPILOT_VOICE=Kore
 ```
+
+## Console feed and events (T-211)
+
+The copilot watches the console as one more read-only viewer. It never sends anything.
+
+- **`FeedClient`** (`teleop.copilot.feed`) connects to `COPILOT_CONSOLE_URL`.
+  - It reads telemetry and camera frames.
+  - It reconnects after 1 s, doubling each time up to 5 s. A successful connection resets the
+    delay.
+  - Each frame's slot is mapped to a camera through the latest telemetry's `feeds`. A frame is
+    dropped when it arrives before any telemetry or carries an old layout's byte.
+- **`FrameStore`** (`teleop.copilot.frames`) keeps the newest frame per bay and camera.
+  - While a bay is in `RESCUE` with the clutch held, it also samples that bay's frames: at most
+    one per camera every 0.5 s, and at most 12 in all. These are for the review.
+  - The samples are kept after the clutch is released and cleared at that bay's next stall.
+  - `downscale_jpeg` shrinks a frame to at most 512 px.
+  - Logs use `StoredFrame.sha256`, never the image.
+- **`EventDetector`** (`teleop.copilot.events`) turns telemetry changes into events: `stall`,
+  `refused`, `rescue_started`, `rescue_released`, `validating`, `gate_result`,
+  `autonomous_started` and `autonomous_finished`.
+  - The first message only sets a baseline, so a reconnect never repeats an event.
+  - A backwards jump in `sim_t` means the console restarted, so the detector starts a new
+    baseline.
+  - Replayed background bays never fire.
+
+Facts from the recorded stage (`tests/copilot/fixtures/`, about 35 s of `--script`):
+- A jam goes straight from `NOMINAL` to `RESCUE` within one 10 Hz message.
+- The skill gate runs 20 randomized rollouts (`passed`/`total`), not 3.
+- The refusal is Bay 2 in `OOD_ESCALATED`.
+
+### Try it
+
+```bash
+uv run teleop atc --source synthetic            # terminal 1; press F to jam Bay 1
+uv run python -m teleop.copilot watch           # terminal 2
+```
+
+Example output from the scripted stage:
+
+```text
+[16:38:33] BAY 1 STALL                NOMINAL -> RESCUE, C=0.24, bolt 3.4 cm, frame bay1/cctv ed788796739f8ad2
+[16:38:38] BAY 1 RESCUE_STARTED       RESCUE -> RESCUE, C=0.74, bolt 3.4 cm, frame bay1/side_ortho 75659194be5399f8
+[16:38:41] BAY 1 RESCUE_RELEASED      RESCUE -> VALIDATING, C=0.55, bolt 5.6 cm, frame bay1/side_ortho 8ae094806c786223, 10 rescue frames
+[16:38:41] BAY 1 VALIDATING           RESCUE -> VALIDATING, C=0.55, bolt 5.6 cm, frame bay1/side_ortho 8ae094806c786223, 10 rescue frames
+[16:39:14] BAY 1 GATE_RESULT          VALIDATING -> NOMINAL, C=0.64, bolt 5.6 cm, gate PASS 20/20, frame bay1/side_ortho 7441cd24b6794bb7, 10 rescue frames
+[16:39:20] BAY 2 AUTONOMOUS_STARTED   NOMINAL -> AUTONOMOUS_SKILL, C=0.36, bolt 3.4 cm, frame bay2/cctv 2e55add3d416dc4f
+```
+
+## Live call-outs and speech (T-212)
+
+```bash
+uv run teleop atc --source synthetic                     # terminal 1; press F to jam Bay 1
+uv run python -m teleop.copilot run                      # terminal 2
+uv run python -m teleop.copilot run --mute --no-images   # print and log only, text-only requests
+```
+
+Flags: `--console URL` (default `COPILOT_CONSOLE_URL`), `--no-images`, `--mute`, `--gemini-tts`,
+`--env-file PATH` and `--log-dir DIR` (default `runs/copilot`, gitignored). Without `GEMINI_API_KEY` the command
+still runs: every call-out is the template, spoken with the system voice.
+
+### Call-outs (`teleop.copilot.callouts`, `teleop.copilot.prompts`)
+
+- **Model events:** `stall`, `refused`, `gate_result` and `autonomous_finished` ask the fast model
+  (`COPILOT_FAST_MODEL`, thinking `low`) with the bay's telemetry slice and its latest frame,
+  downscaled to at most 512 px (no frame with `--no-images`). The answer follows
+  `{"say", "detail", "severity"}`; `say` is clipped to 15 words and `detail` to 40.
+- **Templated events:** `rescue_started`, `rescue_released`, `validating` (its deep review is
+  `T-213`) and `autonomous_started` are fully described by telemetry, so they never call a model.
+- **The 1 s template.** If the model has not answered within 1 s, the deterministic template
+  (for example "Bay 1 stalled on a flap jam. Rescue needed.") is spoken at once. If the model's
+  line then arrives while the template is still waiting in the speech queue, it replaces it there;
+  if the template is already being spoken, the model's line is only printed and logged
+  (`(update)`). Model errors and malformed answers speak the template straight away.
+- **8 s hard timeout** (wall clock, on top of the client's per-socket timeout): a later answer is
+  dropped.
+- **One request per bay.** A newer event for a bay drops the older event's pending answer and
+  cancels that bay's lines that are still waiting to be spoken. While the older request is still
+  running, the newer event gets the template.
+
+### Speech (`teleop.copilot.speech`)
+
+- **Queue:** at most 2 lines wait. Alarms jump ahead of other lines; when the queue is full the
+  oldest non-alarm line is dropped (an info line never pushes out an alarm). Lines older than
+  10 s are dropped. Only `say` is spoken, never `detail`.
+- **System voice by default.** Live call-outs are spoken with the system voice straight away.
+  Gemini TTS missed even a 1.5 s cut-off on every live line (see below), so it only added delay.
+  On Windows the voice is one long-running PowerShell `SpeechSynthesizer`, started with the
+  copilot and fed one line at a time, which saves about 0.6 s per line over starting PowerShell
+  each time.
+- **`--gemini-tts`** opts back in: Gemini TTS (`COPILOT_TTS_MODEL`) returns a WAV, played with the first available of
+  `paplay`, `aplay`, `afplay` or PowerShell `System.Media.SoundPlayer`.
+- **Fallback:** if TTS fails or takes longer than 1.5 s, the same line is spoken with the system
+  voice (`System.Speech` on Windows, `say` on macOS, `spd-say`/`espeak` on Linux). The late WAV is
+  never played, so lines are never out of order, but it is cached: template lines repeat, so the
+  next "Clutch engaged on bay 1." plays the Gemini voice at once. The cache holds 32 lines.
+- **Voice:** `Kore`, a clear, firm and neutral prebuilt voice that stays intelligible over a noisy
+  booth. `Charon` is a calmer alternative (`COPILOT_VOICE=Charon`).
+- **`--mute`** speaks nothing; call-outs are still printed and logged.
+
+### Outputs
+
+```text
+[12:01:07] BAY 1 ALARM     Bay 1 stalled on a flap jam. Rescue needed.
+           NOMINAL -> RESCUE, C=0.24, bolt 3.4 of 5.2 cm, fault flap  [template; model slower than 1 s]
+```
+
+`runs/copilot/<date>.jsonl` gets one `event` record per event (bay, states, frame hash) and one
+`callout` record per call-out (source, model, latency, severity, text, frame hash). It never holds
+an image or the API key.
+
+### Demo check (2026-11-14)
+
+`teleop atc --source synthetic --script` and `python -m teleop.copilot run --mute`, run together on
+this laptop without a Gemini key (template path only). All eight scripted events produced their
+call-out 2–3 ms after the event record, in stage order: the Bay 1 stall, the clutch engage and
+release, validating, the gate (20 of 20), Bay 2's autonomous start and finish, and the Bay 2
+refusal. The JSONL log held only frame hashes.
+
+### Live run with a key (2026-11-14, scripted stage, images on)
+
+| Event | Template spoken | Hydrogen answer | Outcome |
+|---|---|---|---|
+| Bay 1 stall | at the event (model > 1 s) | 5.5 s | printed as an update |
+| Bay 1 gate result | at the event | 4.2 s | printed as an update |
+| Bay 2 autonomous finished | at the event | 3.8 s | replaced the queued template |
+| Bay 2 refused | at the event | 6.2 s | printed as an update |
+
+- **Hydrogen never beat 1 s,** so in practice the operator hears the template and reads the model's
+  line. It answered every time, within the 8 s limit.
+- **Gemini TTS missed the 4 s cut-off on every line** (5 of 5), so the system voice spoke them all.
+  Because each fallback first waits the full 4 s, spoken lines trailed their events by 4–9 s.
+  The cut-off is now **1.5 s** (`TTS_DEADLINE_S`), so the system voice starts about 1.5 s after a
+  line is dequeued. Repeated lines still get the Gemini voice once their late audio is cached.
+- **A clutch flip about 1 s after a stall** used to cancel the stall's pending model request. Now
+  templated events let a pending model answer finish; only a newer model event supersedes it.
+- `runs/copilot/*.jsonl` now also has a `speech` record per line (`route`: `tts`, `system`,
+  `dropped_stale` or `muted`, plus the TTS time), so the TTS hit rate can be measured.
+
+### Live run, system voice only (2026-11-14)
+
+With the persistent Windows voice and no Gemini TTS, five of six lines started speaking as soon as
+the call-out was made (0.0 s); one waited 1.3 s behind the line before it. Saying a line takes
+3–7 s at the default speaking rate. The voice now runs faster
+(System.Speech rate 2; `say` and `espeak` at 230 words a minute; `spd-say -r 30`): the stall line
+went from 4.7 s to 3.6 s and the refusal from 6.7 s to 5.3 s. With `--gemini-tts` and the 1.5 s cut-off, every line had
+started 1.5 s late (4.2 s for one that queued). Each `speech` record now has `start_ms` (queued
+to speaking) and `speak_ms`.

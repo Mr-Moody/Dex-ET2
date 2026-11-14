@@ -1,12 +1,12 @@
 ---
 id: T-201
 title: Studio glove liveness and glove health check
-status: in_review
-owner: claude-code
-branch: feat/glove-health
+status: done
+owner: null
+branch: null
 depends_on: [T-200]
 plan: docs/superpowers/plans/2026-11-14-one-command-booth-health.md
-claimed_at: '2026-11-14T11:16:44+00:00'
+claimed_at: null
 ---
 
 Implements Task 2 of the plan.

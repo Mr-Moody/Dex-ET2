@@ -1,7 +1,7 @@
 ---
 id: T-195
 title: Batched ACT inference worker and live ACT recovery
-status: todo
+status: done
 owner: null
 branch: null
 depends_on: [T-191]

@@ -11,7 +11,7 @@ still treats them as static, and the console marks their telemetry as replayed.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -137,6 +137,9 @@ class BackgroundPlayer:
         self._maps: dict[int, list[tuple[int, int, int]]] = {}
         self._last_t: dict[int, float] = {}
         self._belt_dist: dict[int, float] = {}
+        self._pause_s: dict[int, float] = {}  # replay time lost to E-stop freezes, per bay
+        self._frozen_at: dict[int, float] = {}  # replay time a currently frozen bay holds
+        self._shown_t: dict[int, float] = {}  # last replay time posed, where a cut freezes
         for bay in bays:
             mapping: list[tuple[int, int, int]] = []
             for name, adr, width in _bay_joints(model, bay):
@@ -155,8 +158,23 @@ class BackgroundPlayer:
         transfer_s = PACK_PITCH_M / CONVEYOR_SPEED_M_S if dur > 2.5 else 0.0
         return work_end, transfer_s, work_end + transfer_s
 
-    def apply(self, data: Any, wall_t: float) -> dict[int, float]:
-        """Pose each background bay at ``wall_t``; returns ``{bay: C(t)}``. No ``mj_forward``."""
+    def _replay_t(self, bay: int, wall_t: float, frozen: Collection[int]) -> float:
+        """Replay clock of ``bay``: it stops while the bay is frozen and resumes from there."""
+        if bay in frozen:
+            if bay not in self._frozen_at:
+                self._frozen_at[bay] = self._shown_t.get(bay, wall_t - self._pause_s.get(bay, 0.0))
+            return self._frozen_at[bay]
+        if bay in self._frozen_at:
+            self._pause_s[bay] = wall_t - self._frozen_at.pop(bay)
+        t = wall_t - self._pause_s.get(bay, 0.0)
+        self._shown_t[bay] = t
+        return t
+
+    def apply(self, data: Any, wall_t: float, frozen: Collection[int] = ()) -> dict[int, float]:
+        """Pose each background bay at ``wall_t``; returns ``{bay: C(t)}``. No ``mj_forward``.
+
+        ``frozen`` bays (robot power cut by the console E-stop) hold their current pose.
+        """
         import math
 
         out: dict[int, float] = {}
@@ -164,7 +182,8 @@ class BackgroundPlayer:
         if transfer_s <= 0.0 or loop_s <= 0.0:
             dur = self.cycle.duration_s
             for bay, mapping in self._maps.items():
-                q, conf = self.cycle.sample(wall_t + PHASE_OFFSETS.get(bay, 0.0) * dur)
+                t = self._replay_t(bay, wall_t, frozen)
+                q, conf = self.cycle.sample(t + PHASE_OFFSETS.get(bay, 0.0) * dur)
                 for col, adr, width in mapping:
                     data.qpos[adr : adr + width] = q[col : col + width]
                 out[bay] = conf
@@ -176,7 +195,7 @@ class BackgroundPlayer:
         arm_mask = ~self.cycle.snap_mask()
         for bay, mapping in self._maps.items():
             phase = PHASE_OFFSETS.get(bay, 0.0) * loop_s
-            u = max(0.0, float(wall_t) + phase) % loop_s
+            u = max(0.0, float(self._replay_t(bay, wall_t, frozen)) + phase) % loop_s
             if u < work_end:
                 q, conf = self.cycle.sample(u)
             else:
@@ -190,15 +209,22 @@ class BackgroundPlayer:
             out[bay] = conf
         return out
 
-    def conveyor_statuses(self, wall_t: float, *, estop: bool = False) -> dict[int, ConveyorStatus]:
-        """Seamless modular conveyor loop (pause during unlatching -> advance full PACK_PITCH_M)."""
+    def conveyor_statuses(
+        self, wall_t: float, *, estop: bool = False, frozen: Collection[int] = ()
+    ) -> dict[int, ConveyorStatus]:
+        """Seamless modular conveyor loop (pause during unlatching -> advance full PACK_PITCH_M).
+
+        ``estop`` stops every belt; ``frozen`` bays (robot power cut) stop their own belt.
+        """
         work_end, transfer_s, loop_s = self.loop_params()
         out: dict[int, ConveyorStatus] = {}
         for bay in self._maps:
-            t_eff = self._last_t.get(bay, wall_t) if estop else wall_t
+            stopped = estop or bay in frozen
+            replay_t = self._replay_t(bay, wall_t, frozen)
+            t_eff = self._last_t.get(bay, replay_t) if estop else replay_t
             self._last_t[bay] = t_eff
             if transfer_s <= 0.0 or loop_s <= 0.0:
-                out[bay] = ConveyorStatus(bay_id=bay, mode="estop" if estop else "paused")
+                out[bay] = ConveyorStatus(bay_id=bay, mode="estop" if stopped else "paused")
                 continue
             phase = PHASE_OFFSETS.get(bay, 0.0) * loop_s
             t_total = max(0.0, float(t_eff) + phase)
@@ -216,7 +242,7 @@ class BackgroundPlayer:
             self._belt_dist[bay] = belt_dist
             out[bay] = ConveyorStatus(
                 bay_id=bay,
-                mode="estop" if estop else mode,
+                mode="estop" if stopped else mode,
                 belt_dist_m=belt_dist,
                 pack_dy_m=pack_dy,
             )

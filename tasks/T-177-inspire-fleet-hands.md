@@ -1,12 +1,12 @@
 ---
 id: T-177
 title: Swap the fleet LEAP hands for five-finger Inspire hands
-status: in_review
-owner: claude-code
-branch: feat/inspire-fleet-hands
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: null
-claimed_at: '2026-11-14T06:45:37+00:00'
+claimed_at: null
 ---
 
 **Fleet hands. Replaces the right LEAP hand (3 fingers + thumb) on every bay's Panda with the

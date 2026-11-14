@@ -7,7 +7,6 @@ fallback. ``handle()`` is the transport-free dispatcher; the socket loops only f
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import logging
 import socket
 import threading
@@ -23,7 +22,11 @@ from teleop.unoq import protocol as P
 from teleop.unoq.classifier import MahalanobisStallClassifier
 from teleop.unoq.dmp import HAND_ACTUATORS, fit_rbf_dmp, pose_to_vec7
 from teleop.unoq.filter import JointsOneEuroFilter, PoseOneEuroFilter
-from teleop.unoq.mcu_bridge import McuConsoleBridge
+from teleop.unoq.mcu_bridge import (
+    McuConsoleBridge,
+    console_state_from_dict,
+    console_state_to_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +36,11 @@ POLL_S = 0.2  # how often blocking socket loops check for stop()
 
 
 def console_to_dict(state: ConsoleInputState) -> dict[str, Any]:
-    return dataclasses.asdict(state)
+    return console_state_to_dict(state)
 
 
 def console_from_dict(raw: Mapping[str, Any]) -> ConsoleInputState:
-    bay = raw.get("selected_bay")
-    return ConsoleInputState(
-        selected_bay=None if bay is None else int(bay),
-        clutch=bool(raw.get("clutch", False)),
-        estop=bool(raw.get("estop", False)),
-        fault_rig_latched=bool(raw.get("fault_rig_latched", False)),
-        timestamp_ns=int(raw.get("timestamp_ns", 0)),
-    )
+    return console_state_from_dict(raw)
 
 
 def _vec7_to_pose(raw: Any) -> Pose:
@@ -94,6 +90,7 @@ class UnoQServer:
             P.OP_REGISTER_SKILL: self._register_skill,
             P.OP_CONSOLE_STATE: self._console_state,
             P.OP_SET_BAY_STATE: self._set_bay_state,
+            P.OP_JOYSTICK: self._joystick,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -181,7 +178,7 @@ class UnoQServer:
         if handler is None:
             return P.error(f"unknown op {op!r}")
         try:
-            if op == P.OP_SET_BAY_STATE:
+            if op in (P.OP_SET_BAY_STATE, P.OP_JOYSTICK):
                 return handler(dict(request))  # MCU write may block: never under the lock
             with self._lock:
                 return handler(dict(request))
@@ -265,6 +262,24 @@ class UnoQServer:
         if self._bridge is not None:
             self._bridge.set_bay_state(bay_id, state)
         return P.ok()
+
+    def _joystick(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Joystick map and calibration on the attached MCU console."""
+        bridge = self._bridge
+        if bridge is None:
+            return P.error("joystick: no MCU console attached")
+        action = str(req.get("action", "status"))
+        if action == "calibrate":
+            bridge.start_joystick_calibration()
+        elif action == "abort":
+            bridge.abort_joystick_calibration()
+        elif action == "set":
+            bridge.set_joy_map(str(req["map"]))  # ValueError -> error reply
+        elif action == "raw":
+            bridge.stream_joystick_raw(bool(req.get("on", True)))
+        elif action != "status":
+            return P.error(f"joystick: unknown action {action!r}")
+        return P.ok(**bridge.joystick_status())
 
     # ------------------------------------------------------------------ sockets
 

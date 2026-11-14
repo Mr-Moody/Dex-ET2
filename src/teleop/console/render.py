@@ -34,6 +34,7 @@ from teleop.console.background import BackgroundCycle, BackgroundPlayer
 from teleop.console.layout import FeedSpec, ViewState, feed_layout
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
+from teleop.policy.cameras import policy_clip
 from teleop.sim.cells import (
     BEACON_ESTOP_RGBA,
     BEACON_FEED_RGBA,
@@ -318,7 +319,9 @@ class FeedRenderer:
 
     def _animate_conveyors(self, snap: SimSnapshot, wall_t: float) -> None:
         bg_conveyors = (
-            self.background.conveyor_statuses(wall_t) if self.background is not None else {}
+            self.background.conveyor_statuses(wall_t, frozen=snap.view.powered_off)
+            if self.background is not None
+            else {}
         )
         self.bg_conveyors = bg_conveyors
         statuses: dict[int, ConveyorStatus] = {**bg_conveyors}
@@ -350,7 +353,11 @@ class FeedRenderer:
         if snap.mocap_pos.size:
             d.mocap_pos[:] = snap.mocap_pos
             d.mocap_quat[:] = snap.mocap_quat
-        conf = self.background.apply(d, wall_t) if self.background is not None else {}
+        conf = (
+            self.background.apply(d, wall_t, frozen=snap.view.powered_off)
+            if self.background is not None
+            else {}
+        )
         self._animate_conveyors(snap, wall_t)
         self._apply_zoom_pan(feeds)
         mj.mj_kinematics(self.model, d)
@@ -365,8 +372,11 @@ class FeedRenderer:
             # Clip distant stations along the same conveyor line out of orthographic close-ups.
             self.model.vis.map.zfar = (1.15 / self._extent) if is_ortho else self._base_zfar
             r = self._renderer(feed.width, feed.height)
-            r.update_scene(d, feed.camera)  # every feed shows the full arm and hand
-            pixels = r.render()
+            # Wrist cameras get metric clip planes: the warehouse-scale near plane (~0.37 m)
+            # would clip the hand and latch out of the wrist view.
+            with policy_clip(self.model, feed.camera):
+                r.update_scene(d, feed.camera)  # every feed shows the full arm and hand
+                pixels = r.render()
             buf = io.BytesIO()
             Image.fromarray(pixels).save(buf, format="JPEG", quality=self.quality)
             frames.append((feed.slot, buf.getvalue()))

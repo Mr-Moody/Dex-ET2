@@ -817,6 +817,49 @@ def test_conveyor_pauses_during_work_and_advances_seamless_pitch_loop_with_estop
     assert co.conveyor_status(2).mode != "estop"
 
 
+def test_estop_power_cut_brakes_one_robot_and_resumes_its_cycle(rig: Rig) -> None:
+    co = rig.co
+    for _ in range(400):
+        co.tick()
+        if co.in_routine(1) and co.in_routine(2):
+            break
+    for _ in range(20):  # a few ticks into the push
+        co.tick()
+    cut = ConsoleInputState(powered_off=frozenset({1}))
+    co.tick(cut)
+    held = _bay_pos(rig, 1)
+    bolt = co.rig(1).bolt_x()
+    bay2_start = _bay_pos(rig, 2)
+    for _ in range(90):
+        snaps = co.tick(cut)
+    assert not snaps[0].powered and snaps[1].powered
+    assert np.linalg.norm(_bay_pos(rig, 1) - held) < 2e-3  # brakes: the arm stays put
+    assert co.rig(1).bolt_x() == pytest.approx(bolt, abs=1e-3)
+    assert co.state(1) == BayState.NOMINAL  # a braked arm is not a stall
+    assert co.conveyor_status(1).mode == "estop"
+    assert np.linalg.norm(_bay_pos(rig, 2) - bay2_start) > 1e-3  # Bay 2 keeps working
+
+    for _ in range(600):  # power back: the routine resumes and clears the bolt
+        co.tick()
+        if co.outcome(1) == "cleared":
+            break
+    assert co.outcome(1) == "cleared"
+    assert co.snapshot(1).powered
+
+
+def test_estop_power_cut_ignores_the_glove_on_a_rescue(rig: Rig) -> None:
+    co = rig.co
+    co.start_cycle(1, flap_jammed=True)
+    rig.run_until(1, {BayState.RESCUE})
+    hover = _bay_pos(rig, 1)
+    console = ConsoleInputState(selected_bay=1, clutch=True, powered_off=frozenset({1}))
+    for sample in demo_operator(rig, 1):
+        co.tick(console, sample)
+    assert np.linalg.norm(_bay_pos(rig, 1) - hover) < 2e-3
+    assert co.rig(1).bolt_x() < BOLT_CLEARED_M
+    assert co.state(1) == BayState.RESCUE
+
+
 def test_control_uses_estimate_not_truth(unoq, hand_spec, validator):
     rig = Rig(unoq, hand_spec, validator)
     rig.co.start_cycle(1)

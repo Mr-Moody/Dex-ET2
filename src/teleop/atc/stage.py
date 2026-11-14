@@ -74,6 +74,7 @@ class StageAction(StrEnum):
     SELECT_BAY_3 = "select_bay_3"
     SELECT_BAY_4 = "select_bay_4"
     CLUTCH = "clutch"
+    ESTOP = "estop"
     ARM_BAY1_FLAP = "arm_bay1_flap"
     ARM_BAY2_FLAP = "arm_bay2_flap"
     ARM_BAY2_PIN = "arm_bay2_pin"
@@ -88,6 +89,7 @@ KEYMAP: dict[int, StageAction] = {
     ord("3"): StageAction.SELECT_BAY_3,
     ord("4"): StageAction.SELECT_BAY_4,
     KEY_SPACE: StageAction.CLUTCH,
+    ord("E"): StageAction.ESTOP,
     ord("F"): StageAction.ARM_BAY1_FLAP,
     ord("G"): StageAction.ARM_BAY2_FLAP,
     ord("P"): StageAction.ARM_BAY2_PIN,
@@ -95,7 +97,7 @@ KEYMAP: dict[int, StageAction] = {
     ord("M"): StageAction.CYCLE_BACKEND,
 }
 ACTION_LOG_LEN = 20
-CONTROL_KEYS_HINT = "Use 1-4, SPACE, F, G, P, R or M"
+CONTROL_KEYS_HINT = "Use 1-4, SPACE, E, F, G, P, R or M"
 
 
 def key_name(code: int) -> str:
@@ -129,19 +131,24 @@ class ConsoleSource(Protocol):
 
 
 def merge_console(states: Iterable[ConsoleInputState]) -> ConsoleInputState:
-    """Combine consoles: latest bay selection wins, any clutch holds, any E-stop releases."""
+    """Combine consoles: latest bay selection wins, any clutch holds, any E-stop releases.
+
+    A bay is powered off when any console has cut it, and the clutch never drives a cut bay.
+    """
     items = list(states)
     if not items:
         return ConsoleInputState()
     selected = [s for s in items if s.selected_bay is not None]
     bay = max(selected, key=lambda s: s.timestamp_ns).selected_bay if selected else None
     estop = any(s.estop for s in items)
+    powered_off = frozenset[int]().union(*(s.powered_off for s in items))
     return ConsoleInputState(
         selected_bay=bay,
-        clutch=any(s.clutch for s in items) and not estop,
+        clutch=any(s.clutch for s in items) and not estop and bay not in powered_off,
         estop=estop,
         fault_rig_latched=any(s.fault_rig_latched for s in items),
         timestamp_ns=max(s.timestamp_ns for s in items),
+        powered_off=powered_off,
     )
 
 
@@ -517,14 +524,14 @@ class ReasonerTap:
 
     def status_line(self) -> str:
         if self.last_bay is None:
-            return "NEMOTRON  idle"
+            return "TRIAGE  idle"
         try:
             verdict = self.inner.latest_verdict(self.last_bay)
         except Exception:
             verdict = None
         if verdict is None:
-            return f"NEMOTRON bay {self.last_bay}: triaging..."
-        return f"NEMOTRON bay {self.last_bay}: {verdict.headline}"
+            return f"TRIAGE bay {self.last_bay}: triaging..."
+        return f"TRIAGE bay {self.last_bay}: {verdict.headline}"
 
     def close(self) -> None:
         self.inner.close()
@@ -772,6 +779,16 @@ class StageController:
             if rescue is not None and selected == rescue:
                 return f"Clutch released on Bay {rescue}: checking whether the bolt cleared", "info"
             return "Clutch released", "info"
+        if action is StageAction.ESTOP:
+            off = self.mcu.powered_off
+            selected = self.mcu.selected_bay
+            if selected is None:
+                if off:
+                    return "E-stop: power cut to every robot", "warn"
+                return "E-stop: power restored to every robot", "ok"
+            if selected in off:
+                return f"E-stop: Bay {selected} robot powered off. Press E again to restore", "warn"
+            return f"E-stop released: Bay {selected} robot powered on", "ok"
         if action is StageAction.ARM_BAY1_FLAP:
             return "Bay 1 flap jam armed: Bay 1 stalls on its next cycle", "ok"
         if action is StageAction.ARM_BAY2_FLAP:
@@ -791,6 +808,8 @@ class StageController:
             self.mcu.press_bay(_SELECT[action])
         elif action is StageAction.CLUTCH:
             self.mcu.toggle_clutch()
+        elif action is StageAction.ESTOP:
+            self.mcu.press_estop()
         elif action is StageAction.ARM_BAY1_FLAP:
             self.mcu.trigger_fault_rig()  # same path as the judge's physical rig
         elif action is StageAction.ARM_BAY2_FLAP:
@@ -931,6 +950,7 @@ class StageController:
             conveyors=co.conveyors(),
             compliance_detail=self.events.status_detail(),
             compliance_history=tuple(self.events.status_history()),
+            powered_off=self.console.powered_off,
         )
 
     def _faults_view(self) -> tuple[tuple[int, str, str], ...]:

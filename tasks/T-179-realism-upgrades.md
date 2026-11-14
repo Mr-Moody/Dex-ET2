@@ -1,12 +1,12 @@
 ---
 id: T-179
 title: Realism upgrades (pose estimate, touch re-localization, randomized gate)
-status: in_review
-owner: claude-code
-branch: feat/realism-upgrades
+status: done
+owner: null
+branch: null
 depends_on: [T-178]
 plan: docs/superpowers/plans/2026-11-14-realism-upgrades.md
-claimed_at: '2026-11-14T07:51:16+00:00'
+claimed_at: null
 ---
 
 **Implements `docs/superpowers/specs/2026-11-14-realism-upgrades-design.md` per the plan.**

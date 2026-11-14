@@ -6,7 +6,7 @@ studio:
   port: 14043
 wrist_mode: auto           # auto | coil | imu (glove wrist; the clutch maps it relatively)
 calibration: null          # glove calibration JSON from `teleop calibrate`
-unoq_host: unoq.local      # UNO Q edge node; falls back to a local loopback node
+unoq_host: 192.168.137.7   # UNO Q edge node; falls back to a local loopback node
 unoq_udp_port: 15051
 unoq_tcp_port: 15052
 serial_port: null          # UNO Q MCU console on a laptop serial port (UNOQ_SERIAL_PORT)

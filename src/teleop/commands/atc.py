@@ -23,8 +23,7 @@ cycles it live. ``--record-episodes DIR`` saves every recovery as a LeRobot epis
 when used, so the default run needs no torch.
 
 Hooks come from the environment (``.env``): ``SOLANA_RPC_URL``/``SOLANA_KEYPAIR_PATH`` for the
-compliance chain and ``VERDA_API_KEY``/``VERDA_BASE_URL``/``NEMOTRON_MODEL`` for the reasoner.
-Both fall back to local/offline modes.
+compliance chain, falling back to a local audit log. The fleet reasoner is the offline triage.
 """
 
 from __future__ import annotations
@@ -290,10 +289,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def _hardware_consoles(cfg: AtcConfig, unoq: SwitchableUnoQ) -> list[ConsoleSource]:
     if cfg.serial_port:
-        from teleop.unoq.mcu_bridge import open_console
+        from teleop.unoq.mcu_bridge import load_joy_map, open_console, save_joy_map
 
         transport, kind = open_console(cfg.serial_port)
-        bridge = McuConsoleBridge(transport)
+        bridge = McuConsoleBridge(transport, joy_map=load_joy_map(), on_joy_map=save_joy_map)
         bridge.start()
         logger.info("console: %s", kind)
         return [bridge]
@@ -427,14 +426,14 @@ def _run_booth(
 ) -> int:
     """Build the stage, the operator and (unless headless) the health checks, then run."""
     from teleop.compliance.solana import SolanaComplianceSink
-    from teleop.reasoning.nemotron import VerdaNemotronReasoner
+    from teleop.reasoning.triage import TriageReasoner
 
     unoq = SwitchableUnoQ(
         UnoQClient.connect_or_mock(cfg.unoq_host, cfg.unoq_udp_port, cfg.unoq_tcp_port)
     )
     stack.callback(unoq.close)
     sink = SolanaComplianceSink.from_env()
-    reasoner = VerdaNemotronReasoner.from_env()
+    reasoner = TriageReasoner()
     speak = cfg.audio and not cfg.headless
     hardware = _hardware_consoles(cfg, unoq)
     suffix = f" | compliance {sink.mode} | reasoner {reasoner.mode}"
@@ -456,14 +455,17 @@ def _run_booth(
     stack.callback(_close_act, controller)
     _setup_recovery(cfg, controller, hooks.get("--act-checkpoint"))
     sink_handle: Any = None
+    operator_box: list[Any] = []  # filled once the operator is built (after the sink)
     if "--record-episodes" in hooks:
         scripted = cfg.generate is not None or cfg.source == "synthetic"
-        # TODO(T-191): with gloves, SelectingGlove may play the scripted rescue instead
-        # (gloves unhealthy at clutch engage), so this startup-wide label can be wrong per
-        # episode. Once the episode sink takes a callable label, pass
-        # ``lambda: selecting.rescue_input or "glove"`` for a SelectingGlove operator.
-        source = "scripted" if scripted else "glove"
-        sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
+        # With gloves, SelectingGlove may play the scripted rescue instead (gloves unhealthy at
+        # clutch engage), so the label is read per rescue, never fixed at startup.
+        source: str | Callable[[], str] = "scripted" if scripted else rescue_label(operator_box)
+        try:
+            sink_handle = hooks["--record-episodes"](cfg.record_episodes, controller, source)
+        except (RuntimeError, OSError) as exc:
+            print(f"teleop atc: {exc}")
+            return 1
         controller.coordinator.set_observer(sink_handle)
         stack.callback(_close_episodes, controller, sink_handle)
     if "--generate" in hooks:
@@ -503,7 +505,25 @@ def _run_booth(
         health = HealthMonitor([hotspot_check, glove_check, panel])
         health.start()
         stack.callback(health.stop)
+    operator_box.append(glove)
     return _run(cfg, controller, glove, health)
+
+
+def rescue_label(operator_box: list[Any]) -> Callable[[], str]:
+    """Episode label for a human rescue, read when it starts: what really drove the hand.
+
+    ``operator_box`` holds the operator once built. A ``SelectingGlove`` reports the input it
+    chose at clutch engage (``"scripted"`` when the gloves were unhealthy); anything else is the
+    glove.
+    """
+
+    def label() -> str:
+        op = operator_box[0] if operator_box else None
+        if isinstance(op, SelectingGlove) and op.rescue_input is not None:
+            return op.rescue_input
+        return "glove"
+
+    return label
 
 
 def _build_glove(
@@ -697,7 +717,7 @@ def _run_viewer(
                     import mujoco as _mj  # pyright: ignore[reportMissingTypeStubs]
 
                     mj_any: Any = _mj
-                    bg_player.apply(co.data, co.time_s)
+                    bg_player.apply(co.data, co.time_s, frozen=controller.console.powered_off)
                     mj_any.mj_kinematics(co.model, co.data)
                 overlay = None
                 if co.time_s >= next_overlay_s:

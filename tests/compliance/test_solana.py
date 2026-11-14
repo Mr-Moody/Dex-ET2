@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -211,7 +212,10 @@ def test_keypair_file_roundtrip_is_owner_only_and_not_overwritten(tmp_path: Path
     path = tmp_path / "k" / "station.json"
     save_keypair(kp, path)
     assert load_keypair(path).pubkey() == kp.pubkey()
-    assert path.stat().st_mode & 0o077 == 0
+    # Windows ignores POSIX mode bits (st_mode reports 0o666 whatever os.open asked for), so the
+    # owner-only check is only meaningful elsewhere. On Windows, access comes from the ACLs.
+    if sys.platform != "win32":
+        assert path.stat().st_mode & 0o077 == 0
     with pytest.raises(FileExistsError):
         save_keypair(Keypair(), path)
 

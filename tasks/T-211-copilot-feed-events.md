@@ -1,7 +1,7 @@
 ---
 id: T-211
 title: Copilot console feed client, frame store and event detector
-status: todo
+status: done
 owner: null
 branch: null
 depends_on: [T-210]

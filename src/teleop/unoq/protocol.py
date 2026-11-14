@@ -2,9 +2,9 @@
 
 UDP carries the fast ``filter_step`` stream (one datagram per request and reply). TCP carries
 request/response ops (``ping``, ``classify_stall``, ``fit_dmp``, ``register_skill``,
-``console_state``, ``set_bay_state``), one JSON object per line. Every reply has ``"ok"``;
-failures carry ``"error"``. Non-finite floats (an OOD distance of ``inf``) go on the wire as
-``null``.
+``console_state``, ``set_bay_state``, ``joystick``), one JSON object per line. Every reply has
+``"ok"``; failures carry ``"error"``. Non-finite floats (an OOD distance of ``inf``) go on the
+wire as ``null``.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ OP_FIT_DMP = "fit_dmp"
 OP_REGISTER_SKILL = "register_skill"
 OP_CONSOLE_STATE = "console_state"
 OP_SET_BAY_STATE = "set_bay_state"
+OP_JOYSTICK = "joystick"  # action: status | calibrate | abort | set (map) | raw (on)
 
 UDP_OPS = frozenset({OP_FILTER_STEP, OP_PING})
 TCP_OPS = frozenset(
@@ -34,6 +35,7 @@ TCP_OPS = frozenset(
         OP_REGISTER_SKILL,
         OP_CONSOLE_STATE,
         OP_SET_BAY_STATE,
+        OP_JOYSTICK,
     }
 )
 

@@ -80,6 +80,7 @@ const ui = {
 const KEY_BAR = [
   { caps: ["1", "2", "3", "4"], codes: [49, 50, 51, 52], text: "Select bay" },
   { caps: ["Space"], codes: [32], text: "Clutch" },
+  { caps: ["E"], codes: [69], text: "E-stop bay" },
   { caps: ["M"], codes: [77], text: "Backend" },
   { caps: ["R"], codes: [82], text: "Reset cells" },
 ];
@@ -385,6 +386,7 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
         <span class="feed__meta">${isPinned ? VIEW_TEXT[view] || "" : ""}</span>
       </div>
       <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>
+      ${isOverview ? "" : `<div class="feed__power"><strong>E-STOP · Power cut</strong><span>Select Bay ${bayId} and press the E-stop again to restore</span></div>`}
     </div>`;
 
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
@@ -609,6 +611,7 @@ function updateWall(t) {
     if (!b) continue;
     if (el.dataset.state !== "STANDBY" || b.state !== "STANDBY") el.dataset.state = b.state;
     el.classList.toggle("is-selected", t.selected_bay === b.id && t.mode !== "rescue");
+    el.classList.toggle("is-powered-off", b.powered === false);
     const state = el.querySelector(".feed__state");
     if (state) {
       // In the grid there is no stage header, so the rescued bay's tile carries the timer.
@@ -899,6 +902,15 @@ function situation(t) {
     const acts = [];
     // Staying in the grid is a choice, so the close-up is offered, never pushed.
     if (t.mode === "grid") acts.push({ label: `Close-up of Bay ${r}`, accent: false, run: () => setLayoutMode("pin", r) });
+    if (b && b.powered === false) {
+      return {
+        tone: "ood", tag: `E-stop · Bay ${r}`,
+        head: `Bay ${r} robot is powered off`,
+        hint: `Its brakes hold the arm and the gloves are ignored. Select Bay ${r} and press the E-stop (${kbd("E")}) again to restore power.`,
+        keys: [69],
+        actions: acts,
+      };
+    }
     if (t.rescue.clutch && !refused && b && b.x_bolt_cm != null && b.x_bolt_cm >= t.bolt_clear_cm) {
       acts.push({ label: "Release Clutch", accent: true, run: () => pressKey(32, "Space") });
       return {

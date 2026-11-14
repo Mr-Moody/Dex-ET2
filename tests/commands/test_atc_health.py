@@ -53,7 +53,7 @@ def booth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     import teleop.console.run as console_run
 
     monkeypatch.chdir(tmp_path)  # compliance audit log lands in tmp_path/outputs
-    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "VERDA_API_KEY", "HOTSPOT_PASSWORD"):
+    for var in ("SOLANA_RPC_URL", "SOLANA_KEYPAIR_PATH", "HOTSPOT_PASSWORD"):
         monkeypatch.delenv(var, raising=False)
     seen: dict[str, Any] = {"builds": []}
     real_build = atc.build_hotspot_check
