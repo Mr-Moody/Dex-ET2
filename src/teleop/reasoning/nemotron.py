@@ -72,7 +72,8 @@ _FENCE_RE = re.compile(r"\A```(?:json)?\s*(.*?)\s*```\Z", re.DOTALL | re.IGNOREC
 
 SYSTEM_PROMPT = (
     "You are the Fleet Reasoning Co-Pilot for a 4-bay EV-battery disassembly cell "
-    "(7-DoF Franka Panda + 16-DoF LEAP Hand unlatching a 3-box sprung slide-bolt latch). "
+    "(7-DoF Franka Panda + compliant wrist + 6-actuator Inspire five-finger hand unlatching a "
+    "3-box sprung slide-bolt latch: index hooks the bolt, thumb presses the stopper flap flat). "
     "Physics reference: bolt clears at x_bolt >= 5.2 cm; a sprung stopper flap stalls the bolt "
     "near x_bolt ~ 3.5 cm; a pinned-bolt fault locks near x_bolt = 0.0 cm; stall triggers when "
     "confidence C < 0.3 for 300 ms; Mahalanobis OOD threshold gamma_ood = 3.0. "
