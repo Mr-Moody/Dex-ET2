@@ -65,11 +65,12 @@ def unoq() -> Iterator[Any]:
 
 # --------------------------------------------------------------------------- DMP golden run
 
-# Captured on main (5a40c38) before the recovery seam existed. ``recovery_backend: dmp`` must
-# reproduce it exactly: same compliance events in the same order on the same bays, after the
-# same number of 60 Hz ticks, ending at the same wrist positions. The float path differs by
-# platform (MuJoCo/NumPy builds), so ticks and wrist positions are pinned per platform: both
-# were checked unchanged on 5a40c38, this branch and the merge with main 93ee2b8.
+# First captured on main (5a40c38) before the recovery seam existed; re-captured for T-179
+# (estimated latch pose, touch re-localization, randomized gate) on the show's own config.
+# ``recovery_backend: dmp`` must reproduce it exactly: same compliance events in the same order
+# on the same bays, after the same number of 60 Hz ticks, ending at the same wrist positions.
+# The event order is unchanged from 5a40c38. The float path differs by platform (MuJoCo/NumPy
+# builds), so ticks and wrist positions are pinned per platform.
 GOLDEN_EVENTS: list[tuple[str, int]] = [
     ("STALL_ALERT", 1),
     ("RESCUE_LOGGED", 1),
@@ -81,12 +82,12 @@ GOLDEN_EVENTS: list[tuple[str, int]] = [
 Wrist = tuple[tuple[float, float, float], tuple[float, float, float]]
 GOLDEN_BY_PLATFORM: dict[str, tuple[int, Wrist]] = {
     "win32": (
-        1143,
-        ((-1.478592148, -1.977073149, 0.136353216), (2.578930729, -1.881824412, 0.135630299)),
+        1900,
+        ((-1.500714998, -1.976946076, 0.137861493), (2.577574617, -1.880202294, 0.135599578)),
     ),
     "linux": (  # CI (ubuntu-latest) and WSL Ubuntu
-        1147,
-        ((-1.475288148, -1.977085085, 0.136342682), (2.578923263, -1.881827771, 0.135621698)),
+        1899,
+        ((-1.499696779, -1.976322977, 0.13852164), (2.577570981, -1.880204093, 0.135597658)),
     ),
 }
 
