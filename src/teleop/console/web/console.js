@@ -355,7 +355,8 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
   const isPinned = role === "main";
   if (isPinned) el.classList.add("is-pinned");
   const title = isOverview ? "Plant overview" : `Bay ${bayId}`;
-  if (BAY_ZONE[bayId]) el.title = BAY_ZONE[bayId];
+  const tips = [BAY_ZONE[bayId], bayInfo && bayInfo.replayed ? "replayed routine cycle" : null].filter(Boolean);
+  if (tips.length) el.title = tips.join(" · ");
   el.innerHTML = `
     <div class="feed__top">
       <span class="feed__name">${title}</span>
@@ -369,7 +370,7 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
       <div class="feed__bottom">
         ${isOverview ? "" : '<span class="feed__belt" hidden></span>'}
         <span class="feed__armed" hidden></span>
-        <span class="feed__meta"><span class="feed__replay"></span><span>${VIEW_TEXT[view] || ""}</span><span class="feed__rec"><time class="feed__time"></time></span></span>
+        <span class="feed__meta">${isPinned ? VIEW_TEXT[view] || "" : ""}</span>
       </div>
       <div class="feed__lost"><strong>Signal lost</strong><span>Waiting for the camera to reconnect</span></div>
     </div>`;
@@ -602,8 +603,6 @@ function updateWall(t) {
     if (conf) conf.textContent = b.state === "STANDBY" ? "" : b.confidence.toFixed(2);
     const time = el.querySelector(".feed__time");
     if (time) time.textContent = t.wall;
-    const replay = el.querySelector(".feed__replay");
-    if (replay) replay.textContent = b.replayed ? "Replayed cycle" : "";
     const armed = el.querySelector(".feed__armed");
     if (armed) {
       const f = b.fault;
@@ -671,13 +670,12 @@ function ensureSparks() {
   for (const bay of BAYS) {
     const row = document.createElement("div");
     row.className = "spark";
-    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas role="img"></canvas><span class="spark__val"></span><span class="spark__pose"></span>`;
+    row.innerHTML = `<span class="spark__name">Bay ${bay}</span><canvas role="img"></canvas><span class="spark__val"></span>`;
     box.append(row);
     const s = {
       row,
       canvas: row.querySelector("canvas"),
       val: row.querySelector(".spark__val"),
-      pose: row.querySelector(".spark__pose"),
       hover: null, // 0..1 across the canvas while the pointer is over it
     };
     s.canvas.addEventListener("pointermove", (e) => {
@@ -695,9 +693,11 @@ function ensureSparks() {
 
 const SPARK_SAMPLES = 150;
 
-// C(t) trace: neutral line, red where it runs under the stall threshold (the dashed rule), a
-// dot on the latest sample. Returns the value under the pointer while hovering, else null.
-function drawSpark(canvas, history, threshold, hover) {
+// C(t) trace: one neutral line over the dashed stall threshold, a dot on the latest sample.
+// C(t) dips under the threshold briefly on every routine cycle, so a dip alone is never
+// painted as an alarm: `alarm` (the bay is actually stalled) colours the dot.
+// Returns the value under the pointer while hovering, else null.
+function drawSpark(canvas, history, threshold, hover, alarm) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
@@ -736,15 +736,14 @@ function drawSpark(canvas, history, threshold, hover) {
     g.stroke();
     g.restore();
   };
-  trace(css("--text"), 0, yT);
-  trace(bad, yT, h - yT);
+  trace(css("--text"), 0, h);
   const dot = (i) => {
     const v = history[i];
     g.fillStyle = css("--panel");
     g.beginPath();
     g.arc(x(i), y(v), 5, 0, Math.PI * 2);
     g.fill();
-    g.fillStyle = v < threshold ? bad : css("--text");
+    g.fillStyle = alarm ? bad : css("--text");
     g.beginPath();
     g.arc(x(i), y(v), 3.5, 0, Math.PI * 2);
     g.fill();
@@ -767,15 +766,16 @@ function drawSpark(canvas, history, threshold, hover) {
 
 function updateSparks(t) {
   ensureSparks();
-  $("threshold-note").textContent = `dashed line: stall below ${t.threshold.toFixed(1)}`;
+  $("threshold-note").textContent = `stall below ${t.threshold.toFixed(1)}`;
   for (const b of t.bays) {
     const s = ui.sparks.get(b.id);
     if (!s) continue;
     const standby = b.state === "STANDBY";
-    const hovered = standby ? null : drawSpark(s.canvas, b.history, t.threshold, s.hover);
+    const alarm = ["STALLED", "QUEUED", "OOD_ESCALATED"].includes(b.state);
+    const hovered = standby ? null : drawSpark(s.canvas, b.history, t.threshold, s.hover, alarm);
     const shown = hovered ?? b.confidence;
     s.row.classList.toggle("is-standby", standby);
-    s.row.classList.toggle("is-low", !standby && shown < t.threshold);
+    s.row.classList.toggle("is-low", alarm && hovered === null);
     s.val.textContent = standby ? "–" : shown.toFixed(2);
     s.canvas.setAttribute(
       "aria-label",
@@ -787,7 +787,8 @@ function updateSparks(t) {
       parts.push(`Pose est. ±${Math.round(b.pose_sigma_mm)} mm${yaw}`);
     }
     if (b.touch_correction_mm != null) parts.push(`touch-corrected ${b.touch_correction_mm.toFixed(1)} mm`);
-    s.pose.textContent = parts.join(", ");
+    const pose = parts.join(", "); // detail on demand: the row tooltip
+    if (s.row.title !== pose) s.row.title = pose;
   }
 }
 
@@ -800,6 +801,8 @@ function updateGate(t) {
     el.textContent = text;
     return el;
   };
+  // Nothing to say until a skill has been fitted: the panel stays out of the rail.
+  $("panel-gate").hidden = !g || ((g.ok === null || g.ok === undefined) && g.fit_ms == null);
   if (!g || g.ok === null || g.ok === undefined) {
     delete box.dataset.ok;
     box.replaceChildren(
@@ -995,22 +998,13 @@ function situation(t) {
       actions: armed.map((b) => ({ label: `Cancel Bay ${b.id}`, accent: false, run: () => sendFault(b.id, "clear") })),
     };
   }
-  const physicsBays = bays.filter((b) => !b.background);
-  const faultBtns = physicsBays.map((b) => ({
-    label: `Jam Bay ${b.id}`,
-    accent: false,
-    run: () => sendFault(b.id, "flap"),
-  }));
-  if (physicsBays.some((b) => b.id === 2)) {
-    faultBtns.push({ label: "Pin Bay 2 (OOD)", accent: false, run: () => sendFault(2, "pin") });
-  }
   return {
     tone: "idle",
     tag: t.gate && t.gate.ok ? "Fleet skill active" : "Nominal",
     head: "All active bays are running on their own",
-    hint: "Nothing needs you. Double-click a bay to focus it, or inject a fault to start a rescue.",
+    hint: "",
     keys: [],
-    actions: faultBtns,
+    actions: [],
   };
 }
 
@@ -1125,12 +1119,36 @@ function syncViewBar() {
   $("view-auto").classList.toggle("is-active", vmode === "auto");
 }
 
+// Fault injection is a demo control, so it lives in the Demo tools drawer, not in the banner.
+function updateDemoFaults(t) {
+  const faults = t.bays
+    .filter((b) => b.state !== "STANDBY" && !b.background)
+    .map((b) => ({ label: `Jam Bay ${b.id}`, bay: b.id, kind: "flap" }));
+  if (faults.some((f) => f.bay === 2)) faults.push({ label: "Pin Bay 2 (unseen fault)", bay: 2, kind: "pin" });
+  const key = faults.map((f) => f.label).join("|");
+  if (key === ui.demoKey) return;
+  ui.demoKey = key;
+  const box = $("demo-faults");
+  box.replaceChildren();
+  for (const f of faults) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "actbtn";
+    btn.textContent = f.label;
+    btn.addEventListener("click", () => sendFault(f.bay, f.kind));
+    box.append(btn);
+  }
+}
+
 function updateDummy(t) {
   const d = t.dummy;
   $("dummy-panel").hidden = !d;
-  if (!d) return;
+  if (!d) {
+    $("dummy-meta").textContent = "";
+    return;
+  }
   const DUMMY_MODE_TEXT = { manual: "manual", auto: "auto co-pilot", off: "off" };
-  $("dummy-meta").textContent = `(temporary, ${DUMMY_MODE_TEXT[d.mode] || d.mode})`;
+  $("dummy-meta").textContent = `(dummy glove ${DUMMY_MODE_TEXT[d.mode] || d.mode})`;
   $("dummy-panel").title =
     d.transport === "studio_udp" ? `Studio UDP stand-in${d.pid ? `, PID ${d.pid}` : ""}` : "Stand-in";
   for (const btn of $("dummy-panel").querySelectorAll("[data-dummy-mode]")) {
@@ -1180,6 +1198,7 @@ function render(t) {
   updateGate(t);
   updateLog(t);
   updateBrief(t);
+  updateDemoFaults(t);
   updateDummy(t);
   updateActions(t);
   updateCompliance(t);

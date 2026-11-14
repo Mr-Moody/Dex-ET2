@@ -87,7 +87,7 @@ body {
   background: var(--panel);
 }
 .bar__site { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.bar__mark { flex: none; width: 0.8rem; height: 0.8rem; background: var(--attn); }
+.bar__mark { flex: none; width: 1.9rem; height: 1.9rem; }
 .bar h1 { font-size: var(--t-m); font-weight: 600; white-space: nowrap; }
 .bar__live { justify-self: end; display: flex; align-items: center; gap: 14px; }
 .bar__clock { font-size: var(--t-l); font-weight: 300; }
@@ -139,13 +139,14 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
   position: relative;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  grid-template-areas: "brief" "health" "wall" "foot";
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "brief brief" "wall wall" "keys health";
+  align-items: stretch;
 }
 .brief { grid-area: brief; }
 .wall-wrap { grid-area: wall; }
-.keys { grid-area: foot; }
+.keys { grid-area: keys; }
 
 /* ---------------------------------------------------------------- status banner
    The annunciator: a filled state window on the left, then what is happening and what to press. */
@@ -155,10 +156,9 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
   display: flex;
   align-items: stretch;
   gap: 0 1.1rem;
-  min-height: 4.7rem;
+  min-height: 4rem;
   margin: var(--gap) var(--gap) 0;
   background: var(--panel);
-  border: 1px solid var(--hair);
 }
 .brief[data-tone="idle"] { --tone: var(--nominal); }
 .brief[data-tone="armed"] { --tone: var(--attn); }
@@ -174,7 +174,7 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
   flex: none;
   display: grid;
   place-items: center;
-  width: 8.2rem;
+  width: 7.4rem;
   padding: 0.4rem 0.6rem;
   background: var(--tone);
   color: var(--ink);
@@ -243,7 +243,7 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 1.4rem;
+  gap: 6px 1.1rem;
   margin: 0 var(--gap);
   padding: 0.5rem 4px;
 }
@@ -412,7 +412,7 @@ kbd {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   background: var(--pit);
-  border: 2px solid var(--hair);
+  border: 2px solid var(--panel-2);
   cursor: pointer;
 }
 .feed:focus-visible { outline-offset: 1px; }
@@ -502,14 +502,11 @@ kbd {
   white-space: nowrap;
 }
 .feed__bottom > :empty { display: none; }
-.feed__meta { margin-left: auto; color: var(--muted); display: inline-flex; align-items: center; gap: 0.5rem; overflow: hidden; }
-.feed__rec { display: inline-flex; align-items: center; gap: 5px; }
-.feed__rec::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--stalled); animation: rec 1.6s steps(2, jump-none) infinite; }
-@keyframes rec { 50% { opacity: 0.2; } }
+.feed__meta { margin-left: auto; color: var(--muted); }
 
 /* belt and E-stop: always readable, the stop is the loudest thing on the tile */
 .feed__belt { color: var(--muted); font-weight: 600; }
-.feed__belt[data-mode="feeding"] { color: var(--text); }
+.feed__belt[data-mode="feeding"] { display: none; }  /* the normal case says nothing */
 .feed__belt[data-mode="paused"] { background: var(--queued); color: var(--ink); }
 .feed__belt[data-mode="estop"] {
   padding: 0.2rem 0.7rem;
@@ -540,7 +537,6 @@ kbd {
 .feed--strip .feed__conf-label,
 .feed--strip .feed__armed,
 .feed--strip .feed__meta,
-.feed--strip .feed__belt[data-mode="feeding"],
 .feed--strip .feed__nosignal span,
 .feed--strip .feed__lost span { display: none; }
 .feed--strip :is(.feed__lost, .feed__nosignal) strong { font-size: var(--t-s); }
@@ -604,7 +600,7 @@ kbd {
   scrollbar-width: thin;
   scrollbar-color: var(--hair) transparent;
 }
-.panel { flex: none; padding: 0.7rem 1rem; border-bottom: 1px solid var(--hair); }
+.panel { flex: none; padding: 0.8rem 1rem 0.6rem; }
 .panel--grow { flex: 1 1 0; min-height: 7.5rem; display: flex; flex-direction: column; }
 .panel h2, .drawer summary {
   font-size: var(--t-xs);
@@ -644,8 +640,6 @@ kbd {
 .spark canvas { width: 100%; height: clamp(1.7rem, 3.6vh, 2.6rem); display: block; cursor: crosshair; }
 .spark__val { text-align: right; font-size: var(--t-s); }
 .spark.is-low .spark__val { background: var(--stalled); color: var(--ink); font-weight: 700; text-align: center; }
-.spark__pose { grid-column: 2 / -1; color: var(--muted); font-size: var(--t-xs); }
-.spark__pose:empty { display: none; }
 .spark.is-standby { color: var(--muted); }
 
 .gate { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 0.8rem; align-items: center; }
@@ -710,14 +704,14 @@ kbd {
 .advisor {
   flex: none;
   padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--hair);
+  border-top: 1px solid var(--hair);
   font-size: var(--t-xs);
   color: var(--text);
 }
 .advisor__who { color: var(--muted); font-weight: 600; margin-right: 0.4rem; }
 
 /* collapsed drawers at the foot of the rail: activity log, dev tools */
-.drawer { flex: none; border-bottom: 1px solid var(--hair); }
+.drawer { flex: none; border-top: 1px solid var(--hair); }
 .drawer summary {
   display: flex;
   align-items: baseline;
@@ -750,8 +744,12 @@ kbd {
 .log li[data-level="ok"] { border-left-color: var(--nominal); }
 .log .is-empty { border: 0; color: var(--muted); padding-left: 0; display: block; }
 
-/* TODO(rokoko-gloves-swap): temporary dummy glove controls, dev drawer only */
-.dummy { display: grid; gap: 8px; padding: 0 1rem 0.7rem; }
+/* demo tools drawer: fault injection, plus the temporary dummy glove while it is in use */
+.demo, .dummy { display: grid; gap: 6px; padding: 0 1rem 0.7rem; }
+.demo__label { font-size: var(--t-xs); color: var(--muted); }
+.demo__faults { display: flex; flex-wrap: wrap; gap: 6px; }
+.demo__faults .actbtn { font-size: var(--t-xs); min-height: 1.9rem; }
+/* TODO(rokoko-gloves-swap): temporary dummy glove controls */
 .dummy .seg { display: grid; grid-template-columns: repeat(3, 1fr); }
 .dummy__toggle { display: flex; align-items: center; gap: 7px; font-size: var(--t-xs); color: var(--muted); cursor: pointer; }
 .dummy__manual { display: grid; gap: 8px; }
@@ -794,7 +792,7 @@ kbd {
   :root { --rail: 300px; --gap: 8px; }
   .bar { padding: 0 10px; }
   .panel { padding: 0.55rem 0.75rem; }
-  .drawer summary, .advisor { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .drawer summary, .advisor, .demo, .dummy { padding-left: 0.75rem; padding-right: 0.75rem; }
   .brief__tag { width: 6.6rem; }
   .keys { gap: 6px 0.9rem; }
 }
@@ -823,55 +821,46 @@ kbd {
 
 /* health strip */
 
-/* Every check passing: one quiet "Hardware OK" at the end of the keyboard bar. Any check
-   warning or failing: a full row above the cameras, with the passing checks reduced to names. */
+/* Hardware health sits at the end of the keyboard bar. Every check passing: one quiet
+   "Hardware OK". Otherwise only the checks that need attention, each with its Reconnect. */
 .health {
   grid-area: health;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin: 6px var(--gap) 0;
-}
-.health[data-all="ok"] {
-  grid-area: foot;
-  justify-self: end;
-  align-self: center;
+  justify-content: flex-end;
   align-items: center;
-  margin: 0 calc(var(--gap) + 4px) 0 0;
-  color: var(--muted);
+  gap: 6px;
+  margin: 0 var(--gap) 0 0;
+  padding: 0.4rem 0;
   font-size: var(--t-xs);
-  font-weight: 600;
 }
+.health[data-all="ok"] { color: var(--muted); font-weight: 600; }
 .health[data-all="ok"]::before { content: ""; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--nominal); }
 .health[data-all="ok"]::after { content: "Hardware OK"; }
-.health[data-all="ok"] .hpill { display: none; }
-.stagecol:has(> .health[data-all="ok"]) .keys { padding-right: 9rem; }
 
 .hpill {
   --lvl: var(--standby);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0.2rem 0.7rem;
-  background: var(--panel);
+  gap: 7px;
+  padding: 0.15rem 0.6rem;
   border: 1px solid var(--lvl);
   border-left-width: 5px;
-  font-size: var(--t-xs);
   min-width: 0;
 }
-.hpill[data-level="ok"] { --lvl: var(--nominal); border-color: var(--hair); border-left-width: 1px; background: none; }
-.hpill[data-level="ok"] .hpill__sum { display: none; }
+.hpill:not([data-level="warn"], [data-level="fail"]) { display: none; }
 .hpill[data-level="warn"] { --lvl: var(--queued); }
 .hpill[data-level="fail"] { --lvl: var(--stalled); }
-.hpill__dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--lvl); flex: none; }
+.hpill__dot { display: none; }
 .hpill__name { font-weight: 600; }
 .hpill__sum { color: var(--muted); }
-.hpill__detail { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 36ch; }
+.hpill__detail { display: none; }  /* the summary is enough at a glance */
+@media (max-width: 1500px) { .hpill__sum { display: none; } }  /* name + Reconnect; the rest is the tooltip */
 .hpill__btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 1px 0.7rem;
+  padding: 1px 0.6rem;
   font: inherit;
   font-weight: 600;
   color: var(--text);

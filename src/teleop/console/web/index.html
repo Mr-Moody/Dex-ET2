@@ -10,7 +10,28 @@
 <body>
   <header class="bar">
     <div class="bar__site">
-      <span class="bar__mark" aria-hidden="true"></span>
+      <svg class="bar__mark" viewBox="0 0 120 120" aria-hidden="true">
+        <defs>
+          <mask id="logo-gaps" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
+            <rect width="120" height="120" fill="#fff"/>
+            <g fill="#000">
+              <circle cx="108.9" cy="77.8" r="9"/><circle cx="102.6" cy="30.2" r="9"/><circle cx="60" cy="8" r="9"/>
+              <circle cx="17.4" cy="30.2" r="9"/><circle cx="11.1" cy="77.8" r="9"/>
+            </g>
+          </mask>
+        </defs>
+        <g mask="url(#logo-gaps)">
+          <path d="M60 60 L102.6 30.2 A52 52 0 0 1 108.9 77.8 Z" fill="#ff7a30" fill-opacity="0.9"/>
+          <g fill="none" stroke="#edf0f3" stroke-width="4">
+            <circle cx="60" cy="60" r="52"/><circle cx="60" cy="60" r="32"/><circle cx="60" cy="60" r="12"/>
+          </g>
+        </g>
+        <g fill="#edf0f3">
+          <circle cx="108.9" cy="77.8" r="6"/><circle cx="102.6" cy="30.2" r="6"/><circle cx="60" cy="8" r="6"/>
+          <circle cx="17.4" cy="30.2" r="6"/><circle cx="11.1" cy="77.8" r="6"/>
+          <circle cx="60" cy="60" r="4"/>
+        </g>
+      </svg>
       <h1>Fleet operations</h1>
     </div>
     <div class="seg bar__views" role="toolbar" aria-label="Camera layout">
@@ -67,7 +88,7 @@
         <div class="sparks" id="sparks"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="panel-gate" hidden>
         <h2>Skill gate</h2>
         <div class="gate" id="gate"></div>
       </section>
@@ -91,9 +112,14 @@
       </details>
 
       <!-- TODO(rokoko-gloves-swap): Temporary dummy glove controls while the physical Rokoko gloves are disconnected -->
-      <details class="drawer drawer--dev" id="dummy-panel" hidden>
-        <summary>Dev tools: dummy glove <span class="panel__note" id="dummy-meta"></span></summary>
-        <div class="dummy">
+      <details class="drawer" id="demo-drawer">
+        <summary>Demo tools <span class="panel__note" id="dummy-meta"></span></summary>
+        <div class="demo">
+          <span class="demo__label">Inject a fault</span>
+          <div class="demo__faults" id="demo-faults"></div>
+        </div>
+        <div class="dummy" id="dummy-panel" hidden>
+          <span class="demo__label">Dummy glove (temporary)</span>
           <div class="seg" role="group" aria-label="Dummy glove mode">
             <button type="button" class="vbtn" data-dummy-mode="manual">Manual</button>
             <button type="button" class="vbtn" data-dummy-mode="auto">Auto co-pilot</button>
