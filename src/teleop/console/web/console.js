@@ -390,7 +390,11 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
     </div>`;
 
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
-  el.querySelector(".feed__zoom").addEventListener("click", stop(() => resetCamZoom(camera)));
+  // A fast double-click on a tile button must not reach the tile's dblclick (pin / unpin).
+  const noDbl = (btn) => btn.addEventListener("dblclick", (ev) => ev.stopPropagation());
+  const badge = el.querySelector(".feed__zoom");
+  badge.addEventListener("click", stop(() => resetCamZoom(camera)));
+  noDbl(badge);
 
   // Tools: camera angle (grid tiles; the stage has its own switch), zoom, fault, stage.
   const tools = el.querySelector(".feed__tools");
@@ -401,6 +405,7 @@ function feedTile(bayId, camera, role, bayInfo, inRescue) {
     btn.textContent = label;
     btn.title = tip;
     btn.addEventListener("click", stop(run));
+    noDbl(btn);
     tools.append(btn);
     return btn;
   };
