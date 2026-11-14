@@ -48,6 +48,20 @@ class GateStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionNote:
+    """Outcome of one operator key press, so the displays can say what it did.
+
+    ``seq`` increases per press. ``level`` is ``ok`` (done), ``info`` (done, with context) or
+    ``warn`` (ignored or not what the operator probably meant).
+    """
+
+    seq: int
+    key: str
+    text: str
+    level: str = "ok"
+
+
+@dataclass(frozen=True, slots=True)
 class HudView:
     bays: tuple[BaySnapshot, ...]
     queue: tuple[int, ...]
@@ -59,6 +73,9 @@ class HudView:
     reasoning: str = "NEMOTRON  idle"
     beat: str = ""
     unoq: str = ""
+    actions: tuple[ActionNote, ...] = ()  # recent key outcomes, oldest first
+    # (bay, kind, phase): kind "flap" | "pin"; phase "armed" (next cycle) | "active" (this cycle)
+    faults: tuple[tuple[int, str, str], ...] = ()
 
 
 # --------------------------------------------------------------------------- pieces
@@ -139,6 +156,9 @@ def hud_lines(view: HudView) -> list[str]:
     lines += [format_rescue(view.rescue), format_gate(view.gate), view.compliance, view.reasoning]
     if view.beat:
         lines.append(f"BEAT {view.beat}")
+    if view.actions:
+        last = view.actions[-1]
+        lines.append(f"KEY {last.key}: {last.text}")
     if view.unoq:
         lines.append(view.unoq)
     return lines
@@ -153,7 +173,10 @@ def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
     labels, values = format_bay_table(view)
     status = "\n".join([format_rescue(view.rescue), format_gate(view.gate)])
     hooks = "\n".join([view.compliance, view.reasoning])
-    stage = "\n".join(x for x in (f"BEAT {view.beat}" if view.beat else "", view.unoq) if x)
+    last_key = f"{view.actions[-1].key}: {view.actions[-1].text}" if view.actions else ""
+    stage = "\n".join(
+        x for x in (f"BEAT {view.beat}" if view.beat else "", last_key, view.unoq) if x
+    )
     keys = "1-4 bay | SPACE clutch | F/G/P faults | R reset"
     return [
         (int(font.mjFONT_BIG), int(grid.mjGRID_TOPLEFT), labels, values),
@@ -164,6 +187,7 @@ def hud_overlays(view: HudView) -> list[tuple[int, int, str, str]]:
 
 
 __all__ = [
+    "ActionNote",
     "GateStatus",
     "HudView",
     "RescueStatus",

@@ -42,7 +42,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from teleop.atc.coordinator import ROUTINE, AtcCoordinator, OperatorInput
-from teleop.atc.hud import GateStatus, HudView, RescueStatus
+from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
 from teleop.compliance.protocol import ComplianceEvent, ComplianceSink
 from teleop.reasoning.protocol import FleetReasoner, ReasoningContext, ReasoningVerdict
@@ -84,6 +84,19 @@ KEYMAP: dict[int, StageAction] = {
     ord("P"): StageAction.ARM_BAY2_PIN,
     ord("R"): StageAction.RESET,
 }
+ACTION_LOG_LEN = 20
+CONTROL_KEYS_HINT = "Use 1-4, SPACE, F, G, P or R"
+
+
+def key_name(code: int) -> str:
+    """Readable name for a GLFW key code: ``SPACE``, ``F``, ``1``."""
+    if code == KEY_SPACE:
+        return "SPACE"
+    if 32 < code < 127:
+        return chr(code)
+    return f"key {code}"
+
+
 _SELECT = {
     StageAction.SELECT_BAY_1: 1,
     StageAction.SELECT_BAY_2: 2,
@@ -403,9 +416,12 @@ class StageController:
         self.console = ConsoleInputState()
         self.beat = ""
         self.armed: dict[int, tuple[bool, bool]] = {}  # bay -> (flap_jammed, bolt_pinned)
+        self.active_faults: dict[int, str] = {}  # bay -> "flap" | "pin" on its current cycle
         self.cleared_cycles: dict[int, int] = dict.fromkeys(self.active_bays, 0)
         self.gate = GateStatus()
         self._keys: deque[int] = deque()
+        self.actions: deque[ActionNote] = deque(maxlen=ACTION_LOG_LEN)
+        self._action_seq = 0
         self._done_since: dict[int, float] = {}
         self._rig_spent = False
         self._rescue_bay: int | None = None
@@ -451,9 +467,89 @@ class StageController:
 
     def _handle_keys(self) -> None:
         while self._keys:
-            action = KEYMAP.get(self._keys.popleft())
-            if action is not None:
-                self.apply(action)
+            code = self._keys.popleft()
+            action = KEYMAP.get(code)
+            if action is None:
+                self._note(key_name(code), f"Not a control key. {CONTROL_KEYS_HINT}", "warn")
+                continue
+            warning = self._precheck(action)
+            if warning is not None:
+                self._note(key_name(code), warning, "warn")
+                continue
+            self.apply(action)
+            text, level = self._outcome(action)
+            self._note(key_name(code), text, level)
+
+    def _note(self, key: str, text: str, level: str) -> None:
+        self._action_seq += 1
+        self.actions.append(ActionNote(self._action_seq, key, text, level))
+        logger.info("key %s: %s", key, text)
+
+    def _rescue_bay_now(self) -> int | None:
+        """The bay waiting for, or under, an operator rescue (not one being validated)."""
+        co = self.coordinator
+        for bay in co.rescue_slot_holders():
+            if co.state(bay) in (BayState.RESCUE, BayState.OOD_ESCALATED):
+                return bay
+        return None
+
+    def _precheck(self, action: StageAction) -> str | None:
+        """Why ``action`` would do nothing right now, or ``None`` if it applies."""
+        if action in _SELECT and _SELECT[action] not in self.active_bays:
+            bay = _SELECT[action]
+            if bay in self.background_bays:
+                return f"Bay {bay} replays a recorded cycle and cannot be selected"
+            return f"Bay {bay} is not running in this simulation"
+        if action is StageAction.ARM_BAY1_FLAP:
+            if 1 not in self.active_bays:
+                return "Bay 1 is not running in this simulation"
+            if self.armed.get(1, (False, False))[0]:
+                return "Bay 1 flap jam is already armed for its next cycle"
+            if self._rig_spent:
+                return "Bay 1 is already running its jammed cycle. Press R to reset the rig"
+        if (
+            action in (StageAction.ARM_BAY2_FLAP, StageAction.ARM_BAY2_PIN)
+            and 2 not in self.active_bays
+        ):
+            return "Bay 2 is not running in this simulation"
+        return None
+
+    def _outcome(self, action: StageAction) -> tuple[str, str]:
+        """What ``action`` just did, as ``(text, level)`` for the operator displays."""
+        rescue = self._rescue_bay_now()
+        if action in _SELECT:
+            bay = _SELECT[action]
+            if rescue == bay:
+                return f"Bay {bay} selected. Engage the clutch (SPACE) to drive it", "ok"
+            if rescue is not None:
+                return f"Bay {bay} selected, but Bay {rescue} is the one waiting for rescue", "warn"
+            return f"Bay {bay} selected", "ok"
+        if action is StageAction.CLUTCH:
+            selected = self.mcu.selected_bay
+            if self.mcu.clutch:
+                if rescue is None:
+                    return "Clutch engaged, but no bay is waiting for rescue", "warn"
+                if selected != rescue:
+                    shown = f"Bay {selected}" if selected is not None else "no bay"
+                    return (
+                        f"Clutch engaged, but {shown} is selected. Press {rescue} to drive "
+                        f"Bay {rescue}",
+                        "warn",
+                    )
+                return f"Clutch engaged: your gloves now drive Bay {rescue}", "ok"
+            if rescue is not None and selected == rescue:
+                return f"Clutch released on Bay {rescue}: checking whether the bolt cleared", "info"
+            return "Clutch released", "info"
+        if action is StageAction.ARM_BAY1_FLAP:
+            return "Bay 1 flap jam armed: Bay 1 stalls on its next cycle", "ok"
+        if action is StageAction.ARM_BAY2_FLAP:
+            return "Bay 2 flap jam armed: Bay 2 stalls on its next cycle", "ok"
+        if action is StageAction.ARM_BAY2_PIN:
+            return (
+                "Bay 2 bolt pinned for its next cycle: expect a refused stall (negative control)",
+                "ok",
+            )
+        return "Reset: faults cleared and all bays restarted", "ok"
 
     def apply(self, action: StageAction) -> None:
         if action in _SELECT:
@@ -479,6 +575,7 @@ class StageController:
 
     def reset(self) -> None:
         self.armed.clear()
+        self.active_faults.clear()
         self._done_since.clear()
         self._rig_spent = False
         for console in self.consoles:
@@ -530,6 +627,10 @@ class StageController:
                 self._rig_spent = False
             if bay == 1 and jam:
                 self._rig_spent = True
+            if pin or jam:
+                self.active_faults[bay] = "pin" if pin else "flap"
+            else:
+                self.active_faults.pop(bay, None)
             co.start_cycle(bay, flap_jammed=jam, bolt_pinned=pin)
 
     def _after_tick(self, snaps: tuple[BaySnapshot, ...]) -> None:
@@ -580,7 +681,19 @@ class StageController:
             reasoning=self.reasoning.status_line(),
             beat=self.beat,
             unoq=self.unoq_label,
+            actions=tuple(self.actions),
+            faults=self._faults_view(),
         )
+
+    def _faults_view(self) -> tuple[tuple[int, str, str], ...]:
+        """Faults per bay: armed for the next cycle wins over the one on the current cycle."""
+        out: dict[int, tuple[int, str, str]] = {
+            bay: (bay, kind, "active") for bay, kind in self.active_faults.items()
+        }
+        for bay, (jam, pin) in self.armed.items():
+            if pin or jam:
+                out[bay] = (bay, "pin" if pin else "flap", "armed")
+        return tuple(out[bay] for bay in sorted(out))
 
     def close(self) -> None:
         for console in self.consoles:
@@ -776,6 +889,7 @@ class StageDirector:
 __all__ = [
     "BEATS",
     "KEYMAP",
+    "key_name",
     "AudioCues",
     "BeatResult",
     "ConsoleSource",

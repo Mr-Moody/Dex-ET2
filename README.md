@@ -217,7 +217,13 @@ negative control (refused).
 
 ### Keys
 
-These work in the console page or the MuJoCo window.
+These work in the console page or the MuJoCo window. In the console you can also click the
+key caps at the bottom of the page.
+
+The console answers every key press. A toast shows what it did, or why it did nothing (for
+example, engaging the clutch while the wrong bay is selected). The banner above the cameras
+says what is happening and highlights the key to press next. The MuJoCo viewer shows the last
+key's outcome in its bottom-right overlay.
 
 | Key | Action |
 |---|---|

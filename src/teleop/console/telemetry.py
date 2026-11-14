@@ -16,12 +16,13 @@ from datetime import datetime
 from typing import Any
 
 from teleop.atc.hud import STATE_LABELS, HudView
-from teleop.atc.types import N_BAYS, BaySnapshot, BayState
+from teleop.atc.types import BOLT_CLEARED_M, N_BAYS, BaySnapshot, BayState
 from teleop.console.layout import FeedSpec
 
 THRESHOLD = 0.3
 HISTORY_LEN = 150  # 15 s at 10 Hz
 EVENT_LOG_LEN = 50
+ACTION_LEN = 8  # key outcomes sent per message; the page toasts the ones it has not seen
 STANDBY = "STANDBY"
 
 _TRANSITIONS: dict[BayState, tuple[str, str]] = {
@@ -30,7 +31,7 @@ _TRANSITIONS: dict[BayState, tuple[str, str]] = {
     BayState.RESCUE: ("info", "Operator took control of Bay {k}"),
     BayState.VALIDATING: ("info", "Bay {k}: validating learned skill"),
     BayState.AUTONOMOUS_SKILL: ("ok", "Bay {k}: replaying learned skill"),
-    BayState.OOD_ESCALATED: ("alert", "Bay {k}: unseen jam, skill transfer refused"),
+    BayState.OOD_ESCALATED: ("alert", "Bay {k}: stall refused, no validated skill is close enough"),
     BayState.NOMINAL: ("ok", "Bay {k} back to nominal"),
 }
 
@@ -68,6 +69,7 @@ class TelemetryAdapter:
         self._gate_key: tuple[Any, ...] | None = None
         self._lines: dict[str, str] = {}
         self._feeds: tuple[FeedSpec, ...] | None = None
+        self._action_seq = 0
         self.layout_id = 0
 
     # ------------------------------------------------------------------ events
@@ -100,6 +102,14 @@ class TelemetryAdapter:
         text = f"Skill gate {g.passed}/{g.total} {verdict} in {elapsed} s"
         self._log(sim_t, wall, None, "ok" if g.ok else "alert", text)
 
+    def _track_actions(self, view: HudView, sim_t: float, wall: str) -> None:
+        for note in view.actions:
+            if note.seq > self._action_seq:
+                level = "warn" if note.level == "warn" else "info"
+                self._log(sim_t, wall, None, level, f"[{note.key}] {note.text}")
+        if view.actions:
+            self._action_seq = max(self._action_seq, view.actions[-1].seq)
+
     def _track_line(self, name: str, line: str, sim_t: float, wall: str) -> None:
         prev = self._lines.get(name)
         self._lines[name] = line
@@ -109,7 +119,11 @@ class TelemetryAdapter:
     # ------------------------------------------------------------------ build
 
     def _bay_entry(
-        self, k: int, snaps: Mapping[int, BaySnapshot], background_confidence: Mapping[int, float]
+        self,
+        k: int,
+        snaps: Mapping[int, BaySnapshot],
+        background_confidence: Mapping[int, float],
+        faults: Mapping[int, dict[str, str]],
     ) -> dict[str, Any]:
         hist = self._history[k]
         if k in snaps:
@@ -125,6 +139,8 @@ class TelemetryAdapter:
                 "skill": s.active_skill_id,
                 "background": False,
                 "replayed": False,
+                "x_bolt_cm": round(s.x_bolt_m * 100.0, 2),
+                "fault": faults.get(k),
             }
         if k in self.background:
             raw = float(background_confidence.get(k, 1.0))
@@ -140,6 +156,8 @@ class TelemetryAdapter:
                 "skill": None,
                 "background": True,
                 "replayed": True,
+                "x_bolt_cm": None,
+                "fault": None,
             }
         return {
             "id": k,
@@ -151,6 +169,8 @@ class TelemetryAdapter:
             "skill": None,
             "background": k in self.background,
             "replayed": False,
+            "x_bolt_cm": None,
+            "fault": None,
         }
 
     def build(
@@ -171,9 +191,11 @@ class TelemetryAdapter:
         for s in snaps.values():
             self._track_state(s, sim_t, wall)
         self._track_gate(view, sim_t, wall)
+        self._track_actions(view, sim_t, wall)
         self._track_line("compliance", view.compliance, sim_t, wall)
         self._track_line("reasoning", view.reasoning, sim_t, wall)
 
+        faults = {bay: {"kind": kind, "phase": phase} for bay, kind, phase in view.faults}
         g = view.gate
         gate = None
         if any(v is not None for v in (g.fit_ms, g.passed, g.total, g.ok)):
@@ -203,7 +225,13 @@ class TelemetryAdapter:
                     for f in feeds_t
                 ],
                 "bays": [
-                    self._bay_entry(k, snaps, background_confidence) for k in range(1, N_BAYS + 1)
+                    self._bay_entry(k, snaps, background_confidence, faults)
+                    for k in range(1, N_BAYS + 1)
+                ],
+                "bolt_clear_cm": round(BOLT_CLEARED_M * 100.0, 2),
+                "actions": [
+                    {"seq": a.seq, "key": a.key, "text": a.text, "level": a.level}
+                    for a in view.actions[-ACTION_LEN:]
                 ],
                 "queue": list(view.queue),
                 "selected_bay": view.selected_bay,
