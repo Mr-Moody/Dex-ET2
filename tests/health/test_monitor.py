@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
+
+import pytest
 
 from teleop.health.model import Health, Level, health_to_dict
 from teleop.health.monitor import HealthMonitor
@@ -117,3 +120,27 @@ def test_health_to_dict_shape() -> None:
     }
     assert type(d["level"]) is str
     assert list(d) == ["name", "level", "summary", "detail", "can_reconnect", "busy"]
+
+
+def test_failed_reconnect_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    class FailingReconnect(RaisingCheck):
+        def status(self) -> Health:
+            return Health(self.name, Level.FAIL, "down", can_reconnect=True)
+
+        def reconnect(self) -> None:
+            raise OSError("port busy")
+
+    mon = HealthMonitor([FailingReconnect()])
+    try:
+        with caplog.at_level(logging.WARNING, logger="teleop.health.monitor"):
+            assert mon.request_reconnect("boom") is True
+            deadline = time.monotonic() + 2.0
+            while mon.snapshot_dicts() and "boom" in mon._busy and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+                time.sleep(0.01)
+            time.sleep(0.05)
+        records = [r for r in caplog.records if "boom" in r.getMessage()]
+        assert records and records[0].levelno == logging.WARNING
+        assert records[0].exc_info is not None
+        assert "port busy" in str(records[0].exc_info[1])
+    finally:
+        mon.stop()
