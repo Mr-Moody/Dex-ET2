@@ -170,8 +170,8 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
 .brief[data-tone="validating"] { --tone: var(--validating); }
 .brief[data-tone="auto"] { --tone: var(--auto); }
 .brief[data-tone="ood"] { --tone: var(--ood); }
-.brief.is-new .brief__tag { animation: brief-in 500ms steps(2, jump-none) 2; }
-@keyframes brief-in { 50% { opacity: 0.35; } }
+.brief.is-new .brief__tag { animation: brief-in 400ms ease-out; }
+@keyframes brief-in { from { opacity: 0.3; } }
 .brief__tag {
   flex: none;
   padding: 0.15rem 0.7rem;
@@ -246,13 +246,7 @@ kbd {
 }
 .key__cap--wide { min-width: 4.2rem; }
 .key__cap:hover { border-color: var(--muted); }
-.key__cap.is-suggested {
-  border-color: var(--attn);
-  background: var(--attn);
-  color: var(--ink);
-  animation: suggest 1.2s steps(2, jump-none) infinite;
-}
-@keyframes suggest { 50% { background: var(--panel-2); color: var(--attn); } }
+.key__cap.is-suggested { border-color: var(--attn); color: var(--attn); }
 .key__cap.is-pressed { animation: press 260ms ease-out; }
 @keyframes press {
   0% { background: var(--text); color: var(--ink); transform: translateY(2px); border-bottom-width: 1px; }
@@ -267,22 +261,25 @@ kbd {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: 5px;
   pointer-events: none;
-  max-width: min(34rem, 80%);
+  max-width: min(26rem, 70%);
 }
 .toast {
   --tone: var(--nominal);
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0.6rem 0.9rem;
+  gap: 8px;
+  padding: 0.3rem 0.7rem;
   background: var(--panel-2);
-  border: 1px solid var(--faint);
-  border-left: 5px solid var(--tone);
+  border: 1px solid var(--hair);
+  border-left: 4px solid var(--tone);
+  font-size: var(--t-xs);
   animation: toast-in 200ms ease-out;
   transition: opacity 300ms, transform 300ms;
 }
+.toast__count { color: var(--muted); font-weight: 600; }
+.toast__count:empty { display: none; }
 .toast[data-level="info"] { --tone: var(--rescue); }
 .toast[data-level="warn"] { --tone: var(--queued); }
 .toast.is-leaving { opacity: 0; transform: translateX(16px); }
@@ -328,11 +325,7 @@ kbd {
 }
 .wall.is-rescue {
   margin: var(--gap) var(--gap) 0;
-  /* hazard tape: this bay is under human control */
-  border: 6px solid transparent;
-  background:
-    linear-gradient(var(--base), var(--base)) padding-box,
-    repeating-linear-gradient(-45deg, var(--attn) 0 14px, var(--ink) 14px 28px) border-box;
+  border: 2px solid var(--rescue);  /* this bay is under human control */
 }
 
 .focus-stage {
@@ -361,10 +354,10 @@ kbd {
 .takeover__timer { display: inline-flex; align-items: baseline; gap: 0.45rem; color: var(--muted); font-size: var(--t-xs); }
 .takeover__timer b { color: var(--text); font-size: var(--t-xl); font-weight: 300; min-width: 3.4em; }
 .clutch {
-  padding: 0.25rem 0.9rem;
+  padding: 0.15rem 0.8rem;
   border: 2px solid var(--rescue);
   color: var(--rescue);
-  font-size: var(--t-l);
+  font-size: var(--t-m);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -437,26 +430,22 @@ kbd {
 .feed__conf-val { font-size: var(--t-l); font-weight: 300; min-width: 2.3em; text-align: right; }
 .feed__conf:has(.feed__conf-val:empty) { display: none; }
 
-/* any state but nominal: the header is the alarm */
+/* Any state but nominal: the tile takes a border and a thicker rail in the state colour and the
+   state word becomes a small filled chip. The header itself stays dark and nothing blinks. */
 .feed:is([data-state="STALLED"], [data-state="QUEUED"], [data-state="RESCUE"], [data-state="VALIDATING"], [data-state="AUTONOMOUS_SKILL"], [data-state="OOD_ESCALATED"]) {
   border-color: var(--state);
 }
 .feed:is([data-state="STALLED"], [data-state="QUEUED"], [data-state="RESCUE"], [data-state="VALIDATING"], [data-state="AUTONOMOUS_SKILL"], [data-state="OOD_ESCALATED"]) .feed__top {
+  box-shadow: inset 0 4px 0 var(--state);
+}
+.feed:is([data-state="STALLED"], [data-state="QUEUED"], [data-state="RESCUE"], [data-state="VALIDATING"], [data-state="AUTONOMOUS_SKILL"], [data-state="OOD_ESCALATED"]) .feed__state {
+  padding: 0.05rem 0.5rem;
   background: var(--state);
   color: var(--ink);
-}
-.feed:is([data-state="STALLED"], [data-state="QUEUED"], [data-state="RESCUE"], [data-state="VALIDATING"], [data-state="AUTONOMOUS_SKILL"], [data-state="OOD_ESCALATED"]) :is(.feed__state, .feed__conf-label) {
-  color: inherit;
 }
 .feed:is([data-state="STALLED"], [data-state="QUEUED"], [data-state="RESCUE"], [data-state="VALIDATING"], [data-state="AUTONOMOUS_SKILL"], [data-state="OOD_ESCALATED"]) .feed__state::before {
   display: none;
 }
-.feed:is([data-state="STALLED"], [data-state="QUEUED"], [data-state="RESCUE"], [data-state="VALIDATING"], [data-state="AUTONOMOUS_SKILL"], [data-state="OOD_ESCALATED"]) .feed__conf-val {
-  font-weight: 600;
-}
-.feed[data-state="STALLED"] .feed__top,
-.feed[data-state="OOD_ESCALATED"] .feed__top { animation: alarm 1s steps(2, jump-none) infinite; }
-@keyframes alarm { 50% { background: var(--panel-2); color: var(--text); } }
 .feed.is-selected { outline: 3px solid var(--text); outline-offset: 1px; }
 
 .feed__pic { position: relative; min-height: 0; overflow: hidden; }
@@ -597,20 +586,22 @@ kbd {
 .panel--queue h2 { font-size: var(--t-s); color: var(--text); }
 .queue { display: grid; gap: 5px; }
 .queue li {
+  --row: var(--queued);
   display: flex;
   align-items: center;
   gap: 0.7rem;
-  padding: 0.3rem 0.7rem;
-  background: var(--queued);
-  color: var(--ink);
-  font-size: var(--t-l);
+  padding: 0.25rem 0.7rem;
+  background: var(--panel-2);
+  border-left: 5px solid var(--row);
+  font-size: var(--t-m);
   font-weight: 600;
 }
-.queue li .queue__pos { min-width: 1.1em; font-weight: 300; }
-.queue li .queue__note { margin-left: auto; font-size: var(--t-xs); font-weight: 600; }
-.queue li.is-active { background: var(--rescue); }
+.queue li .queue__pos { min-width: 1em; color: var(--muted); font-weight: 400; }
+.queue li .queue__note { margin-left: auto; color: var(--muted); font-size: var(--t-xs); font-weight: 600; }
+.queue li.is-active { --row: var(--rescue); }
 .queue li.is-empty {
   padding: 0;
+  border: 0;
   background: none;
   color: var(--muted);
   font-size: var(--t-s);
@@ -625,7 +616,7 @@ kbd {
 .spark canvas { border-bottom: 1px solid var(--hair); }
 .spark canvas { width: 100%; height: clamp(2rem, 4.4vh, 3.2rem); display: block; cursor: crosshair; }
 .spark__val { text-align: right; font-size: var(--t-s); }
-.spark.is-low .spark__val { background: var(--stalled); color: var(--ink); font-weight: 700; text-align: center; }
+.spark.is-low .spark__val { font-weight: 700; }
 .spark.is-standby { color: var(--muted); }
 
 .gate { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 0.8rem; align-items: center; }

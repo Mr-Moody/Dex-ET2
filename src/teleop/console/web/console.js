@@ -92,8 +92,8 @@ const FAULT_TEXT = {
   active: { flap: "Flap jammed", pin: "Bolt pinned" },
 };
 const faultName = (kind) => (kind === "pin" ? "pinned bolt" : "flap jam");
-const TOAST_MS = 4500;
-const MAX_TOASTS = 4;
+const TOAST_MS = 3500;
+const MAX_TOASTS = 3;
 
 // ------------------------------------------------------------------ view & drag helpers
 
@@ -1095,21 +1095,35 @@ function flashCap(code) {
   cap.classList.add("is-pressed");
 }
 
+// One pop-up per message: repeating an action while its pop-up is still up refreshes that
+// pop-up (with a count) instead of stacking a copy.
 function toast(key, text, level) {
   const box = $("toasts");
-  const el = document.createElement("div");
-  el.className = "toast";
-  el.dataset.level = level;
-  const k = document.createElement("kbd");
-  k.textContent = key;
-  const span = document.createElement("span");
-  span.textContent = text;
-  el.append(k, span);
-  box.append(el);
-  while (box.children.length > MAX_TOASTS) box.firstElementChild.remove();
-  setTimeout(() => {
-    el.classList.add("is-leaving");
-    setTimeout(() => el.remove(), 300);
+  const id = `${key}|${text}`;
+  let el = [...box.children].find((n) => n.dataset.id === id && !n.classList.contains("is-leaving"));
+  if (el) {
+    el.dataset.count = String(Number(el.dataset.count || 1) + 1);
+    el.querySelector(".toast__count").textContent = `×${el.dataset.count}`;
+    clearTimeout(el._timer);
+  } else {
+    el = document.createElement("div");
+    el.className = "toast";
+    el.dataset.level = level;
+    el.dataset.id = id;
+    const k = document.createElement("kbd");
+    k.textContent = key;
+    const span = document.createElement("span");
+    span.textContent = text;
+    const count = document.createElement("span");
+    count.className = "toast__count";
+    el.append(k, span, count);
+    box.append(el);
+    while (box.children.length > MAX_TOASTS) box.firstElementChild.remove();
+  }
+  const node = el;
+  node._timer = setTimeout(() => {
+    node.classList.add("is-leaving");
+    setTimeout(() => node.remove(), 300);
   }, TOAST_MS);
 }
 
