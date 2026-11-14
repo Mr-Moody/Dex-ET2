@@ -174,8 +174,9 @@ body.is-down :is(.brief, .rail, .keys, .feed__top, .takeover) { opacity: 0.5; }
   flex: none;
   display: grid;
   place-items: center;
-  width: 7.4rem;
-  padding: 0.4rem 0.6rem;
+  min-width: 7.4rem;
+  padding: 0.4rem 1rem;
+  white-space: nowrap;
   background: var(--tone);
   color: var(--ink);
   font-size: var(--t-s);
@@ -431,6 +432,7 @@ kbd {
   min-width: 0;
   padding: 0.3rem 0.65rem;
   background: var(--panel-2);
+  box-shadow: inset 0 3px 0 var(--state);  /* state rail, the same colour as the bay's C(t) trace */
 }
 .feed__name { font-size: var(--t-l); font-weight: 600; white-space: nowrap; }
 .feed__state {
@@ -635,9 +637,12 @@ kbd {
 }
 
 .sparks { display: grid; gap: 2px; }
-.spark { display: grid; grid-template-columns: 3.3rem minmax(0, 1fr) 2.6rem; align-items: center; gap: 0.5rem; }
-.spark__name { font-size: var(--t-xs); }
-.spark canvas { width: 100%; height: clamp(1.7rem, 3.6vh, 2.6rem); display: block; cursor: crosshair; }
+.sparks { gap: 5px; }
+.spark { display: grid; grid-template-columns: 3.6rem minmax(0, 1fr) 2.6rem; align-items: center; gap: 0.5rem; }
+.spark__name { display: inline-flex; align-items: center; gap: 0.4rem; font-size: var(--t-xs); }
+.spark__name::before { content: ""; width: 3px; align-self: stretch; min-height: 1.1rem; background: var(--state, var(--faint)); }
+.spark canvas { border-bottom: 1px solid var(--hair); }
+.spark canvas { width: 100%; height: clamp(2rem, 4.4vh, 3.2rem); display: block; cursor: crosshair; }
 .spark__val { text-align: right; font-size: var(--t-s); }
 .spark.is-low .spark__val { background: var(--stalled); color: var(--ink); font-weight: 700; text-align: center; }
 .spark.is-standby { color: var(--muted); }
@@ -793,7 +798,7 @@ kbd {
   .bar { padding: 0 10px; }
   .panel { padding: 0.55rem 0.75rem; }
   .drawer summary, .advisor, .demo, .dummy { padding-left: 0.75rem; padding-right: 0.75rem; }
-  .brief__tag { width: 6.6rem; }
+  .brief__tag { min-width: 6rem; padding: 0.4rem 0.7rem; }
   .keys { gap: 6px 0.9rem; }
 }
 

@@ -18,6 +18,16 @@ const STATE_TEXT = {
   OOD_ESCALATED: "Refused",
   STANDBY: "Standby",
 };
+const STATE_COLOR = {
+  NOMINAL: "--nominal",
+  STALLED: "--stalled",
+  QUEUED: "--queued",
+  RESCUE: "--rescue",
+  VALIDATING: "--validating",
+  AUTONOMOUS_SKILL: "--auto",
+  OOD_ESCALATED: "--ood",
+  STANDBY: "--standby",
+};
 const VIEW_TEXT = {
   overview: "Mezzanine camera",
   cctv: "Conveyor station",
@@ -693,11 +703,11 @@ function ensureSparks() {
 
 const SPARK_SAMPLES = 150;
 
-// C(t) trace: one neutral line over the dashed stall threshold, a dot on the latest sample.
-// C(t) dips under the threshold briefly on every routine cycle, so a dip alone is never
-// painted as an alarm: `alarm` (the bay is actually stalled) colours the dot.
-// Returns the value under the pointer while hovering, else null.
-function drawSpark(canvas, history, threshold, hover, alarm) {
+// C(t) trace in the bay's state colour (the same colour as its camera tile), over a flat tint
+// of that colour and the dashed stall threshold, with a dot on the latest sample.
+// C(t) dips under the threshold briefly on every routine cycle, so a dip alone never turns the
+// trace red: only the bay's state does. Returns the value under the pointer, else null.
+function drawSpark(canvas, history, threshold, hover, color) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
@@ -710,7 +720,6 @@ function drawSpark(canvas, history, threshold, hover, alarm) {
   const pad = 4;
   const y = (v) => h - pad - Math.max(0, Math.min(1, v)) * (h - 2 * pad);
   const yT = y(threshold);
-  const bad = css("--stalled");
   g.strokeStyle = css("--faint");
   g.lineWidth = 1;
   g.setLineDash([4, 3]);
@@ -723,27 +732,30 @@ function drawSpark(canvas, history, threshold, hover, alarm) {
   const xEnd = w - pad - 1;
   const step = xEnd / (SPARK_SAMPLES - 1);
   const x = (i) => xEnd - (history.length - 1 - i) * step;
-  const trace = (color, top, height) => {
-    g.save();
-    g.beginPath();
-    g.rect(0, top, w, height);
-    g.clip();
-    g.strokeStyle = color;
-    g.lineWidth = 2;
-    g.lineJoin = "round";
+  const path = () => {
     g.beginPath();
     history.forEach((v, i) => (i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v))));
-    g.stroke();
-    g.restore();
   };
-  trace(css("--text"), 0, h);
+  path();
+  g.lineTo(x(history.length - 1), h);
+  g.lineTo(x(0), h);
+  g.closePath();
+  g.globalAlpha = 0.16;
+  g.fillStyle = color;
+  g.fill();
+  g.globalAlpha = 1;
+  path();
+  g.strokeStyle = color;
+  g.lineWidth = 2;
+  g.lineJoin = "round";
+  g.stroke();
   const dot = (i) => {
     const v = history[i];
     g.fillStyle = css("--panel");
     g.beginPath();
-    g.arc(x(i), y(v), 5, 0, Math.PI * 2);
+    g.arc(x(i), y(v), 5.5, 0, Math.PI * 2);
     g.fill();
-    g.fillStyle = alarm ? bad : css("--text");
+    g.fillStyle = color;
     g.beginPath();
     g.arc(x(i), y(v), 3.5, 0, Math.PI * 2);
     g.fill();
@@ -772,7 +784,9 @@ function updateSparks(t) {
     if (!s) continue;
     const standby = b.state === "STANDBY";
     const alarm = ["STALLED", "QUEUED", "OOD_ESCALATED"].includes(b.state);
-    const hovered = standby ? null : drawSpark(s.canvas, b.history, t.threshold, s.hover, alarm);
+    const color = css(STATE_COLOR[b.state] || "--nominal");
+    const hovered = standby ? null : drawSpark(s.canvas, b.history, t.threshold, s.hover, color);
+    s.row.style.setProperty("--state", color);
     const shown = hovered ?? b.confidence;
     s.row.classList.toggle("is-standby", standby);
     s.row.classList.toggle("is-low", alarm && hovered === null);
@@ -932,7 +946,7 @@ function situation(t) {
     return {
       tone: "ood", tag: `Refused · Bay ${r}`,
       head: `Bay ${r} refused the fleet skill`,
-      hint: `This stall is unlike the learned jam, so no skill was replayed. Select Bay ${r} (${kbd(r)}) to take over, or reset the cells (${kbd("R")}).`,
+      hint: `Unlike the learned jam, so no skill was replayed. Press ${kbd(r)} to take over or ${kbd("R")} to reset the cells.`,
       keys: [48 + r],
       actions: [{ label: `Select Bay ${r}`, accent: true, run: () => selectBay(r) }],
     };
