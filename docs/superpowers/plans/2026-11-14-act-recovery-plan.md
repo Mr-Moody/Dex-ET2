@@ -55,9 +55,9 @@ src/teleop/
   policy/cameras.py                            # T-191
   policy/act_runtime.py                        # T-195
   atc/recovery.py                              # T-190
-  atc/coordinator.py                           # T-190
+  atc/coordinator.py                           # T-190; T-221 (skill_listeners, reset_library)
   atc/stage.py                                 # T-190 (M key); T-197 (hud_view() recovery line only)
-  atc/episodes.py                              # T-191
+  atc/episodes.py                              # T-191; T-222 (switches, stats) after T-191
   atc/generate.py                              # T-192
   atc/act_recovery.py                          # T-195
   atc/validator.py                             # T-196
@@ -67,7 +67,7 @@ src/teleop/
   process/qc.py  commands/process.py           # T-193
   commands/atc.py                              # T-190
   commands/eval.py                             # T-196
-  console/telemetry.py  console/web/*          # T-197
+  console/telemetry.py  console/web/*          # T-197, on T-223's pages; T-223/T-224 (page split, Data page)
 tests/
   policy/test_schema.py  policy/test_manifest.py  atc/test_recovery.py   # T-190
   policy/test_cameras.py  atc/test_episodes.py                           # T-191
