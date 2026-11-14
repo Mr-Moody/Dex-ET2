@@ -131,6 +131,9 @@ def unoq() -> Iterator[UnoQClient]:
     client.close()
 
 
+_RIGS: list[Rig] = []
+
+
 class Rig:
     def __init__(
         self,
@@ -139,6 +142,7 @@ class Rig:
         validator: SkillValidator,
         config: CoordinatorConfig | None = None,
     ) -> None:
+        _RIGS.append(self)
         self.sink = RecordingSink()
         self.reasoner = RecordingReasoner()
         self.unoq = unoq
@@ -169,6 +173,14 @@ class Rig:
         self.run_until(bay_id, {BayState.RESCUE, BayState.OOD_ESCALATED, BayState.QUEUED})
         for _ in range(40):  # let the 3 cm retract finish
             self.co.tick()
+
+
+@pytest.fixture(autouse=True)
+def _close_rigs() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Shut every coordinator's gate worker down after each test (no leaked threads)."""
+    yield
+    while _RIGS:
+        _RIGS.pop().co.close()
 
 
 @pytest.fixture
@@ -220,17 +232,24 @@ def demo_operator(rig: Rig, bay_id: int) -> Iterator[OperatorInput]:
         t_wp += dur
 
 
-def run_rescue(rig: Rig, bay_id: int, max_extra_ticks: int = 30) -> None:
-    """Hold the clutch through the scripted rescue, release it, and let validation finish."""
+def run_rescue(rig: Rig, bay_id: int, max_extra_ticks: int | None = None) -> None:
+    """Hold the clutch through the scripted rescue, release it, and let validation finish.
+
+    ``max_extra_ticks=0`` returns as soon as the bay is VALIDATING. The default waits
+    out the sim-time gate deadline plus margin.
+    """
+    if max_extra_ticks is None:
+        max_extra_ticks = round(rig.co.config.gate_deadline_s / CONTROL_DT) + 60
     console = ConsoleInputState(selected_bay=bay_id, clutch=True)
     for sample in demo_operator(rig, bay_id):
         snaps = rig.co.tick(console, sample)
         if snaps[bay_id - 1].x_bolt_m >= BOLT_CLEARED_M + 0.0015:
             break
     released = ConsoleInputState(selected_bay=bay_id, clutch=False)
-    for _ in range(max_extra_ticks):
+    stop = BayState.VALIDATING if max_extra_ticks == 0 else BayState.NOMINAL
+    for _ in range(max_extra_ticks or 30):
         rig.co.tick(released, None)
-        if rig.co.state(bay_id) == BayState.NOMINAL:
+        if rig.co.state(bay_id) == stop:
             return
 
 
@@ -482,8 +501,8 @@ def test_end_to_end_bay1_rescue_fits_dmp_passes_20_rollouts_and_bay2_clears_35de
 
     # The 20-rollout gate measures ~6-9 s on the booth laptop (more replay time with the slower
     # 2.2 s push, wall-clock jitter under load), so assert a regression ceiling with a ~2x margin
-    # rather than a target.
-    assert report.elapsed_s < 15.0, f"validation gate took {report.elapsed_s:.3f}s"
+    # rather than a target. It runs in a worker now; the sim-time deadline bounds the apply.
+    assert report.elapsed_s < 20.0, f"validation gate took {report.elapsed_s:.3f}s"
 
     # Bay 2 sits at +12 cm / +35 deg relative to Bay 1's latch frame.
     l1, l2 = co.rig(1).true_world_latch(), co.rig(2).true_world_latch()  # scene layout
@@ -946,6 +965,7 @@ def rescued_skill(hand_spec: HandSpec, validator: SkillValidator) -> Iterator[Sk
     try:
         rig = Rig(client, hand_spec, validator)
         _rescued_rig(rig)
+        rig.co.close()
         yield next(iter(rig.co.library.values()))
     finally:
         client.close()
@@ -1036,3 +1056,28 @@ def test_replay_touch_uses_the_skill_offset(
     # +1 mm along the push axis is corrected by about -1 mm (mean over the spec poses; a single
     # contact's encoder trigger scatters by a few tenths of a mm).
     assert float(np.mean(plus - nom)) == pytest.approx(-0.001, abs=4e-4)
+
+
+def test_gate_result_applies_exactly_at_deadline(rig: Rig) -> None:
+    rig.stall_bay(1, flap_jammed=True)
+    run_rescue(rig, 1, max_extra_ticks=0)  # release only, don't wait for validation
+    co = rig.co
+    assert co.state(1) == BayState.VALIDATING and co.gate_pending(1)
+    t_submit = co.time_s
+    while co.state(1) == BayState.VALIDATING:
+        co.tick()
+    assert co.time_s - t_submit == pytest.approx(co.config.gate_deadline_s, abs=2 * CONTROL_DT)
+    assert not co.gate_pending(1)
+
+
+def test_gate_worker_exception_fails_cleanly(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rig.co.validator, "validate", lambda s: 1 / 0)
+    rig.stall_bay(1, flap_jammed=True)
+    run_rescue(rig, 1)
+    assert rig.co.state(1) != BayState.VALIDATING and len(rig.co.library) == 0
+    assert rig.co.last_report is not None and not rig.co.last_report.passed
+
+
+def test_close_is_idempotent(rig: Rig) -> None:
+    rig.co.close()
+    rig.co.close()

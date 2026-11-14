@@ -707,6 +707,7 @@ class StageController:
         return tuple(out[bay] for bay in sorted(out))
 
     def close(self) -> None:
+        self.coordinator.close()
         for console in self.consoles:
             try:
                 console.close()
@@ -921,7 +922,10 @@ class StageDirector:
                 return
 
             beat = self._begin(3)  # UNO Q fit + 20-rollout gate, skill deployed
-            yield from self._wait(lambda: co.state(1) == BayState.NOMINAL)
+            yield from self._wait(
+                lambda: co.state(1) == BayState.NOMINAL,
+                self.beat_timeout_s + co.config.gate_deadline_s,  # gate applies at its deadline
+            )
             self._end(beat, bool(ctl.gate.ok) and len(co.library) >= 1)
             if not beat.ok:
                 return

@@ -94,7 +94,6 @@ PERTURBATIONS_DEG: tuple[tuple[float, float, float], ...] = (
     (0.0, 0.0, 0.0),
     (0.08, 0.06, 30.0),
 )
-VALIDATION_BUDGET_S = 0.4
 
 # Randomized gate (spec G3): N seeded rollouts, deploy at >= GATE_PASS_MIN passes.
 GATE_ROLLOUTS = 20

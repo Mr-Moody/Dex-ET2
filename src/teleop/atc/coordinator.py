@@ -44,6 +44,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -169,6 +170,9 @@ class CoordinatorConfig:
     seed: int = 0
     pose_sigma_xy_m: float = POSE_SIGMA_XY_M
     pose_sigma_yaw_rad: float = POSE_SIGMA_YAW_RAD
+    # Sim seconds from submission to applying the skill-gate result. The gate runs in a worker
+    # (6-9 s wall); applying at a fixed sim time keeps seeded runs tick-for-tick reproducible.
+    gate_deadline_s: float = 10.0
     push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
 
 
@@ -345,6 +349,15 @@ class _Auto:
         self.last: ReplayCommand | None = None
 
 
+@dataclass(slots=True)
+class _Gate:
+    """A skill gate running in the worker, applied at the fixed sim-time ``deadline``."""
+
+    skill: SkillPrimitive
+    future: Future[ValidationReport]
+    deadline: float
+
+
 @dataclass
 class _Bay:
     bay_id: int
@@ -367,7 +380,7 @@ class _Bay:
     auto: _Auto | None = None
     refused: bool = False
     signature: StallSignature | None = None
-    pending: tuple[RescueTrajectory, StallSignature] | None = None
+    gate: _Gate | None = None
     match: StallMatch | None = None
     skill_id: str | None = None
     confidence: float = 1.0
@@ -416,6 +429,9 @@ class AtcCoordinator:
         self.routine = routine or ROUTINE
         self.library: dict[str, SkillPrimitive] = {}
         self.time_s = 0.0
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="skill-gate"
+        )
         self.last_classify_ms = 0.0
         self.last_report: ValidationReport | None = None
         self._queue: list[int] = []
@@ -557,7 +573,7 @@ class AtcCoordinator:
         bay.move = None
         bay.auto = None
         bay.buffer = None
-        bay.pending = None
+        bay.gate = None  # a gate still running in the worker is simply never applied
         bay.clutch_held = False
         bay.refused = False
         bay.match = None
@@ -587,7 +603,7 @@ class AtcCoordinator:
     ) -> tuple[BaySnapshot, ...]:
         """One 60 Hz control tick: command every active bay, step physics, sense, transition."""
         console = console or ConsoleInputState()
-        self._run_pending()
+        self._apply_gates()
         for bay in self._bays.values():
             self._control(bay, console, operator)
         step_physics(self.model, self.data)
@@ -738,8 +754,8 @@ class AtcCoordinator:
             else None
         )
         if traj is not None and bay.signature is not None:
-            bay.pending = (traj, bay.signature)
             bay.state = BayState.VALIDATING
+            self._submit_gate(bay, traj, bay.signature)
         else:
             logger.info("bay %d: rescue discarded (bolt not cleared), staying in hover", bay.bay_id)
 
@@ -1058,14 +1074,29 @@ class AtcCoordinator:
 
     # ------------------------------------------------------------------ validation + library
 
-    def _run_pending(self) -> None:
-        for bay in self._bays.values():
-            if bay.state == BayState.VALIDATING and bay.pending is not None:
-                traj, sig = bay.pending
-                bay.pending = None
-                self._finalize_rescue(bay, traj, sig)
+    def gate_pending(self, bay_id: int) -> bool:
+        """True while the bay's skill gate is running or waiting for its sim-time deadline."""
+        return self._bays[bay_id].gate is not None
 
-    def _finalize_rescue(self, bay: _Bay, traj: RescueTrajectory, sig: StallSignature) -> None:
+    def close(self) -> None:
+        """Shut the gate worker down (idempotent); a running gate finishes, queued ones drop."""
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def _apply_gates(self) -> None:
+        """Apply every gate whose sim-time deadline has been reached, waiting for the worker."""
+        for bay in self._bays.values():
+            gate = bay.gate
+            if (
+                gate is not None
+                and bay.state == BayState.VALIDATING
+                and (self.time_s >= gate.deadline)
+            ):
+                bay.gate = None
+                self._apply_gate(bay, gate)
+
+    def _submit_gate(self, bay: _Bay, traj: RescueTrajectory, sig: StallSignature) -> None:
         sku = self.config.part_sku_id
         skill = self.unoq.fit_dmp(
             sku, sig, traj.timestamps_s, traj.wrist_latch_se3, traj.fingers_q, traj.tau_ext_inf
@@ -1087,7 +1118,22 @@ class AtcCoordinator:
             },
         )
         self._submit_reasoning("RESCUE_LOGGED", bay)
-        report = self.validator.validate(skill)
+        executor = self._executor
+        if executor is None:
+            raise RuntimeError("coordinator is closed")
+        bay.gate = _Gate(
+            skill,
+            executor.submit(self.validator.validate, skill),
+            self.time_s + self.config.gate_deadline_s,
+        )
+
+    def _apply_gate(self, bay: _Bay, gate: _Gate) -> None:
+        skill = gate.skill
+        try:
+            report = gate.future.result()  # blocks if the worker is still running
+        except Exception:
+            logger.exception("bay %d: skill gate failed for %s", bay.bay_id, skill.skill_id)
+            report = ValidationReport((), 0.0, self.validator.pass_min)
         self.last_report = report
         self._emit(
             "VALIDATION_GATE",
@@ -1099,7 +1145,9 @@ class AtcCoordinator:
                 "rollouts_passed": report.n_passed,
                 "rollouts_total": report.total,
                 "elapsed_s": report.elapsed_s,
-                "max_tau_ext_inf_nm": max(r.max_tau_ext_inf_nm for r in report.results),
+                "max_tau_ext_inf_nm": max(
+                    (r.max_tau_ext_inf_nm for r in report.results), default=0.0
+                ),
             },
         )
         self._submit_reasoning(
