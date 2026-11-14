@@ -16,7 +16,7 @@ from typing import Any
 
 from teleop.app import make_source, parse_sim_config
 from teleop.protocols import InputSource
-from teleop.retarget.calibration import Calibration, calibrate
+from teleop.retarget.calibration import Calibration, calibrate, take_new_frames
 from teleop.retarget.direct import MIN_SPAN
 from teleop.sim.hands import HandSpec, load_hand
 from teleop.types import SIDES, HandFrame, Side
@@ -30,11 +30,7 @@ def collect(source: InputSource, seconds: float) -> list[HandFrame]:
     seen: set[tuple[Side, int, int]] = set()
     end = time.monotonic() + seconds
     while time.monotonic() < end:
-        latest = source.latest()
-        for f in (latest.left, latest.right):
-            if f is not None and (key := (f.side, f.host_time_ns, f.seq)) not in seen:
-                seen.add(key)
-                frames.append(f)
+        take_new_frames(source.latest(), seen, frames)
         time.sleep(1.0 / POLL_HZ)
     return frames
 

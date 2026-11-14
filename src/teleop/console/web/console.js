@@ -1279,6 +1279,69 @@ function updateDummy(t) {
   }
 }
 
+// Glove calibration: the server runs the flat -> fist wizard; the panel only mirrors t.calib.
+const CALIB_LEVEL = { applied: "ok", partial: "warn", cancelled: "info", no_frames: "warn", busy: "info", error: "warn" };
+function updateCalib(t) {
+  const c = t.calib;
+  const panel = $("panel-calib");
+  const go = $("calib-go");
+  if (!c) {
+    panel.dataset.state = "off";
+    $("calib-meta").textContent = "Unavailable";
+    panel.title = "Needs the Studio gloves (not the synthetic or scripted operator)";
+    go.disabled = true;
+    go.classList.remove("is-cancel");
+    go.textContent = "Calibrate gloves";
+    return;
+  }
+  panel.title = "";
+  const running = c.state !== "idle";
+  panel.dataset.state = running ? "running" : "idle";
+  go.disabled = false;
+  go.classList.toggle("is-cancel", running);
+  go.classList.toggle("actbtn--accent", !running);
+  go.textContent = running ? "Cancel" : "Calibrate gloves";
+  const secs = `${Math.ceil(c.remaining_s || 0)} s`;
+  const poseHint = (pose, done, idleText) => {
+    if (running && c.pose === pose) return [c.state === "prep" ? `Get ready · ${secs}` : `Hold · ${secs}`, "active"];
+    if (done) return ["Done", "done"];
+    return [idleText, "pending"];
+  };
+  const tiles = [
+    ["flat", c.flat_done, "Open hand"],
+    ["fist", c.fist_done, "Closed hand"],
+  ];
+  for (const [pose, done, idleText] of tiles) {
+    const [hint, state] = poseHint(pose, done, idleText);
+    $(`calib-${pose}`).dataset.tile = state;
+    if ($(`calib-${pose}-hint`).textContent !== hint) $(`calib-${pose}-hint`).textContent = hint;
+  }
+  let meta;
+  if (running) {
+    meta = `Step ${c.pose === "flat" ? 1 : 2} · ${c.pose === "flat" ? "Flat" : "Fist"}${c.state === "prep" ? " · get ready" : ""}`;
+  } else if (c.result && c.result !== "busy") {
+    meta = c.result_text;
+  } else {
+    meta = `Idle · ${c.origin === "defaults" ? "defaults" : c.origin === "live" ? "live" : "from file"}`;
+  }
+  $("calib-meta").textContent = meta;
+  $("calib-meta").title = [c.path, c.detail].filter(Boolean).join(" · ");
+  if (ui.calibSeq === undefined) {
+    ui.calibSeq = c.seq; // a reload must not replay the last result
+  } else if (c.seq !== ui.calibSeq) {
+    ui.calibSeq = c.seq;
+    if (c.result) toast("Calib", c.detail ? `${c.result_text}: ${c.detail}` : c.result_text, CALIB_LEVEL[c.result] || "info");
+  }
+}
+
+function initCalibControls() {
+  $("calib-go").addEventListener("click", () => {
+    const c = ui.telemetry && ui.telemetry.calib;
+    if (!c) return;
+    sendClient({ type: "calib", action: c.state !== "idle" ? "cancel" : "start" });
+  });
+}
+
 function render(t) {
   ui.telemetry = t;
   if (t.view) {
@@ -1311,6 +1374,7 @@ function render(t) {
   updateBrief(t);
   updateDemoFaults(t);
   updateDummy(t);
+  updateCalib(t);
   updateActions(t);
   updateCompliance(t);
   // One advisory line, shown only while the advisor has something to say.
@@ -1704,6 +1768,7 @@ window.addEventListener("resize", () => ui.telemetry && updateSparks(ui.telemetr
 
 initViewBar();
 initDummyControls();
+initCalibControls();
 buildKeyBar();
 setLink(false);
 $("live-text").textContent = "Connecting";

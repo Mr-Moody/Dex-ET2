@@ -220,6 +220,47 @@ kbd {
 .actbtn--accent { border-color: var(--attn); background: var(--attn); color: var(--ink); }
 .actbtn--accent:hover { background: #ffd23e; border-color: #ffd23e; }
 
+/* ---------------------------------------------------------------- glove calibration */
+
+.calib__meta { margin-left: auto; }
+.calib[data-state="running"] .calib__meta { color: var(--attn); font-weight: 600; }
+.calib[data-state="off"] { opacity: 0.6; }
+.calib__poses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 0.5rem; }
+.calib__tile {
+  --tile: var(--faint);
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  padding: 0.4rem 0.3rem 0.35rem;
+  border: 1px dashed var(--tile);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.calib__icon {
+  width: 56px;
+  height: 56px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.calib__name { font-size: var(--t-xs); font-weight: 600; color: var(--text); }
+.calib__hint { font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.calib__tile[data-tile="active"] {
+  --tile: var(--attn);
+  border-style: solid;
+  background: rgb(242 183 5 / 0.14);
+  color: var(--attn);
+}
+.calib__tile[data-tile="done"] { --tile: var(--nominal); border-style: solid; color: var(--nominal); }
+.calib__tile[data-tile="done"] .calib__hint::before { content: "¹3  "; font-weight: 700; }
+.calib__go { width: 100%; }
+.calib__go:disabled { opacity: 0.5; cursor: not-allowed; }
+.calib__go.is-cancel { border-color: var(--stalled); background: transparent; color: var(--stalled); }
+.calib__go.is-cancel:hover { background: rgb(229 72 77 / 0.14); border-color: var(--stalled); }
+
 /* ---------------------------------------------------------------- keyboard bar (quiet) */
 
 .keys {

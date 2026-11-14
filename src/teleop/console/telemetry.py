@@ -221,6 +221,7 @@ class TelemetryAdapter:
         *,
         view_state: Any = None,
         dummy_status: Mapping[str, Any] | None = None,
+        calib_status: Mapping[str, Any] | None = None,
         background_conveyors: Mapping[int, ConveyorStatus] | None = None,
     ) -> dict[str, Any]:
         """One telemetry message. Call at the telemetry rate: each call adds a history sample."""
@@ -288,6 +289,7 @@ class TelemetryAdapter:
                 "mode": mode,
                 "view": view_state.to_dict() if hasattr(view_state, "to_dict") else None,
                 "dummy": dict(dummy_status) if dummy_status is not None else None,
+                "calib": dict(calib_status) if calib_status is not None else None,
                 "feeds": [
                     {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role}
                     for f in feeds_t

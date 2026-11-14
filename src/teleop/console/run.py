@@ -18,6 +18,7 @@ from teleop.atc.coordinator import OperatorInput
 from teleop.atc.stage import StageController
 from teleop.atc.types import N_BAYS
 from teleop.console.background import load_cycle
+from teleop.console.calib import GloveCalibrator
 from teleop.console.health_publish import HealthPublisher
 from teleop.console.layout import (
     PAN_LIMIT,
@@ -131,6 +132,7 @@ def run_console(
     steps: int | None = None,
     health: HealthMonitor | None = None,
     dummy: Any = None,
+    calib: GloveCalibrator | None = None,
 ) -> LoopStats:
     co = controller.coordinator
     bays = bays_in_model(co.model)
@@ -157,6 +159,8 @@ def run_console(
                     fault_queue.append((bay, str(kind)))
         elif mtype == "dummy" and dummy is not None:
             dummy.apply_ui_message(msg)
+        elif mtype == "calib" and calib is not None:
+            calib.handle_message(msg)  # starts its own thread; never blocks the server
 
     def reconnect(name: str) -> None:
         if health is not None:
@@ -187,6 +191,7 @@ def run_console(
         background,
         fps=fps,
         dummy_status=dummy.status_dict if dummy is not None else None,
+        calib_status=calib.status_dict if calib is not None else None,
     )
     worker.set_view_state(view_box[0])
     worker.start()

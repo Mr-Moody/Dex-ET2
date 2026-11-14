@@ -415,6 +415,7 @@ class RenderWorker(threading.Thread):
         telemetry_hz: float = 10.0,
         renderer_factory: RendererFactory | None = None,
         dummy_status: Callable[[], Mapping[str, Any]] | None = None,
+        calib_status: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__(name="console-render", daemon=True)
         self.renderer_factory: RendererFactory = renderer_factory or FeedRenderer
@@ -433,6 +434,7 @@ class RenderWorker(threading.Thread):
         self._view_lock = threading.Lock()
         self._view_state: ViewState | None = None
         self._dummy_status = dummy_status
+        self._calib_status = calib_status
 
     def set_view_state(self, state: ViewState | None) -> None:
         with self._view_lock:
@@ -456,6 +458,7 @@ class RenderWorker(threading.Thread):
             self._bg_conf,
             view_state=vstate,
             dummy_status=dstat,
+            calib_status=self._calib_status() if self._calib_status is not None else None,
             background_conveyors=self._bg_conveyors,
         )
         self.server.publish_telemetry(msg)

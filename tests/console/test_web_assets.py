@@ -318,3 +318,16 @@ def test_health_strip_updates_pills_in_place() -> None:
         "okDetail": False,
         "after": 1,
     }
+
+
+def test_glove_calibration_panel() -> None:
+    html, js = _read("index.html"), _read("console.js")
+    for token in ('id="panel-calib"', 'id="calib-go"', 'id="calib-flat"', 'id="calib-fist"'):
+        assert token in html, token
+    assert html.count('class="calib__icon"') == 2  # inline stroke SVGs, no emoji or icon CDN
+    for token in ('type: "calib"', '"start"', '"cancel"', "t.calib"):
+        assert token in js, token
+    assert (
+        "/* ---------------------------------------------------------------- glove calibration */"
+        in _read("console.css")
+    )

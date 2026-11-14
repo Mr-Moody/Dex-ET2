@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import json
 import statistics
-from collections.abc import Sequence
+from collections.abc import MutableSet, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from teleop.retarget.flexion import flex_value
 from teleop.sim.hands import FlexMap, HandSpec
-from teleop.types import SIDES, HandFrame, Side
+from teleop.types import SIDES, BimanualFrame, HandFrame, Side
 
 DEFAULT_CLOSED_PER_JOINT = 1.4
+
+
+def take_new_frames(
+    latest: BimanualFrame, seen: MutableSet[tuple[Side, int, int]], out: list[HandFrame]
+) -> None:
+    """Append the frames in ``latest`` not yet in ``seen`` (keyed by side, host time and seq)."""
+    for f in (latest.left, latest.right):
+        if f is not None and (key := (f.side, f.host_time_ns, f.seq)) not in seen:
+            seen.add(key)
+            out.append(f)
 
 
 def _default_range(fm: FlexMap) -> tuple[float, float]:
