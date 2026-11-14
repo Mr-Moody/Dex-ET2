@@ -347,12 +347,11 @@ class CopilotOutputs:
     def callout(self, callout: Callout) -> None:
         now = datetime.now()
         with self._lock:
-            self._out.write(format_line(callout, now))
-            self._out.flush()
             self._append(
                 {"type": "callout", "t": now.isoformat(timespec="milliseconds")} | asdict(callout),
                 now,
             )
+            self._print(format_line(callout, now))
 
     def event(self, event: CopilotEvent, frame: StoredFrame | None) -> None:
         now = datetime.now()
@@ -379,8 +378,15 @@ class CopilotOutputs:
 
     def note(self, text: str) -> None:
         with self._lock:
-            self._out.write(text + "\n")
+            self._print(text + "\n")
+
+    def _print(self, text: str) -> None:
+        """Print, but never let a closed or broken terminal stop call-outs or speech."""
+        try:
+            self._out.write(text)
             self._out.flush()
+        except (OSError, ValueError) as exc:
+            logger.debug("copilot terminal write failed: %s", exc)
 
     def _append(self, record: dict[str, Any], now: datetime) -> None:
         path = self.log_path(now)

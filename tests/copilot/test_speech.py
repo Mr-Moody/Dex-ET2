@@ -235,3 +235,48 @@ def test_linux_without_players_has_no_commands(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr("teleop.copilot.speech.platform.system", lambda: "Linux")
     monkeypatch.setattr("teleop.copilot.speech.shutil.which", lambda tool: None)
     assert system_voice_command("x") is None and wav_player_command("a.wav") is None
+
+
+class FakeVoice:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.warmed = threading.Event()
+        self.closed = False
+
+    def __call__(self, text: str) -> None:
+        self.lines.append(text)
+
+    def warm(self) -> None:
+        self.warmed.set()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_the_system_voice_is_warmed_at_start_and_closed_with_the_speaker() -> None:
+    voice = FakeVoice()
+    speaker = Speaker(None, tts_model="m", voice="v", system_voice=voice)
+    assert voice.warmed.wait(2)
+    speaker.close()
+    assert voice.closed
+
+
+def test_speech_timings_are_reported() -> None:
+    clock = FakeClock()
+    voice = FakeVoice()
+    speaker = Speaker(None, tts_model="m", voice="v", system_voice=voice, clock=clock, start=False)
+    speaker.say("Bay 1 stalled.")
+    clock.advance(0.25)
+    spoken = drain(speaker)
+    assert spoken[0].route == "system" and spoken[0].start_ms == 250.0
+    assert spoken[0].speak_ms == 0.0 and voice.lines == ["Bay 1 stalled."]
+
+
+def test_run_speaks_with_the_system_voice_unless_gemini_tts_is_asked_for() -> None:
+    from teleop.copilot.config import CopilotConfig
+    from teleop.copilot.run import _speech_label  # pyright: ignore[reportPrivateUsage]
+
+    cfg = CopilotConfig()
+    assert _speech_label(cfg, gemini_tts=False) == "system voice"
+    assert _speech_label(cfg, gemini_tts=True) == f"{cfg.tts_model}/{cfg.voice}"
+    assert _speech_label(CopilotConfig(mute=True), gemini_tts=True) == "muted"

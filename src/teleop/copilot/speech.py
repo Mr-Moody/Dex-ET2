@@ -18,6 +18,7 @@ import contextlib
 import logging
 import os
 import platform
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -69,6 +70,8 @@ class Spoken:
     route: str  # "tts", "system", "dropped_stale" or "muted"
     tts_ms: float | None = None
     note: str = ""
+    start_ms: float | None = None  # from queueing the line to the voice or player starting
+    speak_ms: float | None = None  # how long speaking it took
 
 
 # -- players ------------------------------------------------------------------------------------
@@ -136,6 +139,98 @@ def speak_system(text: str) -> None:
     _run(cmd, "system voice")
 
 
+_VOICE_SCRIPT = (
+    "[Console]::InputEncoding = [Text.Encoding]::UTF8; "
+    "Add-Type -AssemblyName System.Speech; "
+    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+    "[Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); "
+    "while (($l = [Console]::In.ReadLine()) -ne $null) { "
+    "if ($l.Length -gt 0) { $s.Speak($l) }; "
+    "[Console]::Out.WriteLine('done'); [Console]::Out.Flush() }"
+)
+VOICE_LINE_TIMEOUT_S = 30.0
+NEWLINE = bytes([10])
+
+
+class WindowsVoice:
+    """One long-running PowerShell ``SpeechSynthesizer``, fed one line at a time on stdin.
+
+    Starting PowerShell and loading System.Speech takes 1-2 s, so doing it once (at start-up, via
+    :meth:`warm`) instead of per line takes that delay off every call-out. Calls block until the
+    line has been spoken. If the process dies or hangs it is restarted for the next line, and the
+    current line falls back to the one-shot :func:`speak_system`.
+    """
+
+    def __init__(self, line_timeout_s: float = VOICE_LINE_TIMEOUT_S) -> None:
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._replies: queue.Queue[str] = queue.Queue()
+        self._timeout_s = line_timeout_s
+        self._lock = threading.Lock()
+
+    def warm(self) -> None:
+        """Start the process now so the first line does not pay for it."""
+        with self._lock, contextlib.suppress(OSError):
+            self._ensure()
+
+    def _ensure(self) -> subprocess.Popen[bytes]:
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+        self._replies = queue.Queue()
+        proc = subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _VOICE_SCRIPT],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        replies = self._replies
+
+        def read() -> None:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                replies.put(raw.decode("utf-8", "replace").strip())
+            replies.put("eof")
+
+        threading.Thread(target=read, name="copilot-voice", daemon=True).start()
+        self._proc = proc
+        return proc
+
+    def __call__(self, text: str) -> None:
+        line = " ".join(text.split())  # one line: the voice reads up to the newline
+        with self._lock:
+            try:
+                proc = self._ensure()
+                assert proc.stdin is not None
+                proc.stdin.write(line.encode("utf-8") + NEWLINE)
+                proc.stdin.flush()
+                while (reply := self._replies.get(timeout=self._timeout_s)) not in ("done", "eof"):
+                    pass  # "ready" from start-up
+                if reply == "done":
+                    return
+                raise OSError("voice process exited")
+            except (OSError, queue.Empty) as exc:
+                logger.warning("copilot voice process failed (%s); restarting it", exc)
+                self._kill()
+        speak_system(text)
+
+    def _kill(self) -> None:
+        if self._proc is not None:
+            with contextlib.suppress(OSError):
+                self._proc.kill()
+            self._proc = None
+
+    def close(self) -> None:
+        with self._lock:
+            if self._proc is not None and self._proc.stdin is not None:
+                with contextlib.suppress(OSError):
+                    self._proc.stdin.close()
+            self._kill()
+
+
+def default_system_voice() -> Callable[[str], None]:
+    """A persistent voice on Windows; elsewhere ``say``/``spd-say`` start fast enough per line."""
+    return WindowsVoice() if platform.system() == "Windows" else speak_system
+
+
 # -- the speaker --------------------------------------------------------------------------------
 
 
@@ -153,7 +248,7 @@ class Speaker:
         voice: str,
         mute: bool = False,
         player: Callable[[bytes], None] = play_wav,
-        system_voice: Callable[[str], None] = speak_system,
+        system_voice: Callable[[str], None] | None = None,
         clock: Clock = time.monotonic_ns,
         max_waiting: int = MAX_WAITING,
         stale_after_s: float = STALE_AFTER_S,
@@ -166,7 +261,7 @@ class Speaker:
         self._voice = voice
         self.mute = mute
         self._player = player
-        self._system_voice = system_voice
+        self._system_voice = system_voice if system_voice is not None else default_system_voice()
         self._clock = clock
         self._max_waiting = max_waiting
         self._stale_ns = round(stale_after_s * 1e9)
@@ -179,6 +274,9 @@ class Speaker:
         self._cache: OrderedDict[str, bytes] = OrderedDict()
         self._tts_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="copilot-tts")
         self._thread: threading.Thread | None = None
+        warm = getattr(self._system_voice, "warm", None)
+        if start and not mute and callable(warm):
+            threading.Thread(target=warm, name="copilot-voice-warm", daemon=True).start()
         if start:
             self._thread = threading.Thread(target=self._loop, name="copilot-speech", daemon=True)
             self._thread.start()
@@ -256,14 +354,19 @@ class Speaker:
 
     def _speak(self, item: SpeechItem) -> Spoken:
         wav, tts_ms, note = self._tts(item.text)
+        started = self._clock()
+        start_ms = (started - item.queued_ns) / 1e6
         if wav is not None:
             try:
                 self._player(wav)
-                return Spoken(item.token, item.text, "tts", tts_ms)
+                speak_ms = (self._clock() - started) / 1e6
+                return Spoken(item.token, item.text, "tts", tts_ms, note, start_ms, speak_ms)
             except OSError as exc:
                 note = f"player failed: {exc}"
+                started = self._clock()
         self._system_voice(item.text)
-        return Spoken(item.token, item.text, "system", tts_ms, note)
+        speak_ms = (self._clock() - started) / 1e6
+        return Spoken(item.token, item.text, "system", tts_ms, note, start_ms, speak_ms)
 
     def _tts(self, text: str) -> tuple[bytes | None, float | None, str]:
         """The WAV within the deadline, or ``None`` and why not."""
@@ -317,3 +420,6 @@ class Speaker:
         if self._thread is not None:
             self._thread.join(timeout_s)
         self._tts_pool.shutdown(wait=False, cancel_futures=True)
+        close_voice = getattr(self._system_voice, "close", None)
+        if callable(close_voice):
+            close_voice()

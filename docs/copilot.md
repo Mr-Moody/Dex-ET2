@@ -305,8 +305,8 @@ uv run python -m teleop.copilot run                      # terminal 2
 uv run python -m teleop.copilot run --mute --no-images   # print and log only, text-only requests
 ```
 
-Flags: `--console URL` (default `COPILOT_CONSOLE_URL`), `--no-images`, `--mute`, `--env-file PATH`
-and `--log-dir DIR` (default `runs/copilot`, gitignored). Without `GEMINI_API_KEY` the command
+Flags: `--console URL` (default `COPILOT_CONSOLE_URL`), `--no-images`, `--mute`, `--gemini-tts`,
+`--env-file PATH` and `--log-dir DIR` (default `runs/copilot`, gitignored). Without `GEMINI_API_KEY` the command
 still runs: every call-out is the template, spoken with the system voice.
 
 ### Call-outs (`teleop.copilot.callouts`, `teleop.copilot.prompts`)
@@ -333,7 +333,12 @@ still runs: every call-out is the template, spoken with the system voice.
 - **Queue:** at most 2 lines wait. Alarms jump ahead of other lines; when the queue is full the
   oldest non-alarm line is dropped (an info line never pushes out an alarm). Lines older than
   10 s are dropped. Only `say` is spoken, never `detail`.
-- **Gemini TTS** (`COPILOT_TTS_MODEL`) returns a WAV, played with the first available of
+- **System voice by default.** Live call-outs are spoken with the system voice straight away.
+  Gemini TTS missed even a 1.5 s cut-off on every live line (see below), so it only added delay.
+  On Windows the voice is one long-running PowerShell `SpeechSynthesizer`, started with the
+  copilot and fed one line at a time, which saves about 0.6 s per line over starting PowerShell
+  each time.
+- **`--gemini-tts`** opts back in: Gemini TTS (`COPILOT_TTS_MODEL`) returns a WAV, played with the first available of
   `paplay`, `aplay`, `afplay` or PowerShell `System.Media.SoundPlayer`.
 - **Fallback:** if TTS fails or takes longer than 1.5 s, the same line is spoken with the system
   voice (`System.Speech` on Windows, `say` on macOS, `spd-say`/`espeak` on Linux). The late WAV is
@@ -381,3 +386,11 @@ refusal. The JSONL log held only frame hashes.
   templated events let a pending model answer finish; only a newer model event supersedes it.
 - `runs/copilot/*.jsonl` now also has a `speech` record per line (`route`: `tts`, `system`,
   `dropped_stale` or `muted`, plus the TTS time), so the TTS hit rate can be measured.
+
+### Live run, system voice only (2026-11-14)
+
+With the persistent Windows voice and no Gemini TTS, five of six lines started speaking as soon as
+the call-out was made (0.0 s); one waited 1.3 s behind the line before it. Saying a line takes
+3–7 s at the default speaking rate. With `--gemini-tts` and the 1.5 s cut-off, every line had
+started 1.5 s late (4.2 s for one that queued). Each `speech` record now has `start_ms` (queued
+to speaking) and `speak_ms`.

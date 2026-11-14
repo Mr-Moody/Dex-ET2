@@ -393,3 +393,14 @@ def test_speech_outcomes_are_logged(tmp_path: Path) -> None:
     assert log is not None
     record = json.loads(log.read_text(encoding="utf-8"))
     assert record["type"] == "speech" and record["route"] == "system"
+
+
+def test_a_broken_terminal_does_not_stop_the_log(tmp_path: Path) -> None:
+    class Broken(io.StringIO):
+        def write(self, s: str) -> int:
+            raise BrokenPipeError("terminal closed")
+
+    outputs = CopilotOutputs(Broken(), tmp_path)
+    outputs.callout(Callout(1, "stall", "Bay 1 stalled.", "d", "alarm", "template"))
+    log = outputs.log_path()
+    assert log is not None and '"callout"' in log.read_text(encoding="utf-8")

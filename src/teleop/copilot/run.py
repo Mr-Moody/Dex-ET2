@@ -4,8 +4,10 @@ Wires the console feed, frame store and event detector (``T-211``) to the call-o
 the speaker, and prints and logs every call-out to ``runs/copilot/<date>.jsonl``. Start the demo
 first (``uv run teleop atc --source synthetic``), then run this in a second terminal.
 
-Without ``GEMINI_API_KEY`` it still runs: every call-out is the template, spoken with the system
-voice. Advisory only: it never sends anything to the console.
+Call-outs are spoken with the system voice straight away. ``--gemini-tts`` tries Gemini TTS first
+(the system voice takes over after 1.5 s); live it was slower than that on every line, so it is
+off by default. Without ``GEMINI_API_KEY`` it still runs, with template call-outs only. Advisory
+only: it never sends anything to the console.
 """
 
 from __future__ import annotations
@@ -70,6 +72,11 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
     parser.add_argument("--console", help="console WebSocket URL (default COPILOT_CONSOLE_URL)")
     parser.add_argument("--no-images", action="store_true", help="send text only, no frames")
     parser.add_argument("--mute", action="store_true", help="print and log, but do not speak")
+    parser.add_argument(
+        "--gemini-tts",
+        action="store_true",
+        help="speak with Gemini TTS (system voice after 1.5 s); default: system voice at once",
+    )
     parser.add_argument("--env-file", help="read this .env instead of discovering one")
     parser.add_argument(
         "--log-dir", default=str(DEFAULT_LOG_DIR), help="JSONL log directory (default runs/copilot)"
@@ -96,7 +103,7 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
         )
     outputs = CopilotOutputs(stdout, Path(args.log_dir))
     speaker = Speaker(
-        client,
+        client if args.gemini_tts else None,
         tts_model=cfg.tts_model,
         voice=cfg.voice,
         mute=cfg.mute,
@@ -104,7 +111,7 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
     )
     outputs.note(
         f"copilot watching {url}: call-outs {cfg.fast_model if client else 'templates only'}, "
-        f"speech {'muted' if cfg.mute else cfg.tts_model + '/' + cfg.voice}, "
+        f"speech {_speech_label(cfg, client is not None and args.gemini_tts)}, "
         f"images {'off' if cfg.no_images else 'on'}, log {outputs.log_path()} (Ctrl+C to stop)"
     )
     try:
@@ -113,3 +120,9 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
     finally:
         speaker.close()
     return 0
+
+
+def _speech_label(cfg: CopilotConfig, gemini_tts: bool) -> str:
+    if cfg.mute:
+        return "muted"
+    return f"{cfg.tts_model}/{cfg.voice}" if gemini_tts else "system voice"
