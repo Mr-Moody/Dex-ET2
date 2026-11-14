@@ -1,12 +1,12 @@
 ---
 id: T-220
 title: Fix the console wrist feed clipping the hand and latch (near plane)
-status: in_review
-owner: claude-code
-branch: fix/console-wrist-near-plane
+status: done
+owner: null
+branch: null
 depends_on: []
 plan: null
-claimed_at: '2026-11-14T18:44:28+00:00'
+claimed_at: null
 ---
 
 The console's `bay{k}/wrist_cam` feed renders with MuJoCo's extent-relative near plane. The
