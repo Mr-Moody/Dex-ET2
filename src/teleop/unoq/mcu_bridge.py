@@ -321,8 +321,8 @@ class McuConsoleBridge:
         if self._led.get(bay_id) == token:
             return
         line = format_bay_state(bay_id, state)
-        self._led[bay_id] = token
         self._send(line)
+        self._led[bay_id] = token  # only after a successful write, so a failed one is retried
 
     def resend_bay_states(self) -> None:
         """Push every known LED state again, e.g. after the MCU reboots."""

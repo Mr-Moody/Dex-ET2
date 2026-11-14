@@ -78,7 +78,7 @@ class UnoQServer:
         self.joint_filter = JointsOneEuroFilter()
         self.skills: dict[str, SkillPrimitive] = {}
         self._console = ConsoleInputState()
-        self._bridge: McuConsoleBridge | None = None
+        self._bridge: McuConsoleBridge | None = None  # set once, before serving
         self._last_heard_ns: int | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -181,9 +181,11 @@ class UnoQServer:
         if handler is None:
             return P.error(f"unknown op {op!r}")
         try:
+            if op == P.OP_SET_BAY_STATE:
+                return handler(dict(request))  # MCU write may block: never under the lock
             with self._lock:
                 return handler(dict(request))
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OSError) as exc:
             return P.error(f"{op}: {type(exc).__name__}: {exc}")
 
     def _ping(self, _: dict[str, Any]) -> dict[str, Any]:

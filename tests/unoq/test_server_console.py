@@ -89,3 +89,27 @@ def test_set_bay_state_rejects_bad_state(rig: Rig) -> None:
     with pytest.raises(UnoQError):
         client.request({"op": "set_bay_state", "bay_id": 1, "state": "BOGUS"})
     assert client.ping()
+
+
+class _BrokenWrite(SoftwareMcu):
+    def write(self, data: bytes, /) -> int:
+        raise OSError("serial write failed")
+
+
+def test_set_bay_state_write_failure_is_an_error_reply_and_server_keeps_serving() -> None:
+    bridge = McuConsoleBridge(_BrokenWrite())
+    with UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0) as server:
+        server.attach_console(bridge)
+        with UnoQClient("127.0.0.1", server.udp_port, server.tcp_port).connect() as client:
+            with pytest.raises(UnoQError, match="OSError"):
+                client.set_bay_state(1, BayState.STALLED)
+            assert client.ping()
+            client.console_status()
+
+
+def test_set_bay_state_rejects_bad_bay_id(rig: Rig) -> None:
+    mcu, client = rig
+    with pytest.raises(UnoQError):
+        client.set_bay_state(9, BayState.STALLED)
+    assert client.ping()
+    assert not any(line.startswith("CMD:BAY_STATE:9") for line in mcu.received)
