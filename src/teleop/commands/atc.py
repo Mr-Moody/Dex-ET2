@@ -102,6 +102,7 @@ class AtcConfig:
     hotspot: bool = True  # keep the booth hotspot up (Windows; never with --headless)
     background_bays: bool = True
     cycle_dwell_s: float = 1.0
+    jam_every: int = 0  # every Nth pallet arrives with a raised flap (0: only on a jam press)
     audio: bool = True
     script: bool = False
     hud_log_period_s: float = 5.0
@@ -295,6 +296,9 @@ def _parser() -> argparse.ArgumentParser:
         "--realism", type=float, default=None, help="pose error / gate randomization scale, 0-1"
     )
     ap.add_argument("--gate-pass-min", type=int, default=None, help="gate passes needed of 20")
+    ap.add_argument(
+        "--jam-every", type=int, default=None, help="every Nth pallet has a raised flap"
+    )
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
@@ -498,6 +502,7 @@ def _run_booth(
         audio=AudioCues(SystemSpeaker() if speak else NullSpeaker(), enabled=speak),
         hardware=hardware,
         cycle_dwell_s=cfg.cycle_dwell_s,
+        auto_jam_every=0 if (cfg.script or cfg.generate is not None) else cfg.jam_every,
         include_background_bays=cfg.background_bays,
         seed=resolve_seed(cfg),
         realism=cfg.realism,

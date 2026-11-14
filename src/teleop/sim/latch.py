@@ -104,13 +104,17 @@ def _ensure_mesh_assets(spec: Any) -> None:
             spec.add_mesh(name=f"latch_{stem}", file=str(MESH_DIR / f"{stem}.stl"))
 
 
-def add_latch_skin(spec: Any, parent: Any, prefix: str, *, bolt_x: float = 0.0) -> bool:
+def add_latch_skin(
+    spec: Any, parent: Any, prefix: str, *, bolt_x: float = 0.0, flap_deg: float = 0.0
+) -> bool:
     """Add a static, visual-only copy of the printed rig's meshes to ``parent``.
 
     ``parent``'s frame is the latch frame. There are no joints and no physics boxes: this is for
     latches that are only looked at (packs riding the conveyor), so they wear the same skin as
     the bay latch the hand works on. ``bolt_x`` is the bolt's slide along +X (0 is latched).
-    Returns False, adding nothing, when the mesh files are missing.
+    The flap rides in its own body ``{prefix}flap_skin`` (hinge frame, rest ``flap_deg``) so a
+    renderer can raise it to show a jammed latch. Returns False, adding nothing, when the mesh
+    files are missing.
     """
     if not _mesh_files_present():
         return False
@@ -120,12 +124,19 @@ def add_latch_skin(spec: Any, parent: Any, prefix: str, *, bolt_x: float = 0.0) 
         "slide_bolt": (float(bolt_x), 0.0, 0.0),
         "stopper_flap": FLAP_HINGE_POS,
     }
+    half = 0.5 * math.radians(flap_deg)
+    flap_body = parent.add_body(
+        name=f"{prefix}flap_skin",
+        pos=list(FLAP_HINGE_POS),
+        quat=[math.cos(half), 0.0, math.sin(half), 0.0],
+    )
     for stem, body_key, rgba in VISUAL_MESHES:
-        geom = parent.add_geom(
+        is_flap = body_key == "stopper_flap"
+        geom = (flap_body if is_flap else parent).add_geom(
             name=f"{prefix}{stem}_visual",
             type=mj.mjtGeom.mjGEOM_MESH,
             meshname=f"latch_{stem}",
-            pos=list(offsets[body_key]),
+            pos=[0.0, 0.0, 0.0] if is_flap else list(offsets[body_key]),
             rgba=list(rgba),
         )
         geom.contype = 0
