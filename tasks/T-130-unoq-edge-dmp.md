@@ -1,12 +1,12 @@
 ---
 id: T-130
 title: UNO Q QRB2210 Python edge service + local mock (1-Euro, Mahalanobis, 30-RBF DMP)
-status: in_review
-owner: lead-laptop
-branch: feat/unoq-edge-dmp
+status: done
+owner: null
+branch: null
 depends_on: [T-100]
 plan: docs/superpowers/plans/2026-11-14-atc-implementation-plan.md#task-t-130-uno-q-qrb2210-python-edge-service--local-mock-1-filter-mahalanobis-gate-30-rbf-dmp
-claimed_at: '2026-11-14T01:41:30+00:00'
+claimed_at: null
 ---
 
 **P0 Edge Compute track. Pure NumPy + stdlib only (no `mujoco` or `torch` imports inside `src/teleop/unoq/`). Edit only `src/teleop/unoq/` (excluding `mcu_bridge.py`), `src/teleop/commands/unoq.py`, and `tests/unoq/test_edge_dmp.py`.**
