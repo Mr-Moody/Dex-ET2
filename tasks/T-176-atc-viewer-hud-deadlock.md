@@ -1,7 +1,7 @@
 ---
 id: T-176
 title: Fix teleop atc viewer freeze (set_texts called under viewer.lock)
-status: claimed
+status: in_review
 owner: ethan
 branch: fix/atc-viewer-hud-deadlock
 depends_on: [T-150]
