@@ -15,7 +15,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -28,13 +29,16 @@ from teleop.atc.act_recovery import ActRecoveryFactory, CameraRenderer
 from teleop.atc.types import SkillPrimitive, StallSignature
 from teleop.policy.act_runtime import (
     InferenceWorker,
+    ObsBatch,
     PolicyBackend,
     load_act_policy,
     pretrained_dir,
     read_policy_config,
 )
 from teleop.policy.manifest import FaultResult, GateManifest, ManifestError, Proto
-from teleop.policy.schema import SCHEMA_VERSION, STATE_NAMES, EpisodeMeta
+from teleop.policy.schema import CAMERAS, SCHEMA_VERSION, STATE_NAMES, EpisodeMeta
+from teleop.types import Pose
+from teleop.unoq.dmp import HAND_ACTUATORS, compose_pose, relative_pose
 
 mj: Any = _mujoco
 
@@ -46,9 +50,10 @@ GATE_FILE = "gate.json"
 # The checkpoint loader, a module-level name so tests can monkeypatch it.
 _load_policy = load_act_policy
 
-_HAND = slice(STATE_NAMES.index("hand/index"), STATE_NAMES.index("wrist/x"))
-_WRIST = slice(STATE_NAMES.index("wrist/x"), STATE_NAMES.index("wrist/qw") + 1)
-_TAU_HAND = slice(STATE_NAMES.index("tau_hand/index"), STATE_NAMES.index("tau_wrist/joint5"))
+# State columns by name, in HAND_ACTUATORS order (pinky first), so they follow the schema.
+_HAND = [STATE_NAMES.index(f"hand/{a}") for a in HAND_ACTUATORS]
+_WRIST = [STATE_NAMES.index(f"wrist/{f}") for f in ("x", "y", "z", "qx", "qy", "qz", "qw")]
+_TAU_HAND = [STATE_NAMES.index(f"tau_hand/{a}") for a in HAND_ACTUATORS]
 
 
 @dataclass(frozen=True)
@@ -145,25 +150,93 @@ def mirror_bay_state(src_model: Any, src_data: Any, dst_model: Any, dst_data: An
     mj.mj_forward(dst_model, dst_data)
 
 
+def _body_pose(data: Any, body: int) -> Pose:
+    w, x, y, z = (float(v) for v in data.xquat[body])
+    px, py, pz = (float(v) for v in data.xpos[body])
+    return Pose(orientation=(x, y, z, w), position=(px, py, pz))
+
+
 class MirrorRenderer:
-    """Renders the policy cameras of the validator's bay 1 from the live fleet scene."""
+    """Renders the policy cameras of the validator's bay 1 from the live fleet scene.
+
+    The fleet scene's rescue cameras (the policy's ``top`` view) are world-fixed over the
+    latch's build pose, while a gate rollout moves the latch by up to 8 cm and 30 deg. They
+    are moved with the mirrored latch, keeping their pose relative to it, so the ``top`` view
+    frames the latch the way it does in every fleet bay the policy was trained in.
+    """
 
     def __init__(self, src_model: Any, image_hw: tuple[int, int]) -> None:
-
         from teleop.policy.cameras import BayCameraRenderer
-        from teleop.sim.bays import build_four_bay_scene
+        from teleop.retarget.clutch import rescue_camera_names
+        from teleop.sim.bays import bay_prefix, build_four_bay_scene
 
         self.src_model = src_model
         self.model: Any = build_four_bay_scene()
         self.data: Any = mj.MjData(self.model)
         self._inner = BayCameraRenderer(self.model, image_hw)
+        mj.mj_forward(self.model, self.data)
+        p = bay_prefix(1)
+        self._latch = int(self.model.body(f"{p}latch_base").id)
+        latch0 = _body_pose(self.data, self._latch)
+        self._cams: dict[int, Pose] = {}
+        for name in rescue_camera_names(p):
+            cid = int(self.model.camera(name).id)
+            w, x, y, z = (float(v) for v in self.model.cam_quat[cid])
+            px, py, pz = (float(v) for v in self.model.cam_pos[cid])
+            cam = Pose(orientation=(x, y, z, w), position=(px, py, pz))
+            self._cams[cid] = relative_pose(latch0, cam)  # world-fixed: cam_pos is world
 
     def render(self, data: Any, bay_id: int) -> dict[str, NDArray[np.uint8]]:
         mirror_bay_state(self.src_model, data, self.model, self.data)
+        latch = _body_pose(self.data, self._latch)
+        for cid, rel in self._cams.items():
+            pose = compose_pose(latch, rel)
+            assert pose.position is not None
+            x, y, z, w = pose.orientation
+            self.model.cam_pos[cid] = pose.position
+            self.model.cam_quat[cid] = (w, x, y, z)
+        mj.mj_camlight(self.model, self.data)
         return self._inner.render(self.data, bay_id)
 
     def close(self) -> None:
         self._inner.close()
+
+
+class SyncWorker(InferenceWorker):
+    """The live worker's interface, but ``submit`` runs the policy before it returns.
+
+    The live worker answers from its own thread, so a rollout's hold ticks would depend on
+    thread timing and device speed. Here each observation gets its chunk before the next physics
+    step: rollouts are reproducible, and ``p95_ms`` is the policy's own forward-pass time.
+    """
+
+    def __init__(self, policy: PolicyBackend) -> None:
+        super().__init__(policy, autostart=False)
+
+    def submit(
+        self, bay_id: int, state: NDArray[Any], images: Mapping[str, NDArray[Any]], tick: int
+    ) -> None:
+        if not self.healthy():
+            return
+        batch = ObsBatch(
+            np.asarray(state, dtype=np.float32).reshape(1, len(STATE_NAMES)),
+            {c: np.asarray(images[c], dtype=np.uint8)[None] for c in CAMERAS},
+        )
+        t0 = time.perf_counter_ns()
+        try:
+            chunk = np.asarray(self.policy.predict_chunk(batch), dtype=np.float32)
+        except Exception as exc:  # noqa: BLE001 - reported as an unhealthy worker, like live
+            self._fail(f"inference error: {exc}")
+            return
+        ms = (time.perf_counter_ns() - t0) * 1e-6
+        if chunk.ndim != 3 or chunk.shape[0] != 1:
+            self._fail(f"inference error: chunk shape {chunk.shape}, batch of 1")
+            return
+        with self._cv:
+            self.calls += 1
+            self.batch_sizes.append(1)
+            self._latency_ms.append(ms)
+            self._results[bay_id] = (int(tick), chunk[0])
 
 
 def _make_renderer(model: Any, image_hw: tuple[int, int]) -> CameraRenderer:
@@ -222,7 +295,7 @@ def evaluate(
         seed=seed,
         realism=realism,
     )
-    worker = InferenceWorker(policy)
+    worker = SyncWorker(policy)
     renderer = _make_renderer(validator.model, image_hw)
     stub = GateManifest(SCHEMA_VERSION, "", (bar, rollouts), {}, {}, None)
     factory = ActRecoveryFactory(stub, worker, renderer, validator.data)
@@ -367,6 +440,7 @@ def main(argv: list[str]) -> int:
 __all__ = [
     "EvalEpisode",
     "MirrorRenderer",
+    "SyncWorker",
     "checkpoint_sha256",
     "evaluate",
     "fit_dmp_for",
