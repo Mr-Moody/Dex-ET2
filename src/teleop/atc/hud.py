@@ -11,10 +11,23 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from teleop.atc.types import BaySnapshot, BayState
 from teleop.health.model import Health
+
+ConveyorMode = Literal["feeding", "paused", "estop"]
+
+
+@dataclass(frozen=True, slots=True)
+class ConveyorStatus:
+    """Live state of one bay's segmented conveyor belt."""
+
+    bay_id: int
+    mode: ConveyorMode = "paused"
+    belt_dist_m: float = 0.0
+    pack_dy_m: float = 0.0
+
 
 STATE_LABELS: dict[BayState, str] = {
     BayState.NOMINAL: "NOMINAL",
@@ -74,12 +87,13 @@ class HudView:
     rescue: RescueStatus = field(default_factory=RescueStatus)
     gate: GateStatus = field(default_factory=GateStatus)
     compliance: str = "SOLANA  no events yet"
-    reasoning: str = "NEMOTRON  idle"
+    reasoning: str = "TRIAGE  idle"
     beat: str = ""
     unoq: str = ""
     actions: tuple[ActionNote, ...] = ()  # recent key outcomes, oldest first
     # (bay, kind, phase): kind "flap" | "pin"; phase "armed" (next cycle) | "active" (this cycle)
     faults: tuple[tuple[int, str, str], ...] = ()
+    conveyors: tuple[ConveyorStatus, ...] = ()
 
 
 # --------------------------------------------------------------------------- pieces
@@ -214,6 +228,8 @@ def hud_overlays(
 
 __all__ = [
     "ActionNote",
+    "ConveyorMode",
+    "ConveyorStatus",
     "GateStatus",
     "HudView",
     "RescueStatus",

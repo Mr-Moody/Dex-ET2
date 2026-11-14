@@ -414,14 +414,14 @@ class ReasonerTap:
 
     def status_line(self) -> str:
         if self.last_bay is None:
-            return "NEMOTRON  idle"
+            return "TRIAGE  idle"
         try:
             verdict = self.inner.latest_verdict(self.last_bay)
         except Exception:
             verdict = None
         if verdict is None:
-            return f"NEMOTRON bay {self.last_bay}: triaging..."
-        return f"NEMOTRON bay {self.last_bay}: {verdict.headline}"
+            return f"TRIAGE bay {self.last_bay}: triaging..."
+        return f"TRIAGE bay {self.last_bay}: {verdict.headline}"
 
     def close(self) -> None:
         self.inner.close()
@@ -825,6 +825,7 @@ class StageController:
             unoq=self.unoq_label,
             actions=tuple(self.actions),
             faults=self._faults_view(),
+            conveyors=co.conveyors(),
         )
 
     def _faults_view(self) -> tuple[tuple[int, str, str], ...]:

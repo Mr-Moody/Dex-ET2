@@ -22,6 +22,7 @@ def _read(name: str) -> str:
 def test_index_references_only_local_assets() -> None:
     html = _read("index.html")
     assert 'href="console.css"' in html and 'src="console.js"' in html
+    assert 'id="view-overview"' in html and "4 segmented conveyors" in html
     for name in ("index.html", "console.css", "console.js"):
         assert not re.search(r"https?://", _read(name)), f"{name} references the network"
 

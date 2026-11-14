@@ -87,10 +87,9 @@ To keep the real-time $60\text{ Hz}$ control loop completely non-blocking and al
    - **Interface:** `ComplianceSink` (`src/teleop/compliance/`) receiving structured, SHA-256-digested `ComplianceEvent` records asynchronously for `STALL_ALERT`, `RESCUE_LOGGED`, `VALIDATION_GATE`, and `OOD_REFUSAL`.
    - **Status:** `T-100` provides `SolanaCompliancePlaceholder` (no-op / local JSONL log); a teammate owns `T-160` to wire on-chain Solana compliance and alert anchoring.
 
-2. **Verda Nemotron Reasoning Co-Pilot (`T-161` — Placeholder in `T-100`):**
-   - **Interface:** `FleetReasoner` (`src/teleop/reasoning/`) invoked asynchronously off the real-time loop on stall events, validation gates, and OOD refusals to synthesize root-cause triage, operator rescue hints, and human-readable compliance rationales.
-   - **Hosting:** Served via **Verda** (`VERDA_BASE_URL`, `VERDA_API_KEY`, `NEMOTRON_MODEL` in `.env`).
-   - **Status:** `T-100` provides `VerdaNemotronPlaceholder` (deterministic offline status text); a teammate owns `T-161` to connect the Verda Nemotron endpoint.
+2. **Fleet Reasoner:**
+   - **Interface:** `FleetReasoner` (`src/teleop/reasoning/`) invoked asynchronously off the real-time loop on stall events, validation gates, and OOD refusals to produce triage headlines, operator rescue hints, and compliance rationales.
+   - **Status:** `TriageReasoner` gives deterministic offline text. The LLM layer is the Gemini operator copilot (`T-210`+, `docs/copilot.md`).
 
 ---
 

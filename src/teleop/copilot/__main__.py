@@ -24,6 +24,7 @@ from typing import Any, TextIO
 
 from teleop.copilot.config import CopilotConfig
 from teleop.copilot.gemini import (
+    THINKING_LEVELS,
     GeminiClient,
     GeminiError,
     ImagePart,
@@ -230,7 +231,7 @@ def run_probe(
             callout_parts,
             CALLOUT_SCHEMA,
             CALLOUT_TIMEOUT_S,
-            "low",
+            cfg.fast_thinking,
             CALLOUT_TARGET_MS,
         )
     ]
@@ -244,7 +245,7 @@ def run_probe(
                 callout_parts,
                 CALLOUT_SCHEMA,
                 CALLOUT_TIMEOUT_S,
-                "low",
+                cfg.fast_thinking,
                 CALLOUT_TARGET_MS,
             )
         )
@@ -256,7 +257,7 @@ def run_probe(
         review_parts,
         REVIEW_SCHEMA,
         REVIEW_TIMEOUT_S,
-        "high",
+        cfg.review_thinking,
     )
     results.append(review)
     tts = _tts_call(client, clock, cfg.tts_model, cfg.voice)
@@ -303,7 +304,7 @@ def _recommend(cfg: CopilotConfig, results: Sequence[ProbeResult]) -> list[str]:
     elif fast is not None:
         lines.append(
             f"COPILOT_REVIEW_MODEL={fast.model}  # {cfg.review_model} failed; "
-            "use the fast model with thinking high"
+            "use the fast model as the reviewer"
         )
     else:
         lines.append(f"# COPILOT_REVIEW_MODEL: {cfg.review_model} failed")
@@ -324,6 +325,12 @@ def _parser() -> argparse.ArgumentParser:
     probe.add_argument("--review-model", help="override COPILOT_REVIEW_MODEL")
     probe.add_argument("--tts-model", help="override COPILOT_TTS_MODEL")
     probe.add_argument("--voice", help="override COPILOT_VOICE")
+    for role in ("fast", "review"):
+        probe.add_argument(
+            f"--{role}-thinking",
+            choices=THINKING_LEVELS,
+            help=f"override COPILOT_{role.upper()}_THINKING",
+        )
     probe.add_argument("--env-file", help="read this .env instead of discovering one")
     return parser
 
@@ -348,6 +355,8 @@ def main(
             "review_model": args.review_model,
             "tts_model": args.tts_model,
             "voice": args.voice,
+            "fast_thinking": args.fast_thinking,
+            "review_thinking": args.review_thinking,
         }.items()
         if v
     }

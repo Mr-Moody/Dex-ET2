@@ -23,8 +23,7 @@ cycles it live. ``--record-episodes DIR`` saves every recovery as a LeRobot epis
 when used, so the default run needs no torch.
 
 Hooks come from the environment (``.env``): ``SOLANA_RPC_URL``/``SOLANA_KEYPAIR_PATH`` for the
-compliance chain and ``VERDA_API_KEY``/``VERDA_BASE_URL``/``NEMOTRON_MODEL`` for the reasoner.
-Both fall back to local/offline modes.
+compliance chain, falling back to a local audit log. The fleet reasoner is the offline triage.
 """
 
 from __future__ import annotations
@@ -427,14 +426,14 @@ def _run_booth(
 ) -> int:
     """Build the stage, the operator and (unless headless) the health checks, then run."""
     from teleop.compliance.solana import SolanaComplianceSink
-    from teleop.reasoning.nemotron import VerdaNemotronReasoner
+    from teleop.reasoning.triage import TriageReasoner
 
     unoq = SwitchableUnoQ(
         UnoQClient.connect_or_mock(cfg.unoq_host, cfg.unoq_udp_port, cfg.unoq_tcp_port)
     )
     stack.callback(unoq.close)
     sink = SolanaComplianceSink.from_env()
-    reasoner = VerdaNemotronReasoner.from_env()
+    reasoner = TriageReasoner()
     speak = cfg.audio and not cfg.headless
     hardware = _hardware_consoles(cfg, unoq)
     suffix = f" | compliance {sink.mode} | reasoner {reasoner.mode}"
@@ -677,6 +676,11 @@ def _run_viewer(
 
         launch = mujoco.viewer.launch_passive  # pyright: ignore
     co = controller.coordinator
+    bg_player = None
+    if getattr(controller, "background_bays", ()):
+        from teleop.console.background import BackgroundPlayer, load_cycle
+
+        bg_player = BackgroundPlayer(load_cycle(), co.model)
     with launch(co.model, co.data, key_callback=controller.on_key) as viewer:
         next_overlay_s = 0.0
         last_overlay: Any = None
@@ -688,6 +692,12 @@ def _run_viewer(
             sample = operator()
             with viewer.lock():
                 controller.tick(sample)
+                if bg_player is not None:
+                    import mujoco as _mj  # pyright: ignore[reportMissingTypeStubs]
+
+                    mj_any: Any = _mj
+                    bg_player.apply(co.data, co.time_s)
+                    mj_any.mj_kinematics(co.model, co.data)
                 overlay = None
                 if co.time_s >= next_overlay_s:
                     next_overlay_s = co.time_s + 1.0 / HUD_OVERLAY_HZ

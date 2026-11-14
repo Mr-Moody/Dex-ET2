@@ -39,11 +39,11 @@ Read these documents first before starting any new work:
 - Implementation Plan & File-Ownership Rules: `docs/superpowers/plans/2026-11-14-atc-implementation-plan.md`
 - ADR: `docs/adr/0002-atc-fleet-rescue-pivot.md`
 
-Key rules for parallel agents on the `T-100`–`T-161` track:
+Key rules for parallel agents on the `T-100`–`T-160` track:
 
 1. Claim tasks from the **`T-100+`** series (`uv run task list --ready`). Legacy M2/M3 booth tasks (`T-013`, `T-060`, `T-070`, `T-080`, `T-081`) are superseded by ADR 0002.
-2. **Only `T-100`** edits shared entrypoints (`src/teleop/cli.py`, `scripts/fetch_models.py`, `configs/hands/leap.yaml`, `.env.example`, `.pre-commit-config.yaml`). Tasks `T-110`–`T-161` must only create/edit their own owned modules listed in `2026-11-14-atc-implementation-plan.md`.
-3. `T-160` (**Solana compliance & alert chain**, `src/teleop/compliance/solana.py`) and `T-161` (**Verda Nemotron reasoning**, `src/teleop/reasoning/nemotron.py`) are reserved for their respective teammates; `T-100` creates non-blocking placeholder implementations for both.
+2. **Only `T-100`** edits shared entrypoints (`src/teleop/cli.py`, `scripts/fetch_models.py`, `configs/hands/leap.yaml`, `.env.example`, `.pre-commit-config.yaml`). Tasks `T-110`–`T-160` must only create/edit their own owned modules listed in `2026-11-14-atc-implementation-plan.md`.
+3. `T-160` (**Solana compliance & alert chain**, `src/teleop/compliance/solana.py`) is reserved for its teammate; `T-100` creates a non-blocking placeholder.
 4. Never commit as co-author (`Co-Authored-By` trailers or "Generated with" lines are forbidden for all agents).
 
 ## Active Track: ACT Recovery Policy (`T-190`–`T-198`)
