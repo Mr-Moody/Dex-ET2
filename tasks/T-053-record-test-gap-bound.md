@@ -1,7 +1,7 @@
 ---
 id: T-053
 title: Fix flaky max_gap_s bound in the record integration test
-status: claimed
+status: in_review
 owner: lead-laptop
 branch: fix/record-test-gap-bound
 depends_on: [T-051]
