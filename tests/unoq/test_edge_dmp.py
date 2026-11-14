@@ -330,6 +330,22 @@ def test_unoq_command_probes_and_falls_back(capsys: pytest.CaptureFixture[str]) 
     assert "unoq-loopback answered via local loopback" in capsys.readouterr().out
 
 
+def test_unoq_serve_survives_console_attach_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import teleop.commands.unoq as cmd
+
+    def router_not_ready(*_: object) -> Any:
+        raise ConnectionRefusedError("arduino-router not ready")
+
+    monkeypatch.setattr(cmd, "open_console", router_not_ready)
+    server = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0)
+    with caplog.at_level(logging.WARNING, logger="teleop.commands.unoq"):
+        attach: Any = cmd._attach_console  # pyright: ignore[reportPrivateUsage]
+        assert attach(server) is None
+    assert "arduino-router not ready" in caplog.text
+
+
 def test_skill_ids_are_content_addressed() -> None:
     demo = synthetic_rescue()
     a = fit_rbf_dmp(demo["t"], demo["wrist"], demo["fingers"], demo["tau"])

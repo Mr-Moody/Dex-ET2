@@ -186,6 +186,29 @@ def test_publish_from_many_threads(server: ConsoleServer) -> None:
     assert seen == {0, 1, 2, 3}
 
 
+def test_reconnect_message_validation(web_dir: Path, keys: list[int]) -> None:
+    got: list[str] = []
+    srv = ConsoleServer(web_dir=web_dir, port=0, on_key=keys.append, on_reconnect=got.append)
+    srv._on_message(json.dumps({"type": "reconnect", "target": "gloves"}))
+    assert got == ["gloves"]
+    for bad in (
+        {"type": "reconnect", "target": "toaster"},
+        {"type": "reconnect", "target": 5},
+        {"type": "reconnect", "target": ["gloves"]},
+        {"type": "reconnect"},
+    ):
+        srv._on_message(json.dumps(bad))
+    assert got == ["gloves"]
+    srv._on_message(json.dumps({"type": "key", "code": 49}))
+    assert keys == [49]
+    for target in ("hotspot", "panel"):
+        srv._on_message(json.dumps({"type": "reconnect", "target": target}))
+    assert got == ["gloves", "hotspot", "panel"]
+
+    plain = ConsoleServer(web_dir=web_dir, port=0)
+    plain._on_message(json.dumps({"type": "reconnect", "target": "gloves"}))  # no callback: no-op
+
+
 def test_client_view_and_dummy_messages_reach_callback(web_dir: Path) -> None:
     got: list[dict[str, object]] = []
     srv = ConsoleServer(web_dir=web_dir, port=0, on_client_message=got.append)

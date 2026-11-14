@@ -30,6 +30,7 @@ from teleop.atc.stage import (
 from teleop.atc.types import BaySnapshot, BayState, ConsoleInputState, StallMatch
 from teleop.atc.validator import RolloutConditions, RolloutResult, ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, make_event
+from teleop.health.model import Health, Level
 from teleop.reasoning.protocol import ReasoningContext, ReasoningVerdict
 from teleop.sim.bays import PANDA_XML
 from teleop.sim.hands import load_hand
@@ -164,6 +165,16 @@ def test_hud_formats_bay_states_confidence_and_fifo_queue() -> None:
     assert all(isinstance(font, int) and isinstance(pos, int) for font, pos, _, _ in overlays)
     assert len({pos for _, pos, _, _ in overlays}) == len(overlays)  # one panel per corner
     assert any(left and "BAY 1" in left for _, _, left, _ in overlays)
+
+    health = [
+        Health("hotspot", Level.OK, "up"),
+        Health("gloves", Level.FAIL, "no data"),
+        Health("panel", Level.WARN, "slow"),
+    ]
+    line = "HOTSPOT ok | GLOVES fail | PANEL warn"
+    assert line in hud_lines(view, health)
+    assert line not in hud_lines(view)
+    assert any("GLOVES fail" in (left or "") for _, _, left, _ in hud_overlays(view, health))
 
     empty = HudView(bays=(), queue=())
     assert "QUEUE" in "\n".join(hud_lines(empty))  # renders before the first tick

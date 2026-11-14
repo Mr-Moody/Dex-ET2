@@ -108,7 +108,7 @@ def make_source(cfg: SimConfig) -> InputSource:
 
 
 def start_hotspot_watchdog(
-    env_file: Path = Path(".env"), interval_s: float = 5.0
+    env_file: Path = Path(".env"), interval_s: float = 5.0, *, inline_bring_up: bool = True
 ) -> HotspotWatchdog:
     """Bring the booth hotspot up and keep it up (Windows only). Fails fast on a bad password."""
     from teleop.net.hotspot import DEFAULT_SSID, Hotspot, load_password
@@ -118,8 +118,9 @@ def start_hotspot_watchdog(
 
     backend: Any = WinRTTetheringBackend()
     hotspot = Hotspot(backend, DEFAULT_SSID, password=load_password(env_file))
-    for event in hotspot.ensure_up():
-        logger.info("hotspot: %s", event)
+    if inline_bring_up:
+        for event in hotspot.ensure_up():
+            logger.info("hotspot: %s", event)
     wd = HotspotWatchdog(hotspot, interval_s, on_event=lambda e: logger.warning("hotspot: %s", e))
     wd.start()
     return wd

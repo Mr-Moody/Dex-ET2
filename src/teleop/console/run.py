@@ -18,6 +18,7 @@ from teleop.atc.coordinator import OperatorInput
 from teleop.atc.stage import StageController
 from teleop.atc.types import N_BAYS
 from teleop.console.background import load_cycle
+from teleop.console.health_publish import HealthPublisher
 from teleop.console.layout import (
     PAN_LIMIT,
     ROT_LIMIT,
@@ -31,6 +32,7 @@ from teleop.console.render import RenderWorker
 from teleop.console.server import ConsoleServer
 from teleop.console.snapshot import LatestSlot, SimSnapshot
 from teleop.console.telemetry import TelemetryAdapter
+from teleop.health.monitor import HealthMonitor
 from teleop.sim.cells import cctv_camera_name
 from teleop.sim.loop import FixedRateLoop, LoopStats
 
@@ -127,6 +129,7 @@ def run_console(
     fps: int,
     open_browser: bool,
     steps: int | None = None,
+    health: HealthMonitor | None = None,
     dummy: Any = None,
 ) -> LoopStats:
     co = controller.coordinator
@@ -155,7 +158,16 @@ def run_console(
         elif mtype == "dummy" and dummy is not None:
             dummy.apply_ui_message(msg)
 
-    server = ConsoleServer(port=port, on_key=controller.on_key, on_client_message=on_client_message)
+    def reconnect(name: str) -> None:
+        if health is not None:
+            health.request_reconnect(name)  # non-blocking; the bool is not needed here
+
+    server = ConsoleServer(
+        port=port,
+        on_key=controller.on_key,
+        on_reconnect=reconnect if health is not None else None,
+        on_client_message=on_client_message,
+    )
     try:
         server.start()
     except OSError as exc:
@@ -165,10 +177,11 @@ def run_console(
     snapshots.put(SimSnapshot.capture(co.data, controller.hud_view(), co.time_s))
     background = load_cycle() if controller.background_bays else None
     adapter = TelemetryAdapter(bays, controller.background_bays)
+    sink = HealthPublisher(server, health) if health is not None else server
     worker = RenderWorker(
         co.model,
         snapshots,
-        server,
+        sink,
         adapter,
         bays,
         background,

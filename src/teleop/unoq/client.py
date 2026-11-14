@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
-from teleop.atc.types import ConsoleInputState, SkillPrimitive, StallMatch, StallSignature
+from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive, StallMatch, StallSignature
 from teleop.types import Pose
 from teleop.unoq import protocol as P
 from teleop.unoq.dmp import pose_to_vec7
@@ -34,6 +34,10 @@ UDP_TIMEOUT_S = 0.05
 
 class UnoQError(RuntimeError):
     """The node answered ``{"ok": false}`` or the connection failed."""
+
+
+class UnoQTransportError(UnoQError):
+    """The connection failed (not connected, socket error, closed): the node may be gone."""
 
 
 def _tolist(a: ArrayLike) -> list[Any]:
@@ -134,7 +138,7 @@ class UnoQClient:
     def request(self, message: Mapping[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         """One TCP request/response round trip. Raises ``UnoQError`` on ``ok: false``."""
         if self._tcp is None or self._reader is None:
-            raise UnoQError("not connected")
+            raise UnoQTransportError("not connected")
         with self._lock:
             try:
                 if timeout_s is not None:
@@ -142,13 +146,16 @@ class UnoQClient:
                 self._tcp.sendall(P.encode(dict(message)))
                 line = self._reader.readline()
             except OSError as exc:
-                raise UnoQError(f"{message.get('op')}: {exc}") from exc
+                raise UnoQTransportError(f"{message.get('op')}: {exc}") from exc
             finally:
                 if timeout_s is not None:
                     self._tcp.settimeout(self.timeout_s)
         if not line:
-            raise UnoQError(f"{message.get('op')}: connection closed")
-        reply = P.decode(line)
+            raise UnoQTransportError(f"{message.get('op')}: connection closed")
+        try:
+            reply = P.decode(line)
+        except ValueError as exc:  # ProtocolError or bad UTF-8: a truncated or garbled reply
+            raise UnoQTransportError(f"{message.get('op')}: bad reply ({exc})") from exc
         if not reply.get("ok"):
             raise UnoQError(str(reply.get("error", "request failed")))
         return reply
@@ -167,7 +174,7 @@ class UnoQClient:
         """Smooth one glove sample over UDP. On a lost or late datagram, returns the input."""
         raw_joints = {str(k): float(v) for k, v in (joints or {}).items()}
         if self._udp is None:
-            raise UnoQError("not connected")
+            raise UnoQTransportError("not connected")
         rid = next(self._udp_ids)
         msg: dict[str, Any] = {
             "op": P.OP_FILTER_STEP,
@@ -241,4 +248,14 @@ class UnoQClient:
         return int(reply["signature_samples"])
 
     def console_state(self) -> ConsoleInputState:
-        return console_from_dict(self.request({"op": P.OP_CONSOLE_STATE})["console"])
+        return self.console_status()[0]
+
+    def console_status(self) -> tuple[ConsoleInputState, int | None]:
+        """Console state plus the MCU heartbeat age in ms (None: no MCU attached or heard)."""
+        reply = self.request({"op": P.OP_CONSOLE_STATE})
+        age = reply.get("mcu_heartbeat_age_ms")
+        return console_from_dict(reply["console"]), None if age is None else int(age)
+
+    def set_bay_state(self, bay_id: int, state: BayState) -> None:
+        """Set one bay's LED state on the board's MCU console (no-op without a console)."""
+        self.request({"op": P.OP_SET_BAY_STATE, "bay_id": bay_id, "state": state.name})
