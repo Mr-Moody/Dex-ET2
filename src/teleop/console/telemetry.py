@@ -179,11 +179,20 @@ class TelemetryAdapter:
         sim_t: float,
         feeds: Sequence[FeedSpec],
         background_confidence: Mapping[int, float],
+        *,
+        view_state: Any = None,
+        dummy_status: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One telemetry message. Call at the telemetry rate: each call adds a history sample."""
         wall = self._clock().strftime("%H:%M:%S")
         feeds_t = tuple(feeds)
-        if self._feeds is not None and feeds_t != self._feeds:
+        topo = tuple((f.slot, f.camera, f.bay, f.role) for f in feeds_t)
+        prev_topo = (
+            None
+            if self._feeds is None
+            else tuple((f.slot, f.camera, f.bay, f.role) for f in self._feeds)
+        )
+        if prev_topo is not None and topo != prev_topo:
             self.layout_id += 1
         self._feeds = feeds_t
 
@@ -212,6 +221,13 @@ class TelemetryAdapter:
             if r.bay_id is None
             else {"bay": r.bay_id, "clutch": r.clutch_engaged, "elapsed_s": r.elapsed_s}
         )
+        mains = [f for f in feeds_t if f.role == "main"]
+        if not mains:
+            mode = "grid"
+        elif r.bay_id is not None and any(f.bay == r.bay_id for f in mains):
+            mode = "rescue"
+        else:
+            mode = "pin"
         return _scrub(
             {
                 "type": "telemetry",
@@ -219,7 +235,9 @@ class TelemetryAdapter:
                 "sim_t": round(sim_t, 3),
                 "wall": wall,
                 "threshold": THRESHOLD,
-                "mode": "rescue" if any(f.role == "main" for f in feeds_t) else "grid",
+                "mode": mode,
+                "view": view_state.to_dict() if hasattr(view_state, "to_dict") else None,
+                "dummy": dict(dummy_status) if dummy_status is not None else None,
                 "feeds": [
                     {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role}
                     for f in feeds_t

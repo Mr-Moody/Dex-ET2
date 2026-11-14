@@ -83,11 +83,13 @@ class ConsoleServer:
         host: str = "127.0.0.1",
         port: int = 8765,
         on_key: Callable[[int], None] | None = None,
+        on_client_message: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.web_dir = web_dir.resolve()
         self.host = host
         self._requested_port = port
         self.on_key = on_key
+        self.on_client_message = on_client_message
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._server: Server | None = None
@@ -222,16 +224,24 @@ class ConsoleServer:
         if not isinstance(raw, dict):
             return
         msg = cast("dict[str, Any]", raw)
-        code = msg.get("code")
-        if msg.get("type") != "key" or not isinstance(code, int) or isinstance(code, bool):
+        mtype = msg.get("type")
+        if mtype == "key":
+            code = msg.get("code")
+            if not isinstance(code, int) or isinstance(code, bool):
+                return
+            if not KEY_MIN <= code <= KEY_MAX:
+                return
+            if self.on_key is not None:
+                try:
+                    self.on_key(code)
+                except Exception:
+                    logger.exception("console: on_key failed")
             return
-        if not KEY_MIN <= code <= KEY_MAX:
-            return
-        if self.on_key is not None:
+        if mtype in ("view", "fault", "dummy") and self.on_client_message is not None:
             try:
-                self.on_key(code)
+                self.on_client_message(msg)
             except Exception:
-                logger.exception("console: on_key failed")
+                logger.exception("console: on_client_message failed")
 
     # ------------------------------------------------------------------ static files
 
