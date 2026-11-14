@@ -248,7 +248,7 @@ def test_telemetry_bay_carries_pose_estimate_fields() -> None:
         pose_sigma_yaw_deg=1.5,
         touch_correction_mm=4.2,
     )
-    entry = _adapter()._bay_entry(1, {1: snap}, {})
+    entry = _adapter()._bay_entry(1, {1: snap}, {}, {})
     assert entry["pose_sigma_yaw_deg"] == 1.5
     assert entry["pose_sigma_mm"] == 3.0 and entry["touch_correction_mm"] == 4.2
 
