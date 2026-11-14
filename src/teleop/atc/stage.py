@@ -43,6 +43,7 @@ import numpy as np
 
 from teleop.atc.coordinator import ROUTINE, AtcCoordinator, CoordinatorConfig, OperatorInput
 from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
+from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
 from teleop.atc.validator import ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, ComplianceSink
@@ -71,6 +72,7 @@ class StageAction(StrEnum):
     ARM_BAY2_FLAP = "arm_bay2_flap"
     ARM_BAY2_PIN = "arm_bay2_pin"
     RESET = "reset"
+    CYCLE_BACKEND = "cycle_backend"
 
 
 KEY_SPACE = 32
@@ -84,9 +86,10 @@ KEYMAP: dict[int, StageAction] = {
     ord("G"): StageAction.ARM_BAY2_FLAP,
     ord("P"): StageAction.ARM_BAY2_PIN,
     ord("R"): StageAction.RESET,
+    ord("M"): StageAction.CYCLE_BACKEND,
 }
 ACTION_LOG_LEN = 20
-CONTROL_KEYS_HINT = "Use 1-4, SPACE, F, G, P or R"
+CONTROL_KEYS_HINT = "Use 1-4, SPACE, F, G, P, R or M"
 
 
 def key_name(code: int) -> str:
@@ -611,6 +614,9 @@ class StageController:
                 "Bay 2 bolt pinned for its next cycle: expect a refused stall (negative control)",
                 "ok",
             )
+        if action is StageAction.CYCLE_BACKEND:
+            backend = self.coordinator.recovery_backend.value
+            return f"Recovery backend: {backend} (from the next stall)", "ok"
         return "Reset: faults cleared and all bays restarted", "ok"
 
     def apply(self, action: StageAction) -> None:
@@ -626,6 +632,9 @@ class StageController:
             self.arm(2, bolt_pinned=True)
         elif action is StageAction.RESET:
             self.reset()
+        elif action is StageAction.CYCLE_BACKEND:
+            co = self.coordinator
+            co.set_recovery_backend(next_backend(co.recovery_backend))
 
     def arm(self, bay_id: int, flap_jammed: bool = False, bolt_pinned: bool = False) -> None:
         """Apply a rig fault to the bay's next pallet cycle."""
