@@ -85,6 +85,7 @@ from teleop.atc.types import (
 from teleop.atc.validator import (
     ARM_TORQUE_MARGIN,
     CONTROL_DT,
+    GATE_PASS_MIN,
     LIFT_HEIGHT_M,
     SETTLE_MAX_TICKS,
     TAU_HARD_MAX_NM,
@@ -178,6 +179,10 @@ class CoordinatorConfig:
     seed: int = 0
     pose_sigma_xy_m: float = POSE_SIGMA_XY_M
     pose_sigma_yaw_rad: float = POSE_SIGMA_YAW_RAD
+    # Scales the latch-pose estimate error and the gate's randomization: 1 is the full T-179
+    # realism, 0 is an exact placement and a gate on the spec-4.4 perturbations only.
+    realism: float = 1.0
+    gate_pass_min: int = GATE_PASS_MIN  # randomized gate: deploy at >= this many of 20
     # Sim seconds from submission to applying the skill-gate result. The gate runs in a worker
     # (6-9 s wall); applying at a fixed sim time keeps seeded runs tick-for-tick reproducible.
     gate_deadline_s: float = 10.0
@@ -420,7 +425,11 @@ class AtcCoordinator:
         self.hand_spec = hand_spec
         self.config = config or CoordinatorConfig()
         self.validator = validator or SkillValidator(
-            hand_spec, self.config.tau_hard_max, seed=self.config.seed
+            hand_spec,
+            self.config.tau_hard_max,
+            pass_min=self.config.gate_pass_min,
+            seed=self.config.seed,
+            realism=self.config.realism,
         )
         self.routine = routine or ROUTINE
         self.library: dict[str, SkillPrimitive] = {}
@@ -432,7 +441,9 @@ class AtcCoordinator:
         self.last_report: ValidationReport | None = None
         self._queue: list[int] = []
         self._estimator = LatchEstimator(
-            self.config.seed, self.config.pose_sigma_xy_m, self.config.pose_sigma_yaw_rad
+            self.config.seed,
+            self.config.realism * self.config.pose_sigma_xy_m,
+            self.config.realism * self.config.pose_sigma_yaw_rad,
         )
         self._cycles: dict[int, int] = {}
         self._touch_log: deque[TouchEvent] = deque(maxlen=TOUCH_LOG_LEN)

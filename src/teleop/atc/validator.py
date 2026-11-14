@@ -552,9 +552,12 @@ class SkillValidator:
         n_rollouts: int = GATE_ROLLOUTS,
         pass_min: int = GATE_PASS_MIN,
         seed: int = 0,
+        realism: float = 1.0,
     ) -> None:
         if not 0 < pass_min <= n_rollouts:
             raise ValueError(f"pass_min {pass_min} must be in 1..n_rollouts ({n_rollouts})")
+        if not 0.0 <= realism <= 1.0:
+            raise ValueError(f"realism {realism} must be in [0, 1]")
         self.hand_spec = hand_spec
         self.tau_hard_max = tau_hard_max
         self.arm_margin = arm_margin
@@ -563,6 +566,7 @@ class SkillValidator:
         self.n_rollouts = n_rollouts
         self.pass_min = pass_min
         self.seed = seed
+        self.realism = realism
         self.model: Any = build_single_bay_scene(base_latch)
         self.data: Any = mj.MjData(self.model)
         self.rig = BayRig(self.model, self.data, 1)
@@ -603,21 +607,27 @@ class SkillValidator:
         return self._nominal_springref_deg
 
     def draw_conditions(self, skill_id: str) -> tuple[RolloutConditions, ...]:
-        """The gate's randomized conditions, seeded by ``(seed, crc32(skill_id))``."""
+        """The gate's randomized conditions, seeded by ``(seed, crc32(skill_id))``.
+
+        Every jitter, estimate error and physics spread is scaled by ``realism`` (0: the spec-4.4
+        perturbations only, exact estimate, nominal physics). The draw sequence does not depend
+        on ``realism``, so one seed gives the same relative conditions at every level.
+        """
         rng = np.random.default_rng((self.seed, zlib.crc32(skill_id.encode("utf-8"))))
+        r = self.realism
         out: list[RolloutConditions] = []
         for i in range(self.n_rollouts):
             dx, dy, dyaw = self.perturbations_deg[i % len(self.perturbations_deg)]
-            jx, jy = rng.uniform(-GATE_JITTER_XY_M, GATE_JITTER_XY_M, size=2)
-            jyaw = rng.uniform(-GATE_JITTER_YAW_DEG, GATE_JITTER_YAW_DEG)
-            ex = rng.normal(0.0, GATE_EST_SIGMA_X_M)
-            ey = rng.normal(0.0, GATE_EST_SIGMA_Y_M)
-            eyaw = rng.normal(0.0, GATE_EST_SIGMA_YAW_RAD)
-            k = rng.uniform(1.0 - GATE_FLAP_STIFFNESS_SPREAD, 1.0 + GATE_FLAP_STIFFNESS_SPREAD)
-            ref = self._nominal_springref_deg + rng.uniform(
+            jx, jy = r * rng.uniform(-GATE_JITTER_XY_M, GATE_JITTER_XY_M, size=2)
+            jyaw = r * rng.uniform(-GATE_JITTER_YAW_DEG, GATE_JITTER_YAW_DEG)
+            ex = r * rng.normal(0.0, GATE_EST_SIGMA_X_M)
+            ey = r * rng.normal(0.0, GATE_EST_SIGMA_Y_M)
+            eyaw = r * rng.normal(0.0, GATE_EST_SIGMA_YAW_RAD)
+            k = 1.0 + r * rng.uniform(-GATE_FLAP_STIFFNESS_SPREAD, GATE_FLAP_STIFFNESS_SPREAD)
+            ref = self._nominal_springref_deg + r * rng.uniform(
                 -GATE_FLAP_SPRINGREF_SPREAD_DEG, GATE_FLAP_SPRINGREF_SPREAD_DEG
             )
-            mu = rng.uniform(1.0 - GATE_FRICTION_SPREAD, 1.0 + GATE_FRICTION_SPREAD)
+            mu = 1.0 + r * rng.uniform(-GATE_FRICTION_SPREAD, GATE_FRICTION_SPREAD)
             out.append(
                 RolloutConditions(
                     perturbation=(dx + float(jx), dy + float(jy), dyaw + float(jyaw)),

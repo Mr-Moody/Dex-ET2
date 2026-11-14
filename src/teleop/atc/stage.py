@@ -45,7 +45,7 @@ from teleop.atc.coordinator import ROUTINE, AtcCoordinator, CoordinatorConfig, O
 from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
 from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
-from teleop.atc.validator import ValidationReport
+from teleop.atc.validator import GATE_PASS_MIN, ValidationReport
 from teleop.compliance.protocol import ComplianceEvent, ComplianceSink
 from teleop.reasoning.protocol import FleetReasoner, ReasoningContext, ReasoningVerdict
 from teleop.sim.bays import ACTIVE_BAYS, BACKGROUND_BAYS
@@ -494,15 +494,20 @@ class StageController:
         include_background_bays: bool = False,
         unoq_label: str = "",
         seed: int = 0,
+        realism: float = 1.0,
+        gate_pass_min: int = GATE_PASS_MIN,
     ) -> StageController:
-        """``seed`` seeds the pose estimator and the skill gate (``CoordinatorConfig.seed``)."""
+        """``seed`` seeds the pose estimator and the skill gate (``CoordinatorConfig.seed``).
+
+        ``realism`` scales the estimate error and the gate randomization (``CoordinatorConfig``).
+        """
         events, reasoning = EventTap(sink), ReasonerTap(reasoner)
         coordinator = AtcCoordinator.build(
             unoq,
             events,
             reasoning,
             include_background_bays=include_background_bays,
-            config=CoordinatorConfig(seed=seed),
+            config=CoordinatorConfig(seed=seed, realism=realism, gate_pass_min=gate_pass_min),
         )
         return cls(
             coordinator,

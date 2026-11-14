@@ -51,6 +51,7 @@ from teleop.atc.stage import (
     SystemSpeaker,
     UnoQConsolePoller,
 )
+from teleop.atc.validator import GATE_PASS_MIN
 from teleop.commands.sim import add_hotspot_args, maybe_hotspot, setup_logging
 from teleop.config import SimConfig, StudioConfig, WristConfig
 from teleop.net.hotspot import HotspotConfigError
@@ -98,6 +99,8 @@ class AtcConfig:
     record_episodes: Path | None = None  # save recoveries as LeRobot episodes here
     generate: int | None = None  # headless: generate N scripted rescue episodes
     seed: int | None = None  # None: STAGE_SEED with --script, else 0
+    realism: float = 1.0  # latch-pose error and gate randomization scale (0: off)
+    gate_pass_min: int = GATE_PASS_MIN  # randomized skill gate: deploy at >= N of 20
 
 
 _PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes"}
@@ -237,6 +240,10 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-background", dest="background_bays", action="store_false", default=None)
     ap.add_argument("--display", choices=DISPLAYS, default=None, help="console (default) or viewer")
     ap.add_argument("--seed", type=int, default=None, help="run seed (stage script: STAGE_SEED)")
+    ap.add_argument(
+        "--realism", type=float, default=None, help="pose error / gate randomization scale, 0-1"
+    )
+    ap.add_argument("--gate-pass-min", type=int, default=None, help="gate passes needed of 20")
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
@@ -318,6 +325,8 @@ def main(argv: list[str]) -> int:
         cycle_dwell_s=cfg.cycle_dwell_s,
         include_background_bays=cfg.background_bays,
         seed=resolve_seed(cfg),
+        realism=cfg.realism,
+        gate_pass_min=cfg.gate_pass_min,
         unoq_label=f"{label} | compliance {sink.mode} | reasoner {reasoner.mode}",
     )
     logger.info("atc: %s", controller.unoq_label)
