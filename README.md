@@ -7,8 +7,11 @@ hands that unlatch a sprung slide-bolt. When a bay stalls, an operator rescues i
 gloves, an Arduino UNO Q (or a local mock) learns the rescue as a skill, a validation gate checks
 it, and the whole fleet reuses it.
 
-See [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md) for the pitch and
-[the design spec](docs/superpowers/specs/2026-11-14-atc-fleet-rescue-design.md) for details.
+**Why.** Unlatching EV battery modules needs two fingers at once: the thumb holds a sprung
+safety flap down while the index slides a retention bolt. Two-finger grippers can't do it, and
+autonomous dexterous hands stall whenever a part arrives jammed. Following fleet-learning work
+(HG-DAgger, Fleet-DAgger), one technician supervises many robots and only steps in on the
+stalls, and each rescue teaches the whole fleet.
 
 ## How it works
 
@@ -33,6 +36,38 @@ distance ≤ 3.0) and cleared autonomously inside a torque safety tube. Stalls t
 
 Everything runs in one local Python process at 60 Hz. Gemini, Solana and the real UNO Q are
 optional: each falls back to an offline mode when unconfigured.
+
+### Details
+
+- **The latch.** Three MuJoCo box primitives: a base track, a sliding bolt and a sprung stopper
+  flap. In the jammed state a hinge spring pushes the flap up into the bolt path, so clearing it
+  takes real contact physics (thumb holds the flap down against the spring while the bolt
+  slides past).
+- **The robots.** Bays 1-2 run full physics: a 7-DoF Franka Panda with a 16-DoF LEAP hand,
+  driven by damped-least-squares differential IK. Bays 3-4 replay a lightweight background cycle.
+- **Stall detection.** Confidence combines the external joint torque (from `mj_inverse`) and
+  the velocity shortfall:
+  `C(t) = exp(-α·‖τ_ext‖∞/τ_limit − β·max(0, v_cmd − v_act)/v_nom)`.
+  The robot never sees the flap state; it only finds a jam through contact.
+- **Teleop.** Rokoko Smartglove II data is retargeted to the LEAP hand. A relative clutch
+  re-indexes the operator's hand on every press, so they work from a comfortable rest pose. One
+  rescue at a time (FIFO queue), and releasing the dead-man clutch freezes the arm and discards
+  the partial recording.
+- **Edge learning on the UNO Q.** The Linux side filters the glove stream (One-Euro), classifies
+  the stall signature `z = [bolt position at stall, Δτ_ext]` with a Mahalanobis classifier, and
+  fits a 30-kernel RBF DMP by ridge regression. The wrist path is stored in the latch frame and
+  the finger joints are phase-locked to it. The MCU side reads the bay buttons, clutch and
+  e-stop at 1 kHz and drives an 8×13 LED status grid.
+- **Generalization.** Bay 2's latch is rotated about 35° and shifted 12 cm. The skill is warped
+  into that frame through IK and replays without retraining.
+- **Safety.** Autonomous replay stays inside a torque tube around the demonstration
+  (`‖τ_ext − τ_demo‖∞ ≤ τ_margin`) with a hard torque ceiling. A pinned bolt produces an unseen
+  signature and is refused (the negative control).
+- **Gate.** 20 headless rollouts randomize latch pose, sensor error, flap stiffness and friction;
+  18 must pass. With `GEMINI_API_KEY` set, a Gemini grasp check on three rescue keyframes must
+  also approve, and the verdict is spoken.
+- **Audit.** Every step is written to a hash-chained, Ed25519-signed log, optionally anchored on
+  Solana.
 
 ## Setup
 
@@ -122,6 +157,16 @@ Other commands: `teleop unoq --serve`, `teleop sim`, `teleop calibrate|record|re
 - **`panda_nohand.xml missing`**: run `uv run python scripts/fetch_models.py`.
 - **MuJoCo window misbehaves on Wayland**: prefix with `GLFW_PLATFORM=x11`.
 - **`pyright` reports missing `lerobot`**: run `uv sync --all-extras --all-groups`.
+
+## Further reading
+
+- [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md): the full proposal, math and stage script
+- [ATC design spec](docs/superpowers/specs/2026-11-14-atc-fleet-rescue-design.md)
+- [ACT recovery policy spec](docs/superpowers/specs/2026-11-14-act-recovery-policy-design.md)
+- [`docs/copilot.md`](docs/copilot.md): the Gemini voice, grasp gate and audit
+- [`docs/training/verda.md`](docs/training/verda.md): training the ACT policy
+- [`firmware/unoq_app/README.md`](firmware/unoq_app/README.md): the UNO Q board
+- [ADRs](docs/adr/): architecture decisions
 
 ## Contributing
 
