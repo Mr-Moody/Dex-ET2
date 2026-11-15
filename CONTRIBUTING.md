@@ -23,6 +23,12 @@ Plan: `docs/superpowers/plans/2026-11-13-m0-m1-glove-to-sim.md`.
 - Use uv only (`uv add`, `uv run`, `uv sync`), never pip. A task that needs a new dependency
   says so in its PR, because `uv.lock` conflicts are expensive.
 
+## Test suite budget & hygiene (ADR 0003)
+
+- `tests/` is capped at **12 `test_*.py` files** (plus `tests/conftest.py`) and **< 4,000 LOC** total (`docs/adr/0003-lean-behavioral-test-suite.md`). Add behavioral assertions to the owning subsystem file instead of creating per-task `test_*.py` files.
+- Test public behavioral invariants (physics/IK/DMP math, wire protocols, safety state machines, golden/eval gates, cryptographic hash chains). Do not scrape source/HTML/CSS/JS files, parse ASTs to police imports, poke `_private` attributes (`reportPrivateUsage`), bypass `__init__` via `__new__`, or add test-only comment markers/flags to `src/`.
+- Reuse shared fixtures and protocol doubles from `tests/conftest.py`.
+
 ## Verification before any PR
 
 ```

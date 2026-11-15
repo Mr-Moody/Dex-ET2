@@ -79,7 +79,6 @@ const ui = {
   slTimer: null,
 };
 
-// <bay-keys>
 // The arrows move the selection one camera panel, like the console joystick (Bay 1 | Bay 2 over
 // Bay 3 | Bay 4); the digit keys select a bay directly. Codes are GLFW key codes (the same ones
 // the MuJoCo viewer receives).
@@ -91,7 +90,6 @@ const ARROW_KEYS = [
 ];
 const ARROW_CODES = Object.fromEntries(ARROW_KEYS.map((a) => [a.key, a.code]));
 const bayKey = (r) => ({ code: 48 + r, cap: String(r), name: `Key ${r}` });
-// </bay-keys>
 
 // Keyboard bar. Codes are GLFW key codes.
 const KEY_BAR = [
@@ -106,7 +104,7 @@ const KEY_BAR = [
   { caps: ["M"], codes: [77], text: "Switch recovery" },
   { caps: ["R"], codes: [82], text: "Reset cells" },
 ];
-// <recovery>
+
 // Recovery backend of the next stall (the M key cycles dmp -> hybrid -> act -> dmp) and the
 // health of the ACT release behind it. Pure helpers: render() only applies their results.
 const BACKEND_ORDER = ["dmp", "hybrid", "act"];
@@ -140,9 +138,7 @@ function recoveryToast(prevNote, rec) {
   if (/^recovery backend \w+ \(from the next stall\)$/.test(note)) return null;
   return { text: note, level: /unavailable|error|failed/i.test(note) ? "warn" : "info" };
 }
-// </recovery>
 
-// <copilot>
 // Call-outs and review verdicts from the advisory copilot process, relayed by the console
 // server ({"type": "copilot", seq, wall, bay, severity, say, detail, source, verdict}). The
 // panel shows the newest of each kind per bay: its latest call-out and its latest review.
@@ -169,7 +165,6 @@ function copilotRows(history) {
   }
   return rows; // newest first
 }
-// </copilot>
 
 const CAM_BTNS = [
   ["cctv", "CCTV"],
@@ -447,13 +442,11 @@ function attachDragEvents(el, bayId, role) {
   });
 }
 
-// <feed-dblclick>
 const FEED_OVERLAYS = "button, .feed__top, .feed__tools, .feed__bottom > *, .feed__lost, .feed__power, .feed__nosignal";
 
 function onBarePicture(target) {
   return target instanceof Element && !!target.closest(".feed__pic") && !target.closest(FEED_OVERLAYS);
 }
-// </feed-dblclick>
 
 function feedTile(bayId, camera, role, bayInfo, inRescue) {
   const isOverview = bayId === 0 || camera === "overview";
@@ -1633,7 +1626,6 @@ function updateCompliance(t) {
 
 // ------------------------------------------------------------------ frames
 
-// <frame-urls>
 // Each slot keeps the URL on screen (s.url) and at most one still loading (s.pending). A frame
 // superseded before it loads, a frame that fails to decode and the frame it replaces are all
 // revoked, so bursts of frames never leak blob memory.
@@ -1654,7 +1646,6 @@ function showFrame(s, url, revoke) {
   s.img.onerror = () => settle(false);
   s.img.src = url;
 }
-// </frame-urls>
 
 function revokeUrl(url) {
   URL.revokeObjectURL(url);

@@ -47,9 +47,6 @@ DEFAULT_ROLLOUTS = 10
 DEFAULT_BAR = 9
 GATE_FILE = "gate.json"
 
-# The checkpoint loader, a module-level name so tests can monkeypatch it.
-_load_policy = load_act_policy
-
 # State columns by name, in HAND_ACTUATORS order (pinky first), so they follow the schema.
 _HAND = [STATE_NAMES.index(f"hand/{a}") for a in HAND_ACTUATORS]
 _WRIST = [STATE_NAMES.index(f"wrist/{f}") for f in ("x", "y", "z", "qx", "qy", "qz", "qw")]
@@ -279,6 +276,7 @@ def evaluate(
     seed: int,
     realism: float,
     log: Callable[[str], None] = print,
+    policy: PolicyBackend | None = None,
 ) -> GateManifest:
     """Run the gate and return the manifest (the caller saves it)."""
     from teleop.atc.coordinator import CoordinatorConfig
@@ -287,7 +285,8 @@ def evaluate(
     from teleop.sim.hands import load_hand
 
     _, image_hw = read_policy_config(checkpoint)
-    policy: PolicyBackend = _load_policy(checkpoint, device)
+    if policy is None:
+        policy = load_act_policy(checkpoint, device)
     validator = SkillValidator(
         load_hand("inspire"),
         n_rollouts=rollouts,
