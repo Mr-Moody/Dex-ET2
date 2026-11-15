@@ -13,7 +13,7 @@ must not exist yet (``lerobot-train`` refuses to overwrite a run). ``--dry-run``
 ``lerobot-train`` flags used (LeRobot 0.7, checked with ``uv run lerobot-train --help``):
 ``--policy.type``, ``--policy.device``, ``--policy.chunk_size``, ``--policy.n_action_steps``,
 ``--policy.optimizer_lr``, ``--policy.push_to_hub``, ``--dataset.repo_id``, ``--dataset.root``,
-``--output_dir``, ``--steps``, ``--batch_size``, ``--seed``, ``--save_freq``, ``--wandb.enable``.
+``--output_dir``, ``--steps``, ``--batch_size``, ``--seed``, ``--save_freq``.
 
 This script never imports torch or lerobot itself; ``lerobot-train`` runs as a subprocess.
 """
@@ -72,7 +72,6 @@ def build_train_args(dataset: Path, out: Path, preset: ActPreset) -> list[str]:
         f"--batch_size={preset.batch_size}",
         f"--seed={preset.seed}",
         f"--save_freq={preset.save_freq}",
-        "--wandb.enable=false",
     ]
 
 
