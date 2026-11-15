@@ -283,9 +283,9 @@ def test_worker_frames_follow_telemetry_layout() -> None:
         grid_id = server.telemetry[0]["layout_id"]
         assert rescue_id == grid_id + 1
         rescue_frames = [f for f in server.frames if f[1] == rescue_id]
-        assert {s for s, _, _ in rescue_frames} == {0, 1, 2, 3, 4, 5}
-        # Slot 0 means "bay1/cctv" in the grid and "bay1/top_ortho" in rescue: never mixed up.
-        assert all(j.endswith(b"top_ortho") for s, _, j in rescue_frames if s == 0)
+        assert {s for s, _, _ in rescue_frames} == {0, 1, 2, 3, 4}
+        # Slot 0 is the focused bay on its existing camera, never a forced Top + Side.
+        assert all(j.endswith(b"bay1/cctv") for s, _, j in rescue_frames if s == 0)
         assert all(
             j.endswith(b"bay1/cctv") for s, lid, j in server.frames if s == 0 and lid == grid_id
         )
