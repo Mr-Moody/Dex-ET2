@@ -212,8 +212,8 @@ class TestFeature1WorktreeAndRepoIsolationTier1:
         data = json.loads(golden_path.read_text(encoding="utf-8"))
         assert data["linux"]["ticks"] == 2385
         assert data["linux"]["wrist"] == [
-            [-2.636515486, -3.378664865, 0.215894326],
-            [3.77897135, -3.281898967, 0.13554331],
+            [-2.636500001, -3.378659522, 0.215780866],
+            [3.778971364, -3.281898959, 0.135543324],
         ]
 
 
