@@ -5,6 +5,8 @@ description = "Rokoko glove teleoperation booth: gloves to MuJoCo to LeRobot dat
 authors = [
     { name = "Mr-Moody", email = "118393511+Mr-Moody@users.noreply.github.com" }
 ]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "draccus>=0.10.0",
