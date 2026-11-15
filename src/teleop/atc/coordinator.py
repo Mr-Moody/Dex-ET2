@@ -489,9 +489,10 @@ class _Bay:
     # Rescue-demo contact calibration: encoder-only touch relative to the hold's start.
     demo_touch: TouchDetector = field(default_factory=TouchDetector)
     demo_offset_m: float | None = None
-    indexer: RelativeClutchIndexer = field(
-        default_factory=lambda: RelativeClutchIndexer(hand_relative=True)
-    )
+    # World-aligned (not hand_relative): the operator faces the overview camera, which looks
+    # along world +Y (image right = +X). At the rescue hover the fingers point ~world -Y, so a
+    # hand-heading frame turns every glove delta ~180 deg (left/right and fwd/back reversed).
+    indexer: RelativeClutchIndexer = field(default_factory=RelativeClutchIndexer)
     buffer: RescueTrajectoryBuffer | None = None
     clutch_held: bool = False
     auto: _Recovery | None = None
