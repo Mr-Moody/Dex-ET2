@@ -130,6 +130,28 @@ def test_relative_translation_and_rotation_track_after_re_clutch() -> None:
     assert cmd.position == pytest.approx((0.5, 0.1, 0.2), abs=1e-12)
 
 
+def test_hand_relative_clutch_tracks_hand_heading() -> None:
+    clutch = RelativeClutchIndexer(hand_relative=True)
+    # Hand pitched 45 deg (palm facing down/forward) and yawed +90 deg (facing world +Y).
+    r_sim = so3_exp((0.0, 0.0, math.pi / 2)) @ so3_exp((0.0, -math.pi / 4, 0.0))
+    sim0 = Pose(orientation=mat_to_quat(r_sim), position=(0.5, 0.0, 0.2))
+    glove0 = _pose(0.0, 0.0, 1.0)
+
+    assert clutch.update(True, glove0, sim0) == sim0
+    # Operator moves forward (+Y) by 0.1 m -> moves along hand heading (+Y_world).
+    cmd_fwd = clutch.update(True, _pose(0.0, 0.1, 1.0), sim0)
+    assert cmd_fwd is not None
+    assert cmd_fwd.position == pytest.approx((0.5, 0.1, 0.2), abs=1e-9)
+    # Operator moves right (+X) by 0.1 m -> moves right of hand (+X_world when facing +Y).
+    cmd_right = clutch.update(True, _pose(0.1, 0.1, 1.0), sim0)
+    assert cmd_right is not None
+    assert cmd_right.position == pytest.approx((0.6, 0.1, 0.2), abs=1e-9)
+    # Operator moves up (+Z) by 0.05 m -> moves straight up in world Z.
+    cmd_up = clutch.update(True, _pose(0.1, 0.1, 1.05), sim0)
+    assert cmd_up is not None
+    assert cmd_up.position == pytest.approx((0.6, 0.1, 0.25), abs=1e-9)
+
+
 # --------------------------------------------------------------------------- bleed-off + buffer
 
 
