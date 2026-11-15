@@ -107,6 +107,9 @@
         <div class="gate" id="gate"></div>
       </section>
 
+      <!-- Silent deep audit of the latest rescue episode; audit.js builds and fills it -->
+      <section class="panel argon" id="audit-panel" aria-label="Second-opinion audit" aria-live="polite" hidden></section>
+
       <section class="panel calib" id="panel-calib" data-state="off" aria-labelledby="calib-title">
         <h2 id="calib-title">Glove calibration <span class="panel__note calib__meta" id="calib-meta" aria-live="polite">Unavailable</span></h2>
         <div class="calib__poses">
@@ -210,5 +213,6 @@
   <script src="console.js"></script>
   <script src="health.js"></script>
   <script src="data.js"></script>
+  <script src="audit.js"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
@@ -427,3 +428,75 @@ def test_close_is_quiet_with_nothing_to_save(
     sink = _sink(controller, tmp_path / "ds", recorder=FakeRecorder())
     sink.close()
     assert "saving" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- copilot tags (T-213)
+
+
+class SidecarRecorder(FakeRecorder):
+    """``FakeRecorder`` that appends the sidecar line like ``EpisodeRecorder``; can pause saving."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+
+    def end_episode(self, meta: Mapping[str, Any]) -> int:
+        self.entered.set()
+        assert self.release.wait(5.0)
+        index = super().end_episode(meta)
+        path = self.root / "meta" / "teleop_episodes.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"episode_index": index, **meta}) + "\n")
+        return index
+
+
+def _record_one(sink: Any, rig: Any, bay: int = 1) -> str:
+    sink.on_episode_start(bay, "operator", None, None)
+    sink.on_tick(bay, rig, rig.wrist_pose(), {})
+    sink.on_episode_end(bay, True, None)
+    uid = sink.latest_episode_uid(bay)
+    assert isinstance(uid, str)
+    return uid
+
+
+@needs_models
+def test_tag_before_and_after_write_keeps_one_line_per_episode(unoq: Any, tmp_path: Path) -> None:
+    controller, _ = _controller(unoq)
+    rig = controller.coordinator.rig(1)
+    root = tmp_path / "ds"
+    rec = SidecarRecorder(root)
+    rec.release.clear()
+    sink = _sink(controller, root, recorder=rec)
+    assert sink.latest_episode_uid(1) is None
+    early = _record_one(sink, rig)  # the writer pauses inside end_episode
+    assert rec.entered.wait(5.0)
+    assert sink.tag_episode(early, dataset_tag="flag", audit={"audit_id": "a1"})  # mid-encode
+    rec.release.set()
+    late = _record_one(sink, rig)
+    sink.close()
+    assert late != early
+    assert sink.tag_episode(late, dataset_tag="approve", audit={"audit_id": "a2"})  # post-close
+    assert sink.tag_episode("bay9-nope", dataset_tag="flag") is False
+    lines = _sidecar(root)
+    assert [(r["episode_index"], r.get("dataset_tag")) for r in lines] == [
+        (0, "flag"),
+        (1, "approve"),
+    ]
+    assert lines[0]["audit"] == {"audit_id": "a1"}
+
+
+@needs_models
+def test_tag_queued_episode_goes_into_its_meta(unoq: Any, tmp_path: Path) -> None:
+    controller, _ = _controller(unoq)
+    rig = controller.coordinator.rig(1)
+    rec = FakeRecorder(save_delay_s=0.3)
+    sink = _sink(controller, tmp_path / "ds", recorder=rec)
+    _record_one(sink, rig)  # occupies the writer
+    queued = _record_one(sink, rig)
+    assert sink.tag_episode(queued, dataset_tag="flag")
+    sink.close()
+    assert [m.get("dataset_tag") for _, _, m in rec.episodes] == [None, "flag"]

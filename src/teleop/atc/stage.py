@@ -731,6 +731,8 @@ class StageController:
         self.active_faults: dict[int, str] = {}  # bay -> "flap" | "pin" on its current cycle
         self.cleared_cycles: dict[int, int] = dict.fromkeys(self.active_bays, 0)
         self.gate = GateStatus()
+        # Latest Tier 3 copilot audit (``AuditReport.to_dict()``), set from the reviewer thread.
+        self.audit: dict[str, Any] | None = None
         self._keys: deque[int] = deque()
         self.actions: deque[ActionNote] = deque(maxlen=ACTION_LOG_LEN)
         self._action_seq = 0
@@ -1170,6 +1172,10 @@ class StageController:
                 worst_failure=worst_failure(
                     self.coordinator.last_report, self.coordinator.validator.nominal_springref_deg
                 ),
+                vlm_verdict=_opt_str(meta.get("vlm_verdict")),
+                vlm_reason=_opt_str(meta.get("vlm_reason")),
+                vlm_latency_ms=_opt_float(meta.get("vlm_latency_ms")),
+                vlm_model=_opt_str(meta.get("vlm_model")),
             )
         if self.audio is not None:
             self.audio.on_event(event)
@@ -1189,6 +1195,7 @@ class StageController:
             selected_bay=self.console.selected_bay,
             rescue=rescue,
             gate=self.gate,
+            audit=self.audit,
             compliance=self.events.status_line(),
             reasoning=self.reasoning.status_line(),
             beat=self.beat,
@@ -1508,3 +1515,11 @@ __all__ = [
     "scripted_rescue",
     "worst_failure",
 ]
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _opt_float(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None

@@ -63,6 +63,78 @@ CALLOUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+GATE_SYSTEM = (
+    "You are the inline physical grasp gate (Gemini 4 Hydrogen) for an EV battery-pack latch "
+    "unlatching work cell. Before an operator-demonstrated DMP rescue skill joins the shared "
+    "Fleet Library, assess the 3 rescue keyframes ('stall', 'mid-hold', 'bolt-clear') and the "
+    "contact torque and bolt travel telemetry:\n"
+    "1. flap_depressed: orange spring-loaded stopper flap cleanly depressed before sliding +X.\n"
+    "2. bolt_clearance_ok: slide bolt hooked cleanly and translated past 5.2 cm (0.052 m).\n"
+    "3. hv_clearance_ok: safe physical clearance maintained from the -X high-voltage battery "
+    "terminals and module housing.\n"
+    "4. torque_controlled: finger and arm contact torques remained smooth and bounded.\n"
+    "Approve ('approve') only when all four physical checks hold; otherwise 'reject'.\n"
+    f"Keep 'say' at most {SAY_MAX_WORDS} plain spoken words (no symbols) and 'reason' at most "
+    f"{DETAIL_MAX_WORDS} words."
+)
+
+# OpenAPI uppercase schema sent via generationConfig.responseSchema (NO additionalProperties!).
+GATE_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "verdict": {"type": "STRING", "enum": ["approve", "reject"]},
+        "say": {
+            "type": "STRING",
+            "description": f"Spoken verdict, at most {SAY_MAX_WORDS} plain words.",
+        },
+        "reason": {
+            "type": "STRING",
+            "description": f"Concise physical assessment, at most {DETAIL_MAX_WORDS} words.",
+        },
+        "flap_depressed": {"type": "BOOLEAN"},
+        "bolt_clearance_ok": {"type": "BOOLEAN"},
+        "hv_clearance_ok": {"type": "BOOLEAN"},
+        "torque_controlled": {"type": "BOOLEAN"},
+        "confidence": {"type": "NUMBER"},
+    },
+    "required": [
+        "verdict",
+        "say",
+        "reason",
+        "flap_depressed",
+        "bolt_clearance_ok",
+        "hv_clearance_ok",
+        "torque_controlled",
+        "confidence",
+    ],
+}
+
+AUDIT_SYSTEM = (
+    "You are the silent engineering second-opinion auditor (Gemini 4 Argon) for an EV battery "
+    "latch recovery cell and ACT imitation-learning dataset curator. Inspect up to 6 chronological "
+    "rescue frames and the bay telemetry timeline. Evaluate flap depression timing, index-hook "
+    "engagement, clearance from the -X high-voltage battery terminals, and contact torque "
+    "smoothness. Return 'approve' when the demonstration is physically clean and safe for ACT "
+    "policy training, or 'flag' if unsafe proximity, excessive force, or unstable kinematics "
+    "should exclude the episode from training. Never assume facts absent from frames or telemetry."
+)
+
+# OpenAPI uppercase schema sent via generationConfig.responseSchema (NO additionalProperties!).
+AUDIT_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "verdict": {"type": "STRING", "enum": ["approve", "flag"]},
+        "dataset_tag": {"type": "STRING", "enum": ["approve", "flag"]},
+        "reasons": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "operator_note": {
+            "type": "STRING",
+            "description": "Engineering summary for the Fleet Ops Console card (<= 50 words).",
+        },
+        "confidence": {"type": "NUMBER"},
+    },
+    "required": ["verdict", "dataset_tag", "reasons", "operator_note", "confidence"],
+}
+
 _FAULT_PHRASES = {"flap": "on a flap jam", "pin": "on a pinned bolt"}
 
 

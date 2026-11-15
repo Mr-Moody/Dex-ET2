@@ -45,10 +45,10 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -104,6 +104,7 @@ from teleop.atc.validator import (
     translate_pose,
 )
 from teleop.compliance.protocol import ComplianceKind, ComplianceSink, make_event
+from teleop.copilot.gate import GraspGateVerdict, GraspTelemetrySummary, PoseSnapshot
 from teleop.reasoning.protocol import FleetReasoner, ReasoningContext
 from teleop.retarget.clutch import (
     RelativeClutchIndexer,
@@ -206,7 +207,8 @@ class CoordinatorConfig:
     gate_deadline_s: float = 10.0
     push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
     # Clutch teleop target bounds (see ``AtcCoordinator._teleop_target``). The scripted
-    # rescue leads <= 7 mm and 0.033 rad and peaks at an arm torque ratio of 0.47.
+    # rescue leads <= 7 mm and 0.033 rad; its arm torque ratio stays <= 0.36 except two brief
+    # spikes (0.56, 0.62) that each make it yield for a tick (captured in the golden run).
     teleop_lead_m: float = 0.03  # free space: ~0.3 m/s tracking
     teleop_lead_rad: float = 0.15
     teleop_contact_ratio: float = 0.25  # loaded arm: tighten the lead ...
@@ -352,6 +354,75 @@ class OperatorInput:
     hand_targets: Mapping[str, float] = field(default_factory=dict[str, float])
 
 
+# --------------------------------------------------------------------------- grasp gate capture
+
+
+RESCUE_SNAPSHOT_STRIDE = 8  # ticks between pose snapshots while the clutch is held
+MAX_RESCUE_SNAPSHOTS = 128
+TIER3_MAX_SNAPSHOTS = 6
+
+
+class GraspGateRunner(Protocol):
+    """The Tier 2 grasp gate (``teleop.copilot.gate.GraspGate``) as the coordinator uses it."""
+
+    def submit(
+        self,
+        summary: GraspTelemetrySummary,
+        snapshots: Sequence[PoseSnapshot],
+        *,
+        model: Any = None,
+        audit_snapshots: Sequence[PoseSnapshot] = (),
+        episode_uid: str | None = None,
+    ) -> Future[GraspGateVerdict]: ...
+
+    def close(self) -> None: ...
+
+
+@dataclass
+class _GraspCapture:
+    """Pose snapshots and contact statistics of one clutch-held rescue."""
+
+    t0: float
+    bolt_start_m: float
+    samples: list[PoseSnapshot] = field(default_factory=list[PoseSnapshot])
+    ticks: int = 0
+    tau_sum: float = 0.0
+    tau_peak: float = 0.0
+    arm_peak: float = 0.0
+    min_x_latch: float = math.inf
+    min_z_latch: float = math.inf
+
+
+def _select_tier2_snapshots(
+    samples: Sequence[PoseSnapshot], clear: PoseSnapshot
+) -> tuple[PoseSnapshot, ...]:
+    """``stall`` (first sample), ``mid-hold`` (bolt half way) and ``bolt-clear`` (release)."""
+    stall = samples[0] if samples else clear
+    mid_target = 0.5 * (stall.bolt_x_m + clear.bolt_x_m)
+    pool = list(samples[1:]) or [stall]
+    mid = min(pool, key=lambda s: abs(s.bolt_x_m - mid_target))
+    return (
+        replace(stall, label="stall"),
+        replace(mid, label="mid-hold"),
+        replace(clear, label="bolt-clear"),
+    )
+
+
+def _select_tier3_snapshots(
+    samples: Sequence[PoseSnapshot], clear: PoseSnapshot, max_count: int = TIER3_MAX_SNAPSHOTS
+) -> tuple[PoseSnapshot, ...]:
+    """Up to ``max_count`` snapshots evenly spread from the stall to the release."""
+    chron = [*samples, clear]
+    if len(chron) > max_count:
+        idx = sorted({round(i * (len(chron) - 1) / (max_count - 1)) for i in range(max_count)})
+        chron = [chron[i] for i in idx]
+    out = list(chron)
+    out[0] = replace(out[0], label="stall")
+    if len(out) > 1:
+        out[-1] = replace(out[-1], label="bolt-clear")
+    return tuple(out)
+
+
 # --------------------------------------------------------------------------- per-bay state
 
 
@@ -398,6 +469,7 @@ class _Gate:
     skill: SkillPrimitive
     future: Future[ValidationReport]
     deadline: float
+    grasp: Future[GraspGateVerdict] | None = None  # Tier 2 grasp gate, in parallel
 
 
 @dataclass
@@ -425,6 +497,7 @@ class _Bay:
     refused: bool = False
     signature: StallSignature | None = None
     gate: _Gate | None = None
+    grasp: _GraspCapture | None = None  # pose snapshots of the clutch hold (grasp gate only)
     match: StallMatch | None = None
     skill_id: str | None = None
     confidence: float = 1.0
@@ -469,6 +542,7 @@ class AtcCoordinator:
         recovery_backend: RecoveryBackend = RecoveryBackend.DMP,
         act: RecoveryFactory | None = None,
         observer: CoordinatorObserver | None = None,
+        grasp_gate: GraspGateRunner | None = None,
     ) -> None:
         self.model = model
         self.data = data
@@ -503,6 +577,8 @@ class AtcCoordinator:
         self._backend = RecoveryBackend(recovery_backend)
         self._act = act
         self._observer = observer
+        self.grasp_gate = grasp_gate
+        self.last_grasp_verdict: GraspGateVerdict | None = None
         self.backend_note = ""
         self._bays = {b: _Bay(b, BayRig(model, data, b)) for b in bays}
         for b in BACKGROUND_BAYS:
@@ -529,6 +605,7 @@ class AtcCoordinator:
         recovery_backend: RecoveryBackend = RecoveryBackend.DMP,
         act: RecoveryFactory | None = None,
         observer: CoordinatorObserver | None = None,
+        grasp_gate: GraspGateRunner | None = None,
     ) -> AtcCoordinator:
         import mujoco as _mujoco  # pyright: ignore[reportMissingTypeStubs]
 
@@ -547,6 +624,7 @@ class AtcCoordinator:
             recovery_backend=recovery_backend,
             act=act,
             observer=observer,
+            grasp_gate=grasp_gate,
         )
 
     # ------------------------------------------------------------------ public queries
@@ -712,6 +790,7 @@ class AtcCoordinator:
         # and the validator's state carries over between gates, so cancelling would make the
         # next gate's result nondeterministic.
         bay.gate = None
+        bay.grasp = None
         bay.clutch_held = False
         bay.refused = False
         bay.match = None
@@ -925,6 +1004,8 @@ class AtcCoordinator:
         if engaged and operator is not None:
             if not bay.clutch_held:
                 self._start_episode(bay, "operator")
+                if self.grasp_gate is not None and bay.grasp is None:
+                    bay.grasp = _GraspCapture(self.time_s, bay.rig.bolt_x())
             wrist = bay.rig.wrist_pose()
             cmd = bay.indexer.update(True, operator.glove_wrist, wrist)
             if cmd is not None:
@@ -937,6 +1018,8 @@ class AtcCoordinator:
                         True, self.time_s, cmd, _fingers_array(bay.fingers), bay.tau_inf
                     )
                     self._calibrate_demo_touch(bay)
+            if bay.grasp is not None:
+                self._capture_grasp(bay, bay.grasp)
             bay.clutch_held = True
             return
         if bay.clutch_held:
@@ -955,7 +1038,7 @@ class AtcCoordinator:
         ``teleop_contact_lead_m`` once the last sensed arm torque ratio reaches
         ``teleop_contact_ratio``; from ``teleop_yield_ratio`` the arm yields for a tick (target
         = measured wrist, IK restarted from the measurement) instead of pushing on to the guard.
-        The guard itself is unchanged. The scripted rescue stays inside every bound.
+        The guard itself is unchanged. The scripted rescue yields on two brief torque spikes.
         """
         cfg = self.config
         if bay.arm_ratio >= cfg.teleop_yield_ratio:
@@ -999,6 +1082,7 @@ class AtcCoordinator:
         if traj is not None and bay.signature is not None:
             bay.state = BayState.VALIDATING
             self._submit_gate(bay, traj, bay.signature)
+            bay.grasp = None
         else:
             logger.info("bay %d: rescue discarded (bolt not cleared), staying in hover", bay.bay_id)
 
@@ -1505,7 +1589,86 @@ class AtcCoordinator:
             skill,
             executor.submit(self.validator.validate, skill),
             self.time_s + self.config.gate_deadline_s,
+            self._submit_grasp_gate(bay, skill, traj.duration_s),
         )
+
+    def _capture_grasp(self, bay: _Bay, cap: _GraspCapture) -> None:
+        """Contact statistics every clutch tick, a pose snapshot every few ticks (cheap copies)."""
+        cap.ticks += 1
+        cap.tau_sum += bay.tau_inf
+        cap.tau_peak = max(cap.tau_peak, bay.tau_inf)
+        cap.arm_peak = max(cap.arm_peak, bay.arm_ratio)
+        wrist = bay.rig.wrist_pose()
+        latch = bay.rig.world_from_latch()
+        if wrist.position is not None and latch.position is not None:
+            rel = quat_to_mat(latch.orientation).T @ (
+                np.asarray(wrist.position) - np.asarray(latch.position)
+            )
+            cap.min_x_latch = min(cap.min_x_latch, float(rel[0]))
+            cap.min_z_latch = min(cap.min_z_latch, float(rel[2]))
+        if (cap.ticks - 1) % RESCUE_SNAPSHOT_STRIDE == 0 and (
+            len(cap.samples) < MAX_RESCUE_SNAPSHOTS
+        ):
+            cap.samples.append(self._pose_snapshot(bay, "hold"))
+
+    def _pose_snapshot(self, bay: _Bay, label: str) -> PoseSnapshot:
+        d = self.data
+        return PoseSnapshot(
+            label=label,
+            sim_t=self.time_s,
+            bolt_x_m=float(bay.rig.bolt_x()),
+            tau_hand_nm=float(bay.tau_inf),
+            qpos=np.array(d.qpos, dtype=np.float64),
+            mocap_pos=np.array(d.mocap_pos, dtype=np.float64),
+            mocap_quat=np.array(d.mocap_quat, dtype=np.float64),
+            body_pos=np.array(d.xpos, dtype=np.float64),
+            body_quat=np.array(d.xquat, dtype=np.float64),
+        )
+
+    def _submit_grasp_gate(
+        self, bay: _Bay, skill: SkillPrimitive, duration_s: float
+    ) -> Future[GraspGateVerdict] | None:
+        """Hand the rescue's keyframes and telemetry to the grasp gate (its own worker)."""
+        cap = bay.grasp
+        if self.grasp_gate is None or cap is None:
+            return None
+        clear = self._pose_snapshot(bay, "bolt-clear")
+        summary = GraspTelemetrySummary(
+            bay_id=bay.bay_id,
+            sku=self.config.part_sku_id,
+            skill_id=skill.skill_id,
+            signature_id=skill.signature_id,
+            duration_s=duration_s,
+            bolt_start_m=cap.bolt_start_m,
+            bolt_final_m=clear.bolt_x_m,
+            peak_tau_hand_nm=cap.tau_peak,
+            mean_tau_hand_nm=cap.tau_sum / max(cap.ticks, 1),
+            peak_arm_ratio=cap.arm_peak,
+            min_wrist_x_latch_m=cap.min_x_latch if math.isfinite(cap.min_x_latch) else 0.0,
+            min_wrist_z_latch_m=cap.min_z_latch if math.isfinite(cap.min_z_latch) else 0.0,
+            touch_offset_m=None
+            if skill.touch_offset_m is None
+            else (float(skill.touch_offset_m), 0.0),
+        )
+        uid_fn = getattr(self._observer, "latest_episode_uid", None)
+        episode_uid: str | None = None
+        if callable(uid_fn):
+            try:
+                uid = uid_fn(bay.bay_id)
+                episode_uid = uid if isinstance(uid, str) else None
+            except Exception:
+                logger.exception("episode observer failed")
+        try:
+            return self.grasp_gate.submit(
+                summary,
+                _select_tier2_snapshots(cap.samples, clear),
+                model=self.model,
+                audit_snapshots=_select_tier3_snapshots(cap.samples, clear),
+                episode_uid=episode_uid,
+            )
+        except Exception:
+            logger.exception("bay %d: grasp gate submit failed", bay.bay_id)
+            return None
 
     def _apply_gate(self, bay: _Bay, gate: _Gate) -> None:
         skill = gate.skill
@@ -1515,13 +1678,35 @@ class AtcCoordinator:
             logger.exception("bay %d: skill gate failed for %s", bay.bay_id, skill.skill_id)
             report = ValidationReport((), 0.0, self.validator.pass_min)
         self.last_report = report
+        verdict: GraspGateVerdict | None = None
+        if gate.grasp is not None:
+            try:
+                verdict = gate.grasp.result()  # the gate's model call is bounded by its timeout
+            except Exception:
+                logger.exception("bay %d: grasp gate failed for %s", bay.bay_id, skill.skill_id)
+        self.last_grasp_verdict = verdict
+        approved = report.passed and (verdict is None or verdict.approved)
+        vlm_meta: dict[str, Any] = (
+            {}
+            if verdict is None
+            else {
+                "vlm_verdict": verdict.verdict,
+                "vlm_reason": verdict.reason,
+                "vlm_model": verdict.model,
+                "vlm_source": verdict.source,
+                "vlm_latency_ms": verdict.latency_ms,
+            }
+        )
         self._emit(
             "VALIDATION_GATE",
             bay,
-            f"bay {bay.bay_id} gate {report.n_passed}/{report.total} for {skill.skill_id}",
+            f"bay {bay.bay_id} gate {report.n_passed}/{report.total} for {skill.skill_id}"
+            + ("" if verdict is None else f", grasp {verdict.verdict}"),
             {
                 "skill_id": skill.skill_id,
-                "passed": report.passed,
+                "passed": approved,
+                "sim_passed": report.passed,
+                **vlm_meta,
                 "rollouts_passed": report.n_passed,
                 "rollouts_total": report.total,
                 "elapsed_s": report.elapsed_s,
@@ -1537,7 +1722,7 @@ class AtcCoordinator:
             rollout_total=report.total,
             rollout_threshold=report.threshold,
         )
-        if report.passed:
+        if approved:
             self.unoq.register_skill(skill)
             self.library[skill.skill_id] = skill
             self._emit(
@@ -1547,6 +1732,8 @@ class AtcCoordinator:
                 {"skill_id": skill.skill_id, "signature_id": skill.signature_id},
             )
             bay.outcome = f"rescued, skill {skill.skill_id} deployed"
+        elif report.passed:
+            bay.outcome = "rescued, skill rejected by the grasp gate"
         else:
             bay.outcome = "rescued, skill rejected by validation gate"
         bay.state = BayState.NOMINAL

@@ -4,8 +4,9 @@ REST endpoint ``https://generativelanguage.googleapis.com/v1beta``. The key goes
 ``x-goog-api-key`` header (never in a URL), and every error message is scrubbed of it.
 
 All HTTP goes through an injectable :class:`Transport`, so tests use a fake and never touch the
-network. The default :class:`UrllibTransport` refuses redirects, because urllib would otherwise
-copy the key header to whatever host a redirect names.
+network. The default :class:`PersistentHTTPSTransport` keeps one IPv4 TLS connection alive per
+thread; neither it nor :class:`UrllibTransport` follows redirects, because that would copy the key
+header to whatever host a redirect names.
 
 Field names follow the Gemini REST ``generateContent`` reference (camelCase):
 ``systemInstruction``, ``contents[].parts[].inlineData``, ``generationConfig.responseMimeType``,
@@ -17,18 +18,24 @@ Field names follow the Gemini REST ``generateContent`` reference (camelCase):
 from __future__ import annotations
 
 import base64
+import contextlib
+import http.client
 import io
 import json
 import re
+import socket
+import ssl
+import threading
 import wave
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
-DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_HOST = "generativelanguage.googleapis.com"
+DEFAULT_BASE_URL = f"https://{GEMINI_HOST}/v1beta"
 USER_AGENT = "teleop-copilot/0.1"
 MAX_DETAIL_CHARS = 300
 REDACTED = "[redacted]"
@@ -125,7 +132,9 @@ class UrllibTransport:
     """The real transport, on ``urllib.request``. The timeout applies to each socket operation."""
 
     def __init__(self) -> None:
-        self._opener = urlrequest.build_opener(_NoRedirect())
+        # An explicit default context (system CAs), so TLS trust is set in one visible place.
+        https = urlrequest.HTTPSHandler(context=ssl.create_default_context())
+        self._opener = urlrequest.build_opener(_NoRedirect(), https)
 
     def request(
         self,
@@ -151,6 +160,122 @@ class UrllibTransport:
             raise OSError(str(exc.reason)) from None
 
 
+class IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """Persistent IPv4-only TLS connection with proper SNI and ``Host`` header."""
+
+    def __init__(
+        self,
+        host: str = GEMINI_HOST,
+        port: int = 443,
+        timeout: float = 15.0,
+        *,
+        context: ssl.SSLContext | None = None,
+    ) -> None:
+        super().__init__(host, port, timeout=timeout, context=context)
+        self._explicit_context = context
+
+    def connect(self) -> None:
+        ctx = (
+            self._explicit_context
+            if self._explicit_context is not None
+            else ssl.create_default_context()
+        )
+        infos = socket.getaddrinfo(
+            self.host,
+            self.port,
+            family=socket.AF_INET,
+            type=socket.SOCK_STREAM,
+        )
+        if not infos:
+            raise OSError(f"no IPv4 address resolved for {self.host}")
+        last_err: OSError | None = None
+        for family, socktype, proto, _, sockaddr in infos:
+            raw = socket.socket(family, socktype, proto)
+            raw.settimeout(self.timeout)
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            try:
+                raw.connect(sockaddr)
+                self.sock = ctx.wrap_socket(raw, server_hostname=self.host)
+                return
+            except OSError as exc:
+                with contextlib.suppress(OSError):
+                    raw.close()
+                last_err = exc
+        assert last_err is not None
+        raise last_err
+
+
+class PersistentHTTPSTransport:
+    """Keep-alive IPv4 HTTPS (one connection per thread and host); plain ``http://`` via urllib.
+
+    Reusing the TLS socket saves a handshake (~0.3-1 s) on every model call. A stale keep-alive
+    socket is reopened once. Redirects are never followed: a 3xx comes back as its status.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+        self._plain = UrllibTransport()
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout_s: float,
+    ) -> tuple[int, bytes]:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.hostname:
+            return self._plain.request(method, url, headers, body, timeout_s)
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        key = (parts.hostname, parts.port or 443)
+        for attempt in range(2):
+            conn = self._connection(key, timeout_s)
+            try:
+                conn.request(method, path, body=body, headers=dict(headers))
+                resp = conn.getresponse()
+                data = resp.read()
+                if resp.will_close:
+                    self._drop(key)
+                return int(resp.status), data
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError):
+                self._drop(key)
+                if attempt == 1:
+                    raise OSError("connection closed by the server") from None
+            except TimeoutError:
+                self._drop(key)
+                raise
+            except (OSError, http.client.HTTPException) as exc:
+                self._drop(key)
+                raise OSError(str(exc)) from None
+        raise OSError("unreachable")  # pragma: no cover
+
+    def _connection(self, key: tuple[str, int], timeout_s: float) -> IPv4HTTPSConnection:
+        conns: dict[tuple[str, int], IPv4HTTPSConnection] = self._conns()
+        conn = conns.get(key)
+        if conn is None:
+            conn = IPv4HTTPSConnection(key[0], key[1], timeout=timeout_s)
+            conns[key] = conn
+        conn.timeout = timeout_s
+        if conn.sock is not None:
+            conn.sock.settimeout(timeout_s)
+        return conn
+
+    def _conns(self) -> dict[tuple[str, int], IPv4HTTPSConnection]:
+        conns = getattr(self._local, "conns", None)
+        if conns is None:
+            conns = {}
+            self._local.conns = conns
+        return cast(dict[tuple[str, int], IPv4HTTPSConnection], conns)
+
+    def _drop(self, key: tuple[str, int]) -> None:
+        conn = self._conns().pop(key, None)
+        if conn is not None:
+            with contextlib.suppress(OSError):
+                conn.close()
+
+
 class GeminiClient:
     """Calls the Gemini REST API. Thread-safe as long as the transport is."""
 
@@ -165,7 +290,9 @@ class GeminiClient:
         if not api_key or not api_key.strip():
             raise ValueError("GEMINI_API_KEY is missing; put it in .env (see docs/copilot.md)")
         self._key = api_key.strip()
-        self._transport: Transport = transport if transport is not None else UrllibTransport()
+        self._transport: Transport = (
+            transport if transport is not None else PersistentHTTPSTransport()
+        )
         self._base_url = base_url.rstrip("/")
         self.no_images = no_images
 
@@ -200,6 +327,7 @@ class GeminiClient:
         timeout_s: float,
         *,
         thinking_level: ThinkingLevel | None = None,
+        media_resolution: str | None = None,
     ) -> dict[str, Any]:
         """Ask ``model`` for one JSON object that follows ``schema``.
 
@@ -214,6 +342,8 @@ class GeminiClient:
         generation: dict[str, Any] = {"responseMimeType": "application/json"}
         if schema is not None:
             generation[_schema_field(schema)] = dict(schema)
+        if media_resolution is not None:
+            generation["mediaResolution"] = media_resolution
         if thinking_level is not None:
             if thinking_level not in THINKING_LEVELS:
                 raise ValueError(f"thinking_level must be one of {THINKING_LEVELS}")
@@ -225,7 +355,7 @@ class GeminiClient:
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
         doc = self._call("POST", self._generate_url(model), payload, timeout_s)
-        return _parse_json_answer(_answer_text(doc))
+        return parse_json_lenient(_answer_text(doc))
 
     def synthesize(self, text: str, model: str, voice: str, timeout_s: float) -> bytes:
         """Speak ``text`` with a prebuilt ``voice``; returns a complete WAV file."""
@@ -288,7 +418,7 @@ class GeminiClient:
         except OSError as exc:
             raise GeminiError(self._scrub(f"network error: {exc}")) from None
         if not 200 <= status < 300:
-            raise GeminiHttpError(status, self._scrub(_error_detail(raw)))
+            raise GeminiHttpError(status, self._scrub(error_detail(raw)))
         try:
             doc: object = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -334,7 +464,7 @@ def _model_info(raw: Mapping[str, Any]) -> ModelInfo | None:
     )
 
 
-def _error_detail(raw: bytes) -> str:
+def error_detail(raw: bytes) -> str:
     text = raw.decode("utf-8", errors="replace").strip()
     try:
         doc: object = json.loads(text)
@@ -382,6 +512,11 @@ def _answer_text(doc: Mapping[str, Any]) -> str:
     if not text.strip():
         raise GeminiMalformedJsonError(f"answer has no text (finishReason={finish})")
     return text
+
+
+def parse_json_lenient(text: str) -> dict[str, Any]:
+    """Parse a JSON object from model text, stripping optional Markdown code fences."""
+    return _parse_json_answer(text)
 
 
 def _parse_json_answer(text: str) -> dict[str, Any]:

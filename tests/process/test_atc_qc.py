@@ -127,6 +127,21 @@ def test_drops_each_reason(tmp_path):
         assert r.reasons == ([] if reason is None else [reason])
 
 
+def test_copilot_flag_drops_and_approve_keeps(tmp_path):
+    from teleop.process.atc_qc import DROP_REASONS
+
+    assert "copilot flagged" in DROP_REASONS
+    episodes = [
+        _good(dataset_tag="flag"),
+        _good(dataset_tag="approve"),
+        _good(success=False, dataset_tag="flag"),
+    ]
+    results = _qc(_build(tmp_path / "a", episodes))
+    assert [r.keep for r in results] == [False, True, False]
+    assert results[0].reasons == ["copilot flagged"]
+    assert results[2].reasons == ["not successful", "copilot flagged"]
+
+
 def test_trims_idle_head_and_tail(tmp_path):
     from teleop.process.atc_qc import atc_trim
 

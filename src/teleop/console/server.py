@@ -24,10 +24,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import mimetypes
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -61,6 +62,17 @@ _CONTENT_TYPES = {
     ".png": "image/png",
     ".woff2": "font/woff2",
 }
+
+
+def _scrub_json(obj: Any) -> Any:
+    """Replace non-finite floats with ``None`` so serialized JSON is always strict."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, Mapping):
+        return {str(k): _scrub_json(v) for k, v in cast("Mapping[Any, Any]", obj).items()}
+    if isinstance(obj, list | tuple):
+        return [_scrub_json(v) for v in cast("Sequence[object]", obj)]
+    return obj
 
 
 class _Client:
@@ -123,6 +135,7 @@ class ConsoleServer:
         self._clients: set[_Client] = set()
         self._lock = threading.Lock()
         self._latest_text: str | None = None
+        self._latest_audit: dict[str, Any] | None = None
         self._latest_frames: dict[int, bytes] = {}
         self._port: int | None = None
         self._copilot: deque[str] = deque(maxlen=COPILOT_HISTORY)
@@ -197,8 +210,44 @@ class ConsoleServer:
     # ------------------------------------------------------------------ publish (any thread)
 
     def publish_telemetry(self, msg: dict[str, Any]) -> None:
-        text = json.dumps(msg, separators=(",", ":"))
         with self._lock:
+            out: dict[str, Any]
+            if msg.get("audit") is not None:
+                audit_val = msg["audit"]
+                if isinstance(audit_val, Mapping):
+                    audit_map = cast("Mapping[str, Any]", audit_val)
+                    clean_audit = cast("dict[str, Any]", _scrub_json(dict(audit_map)))
+                    self._latest_audit = clean_audit
+                    out = _scrub_json({**msg, "audit": clean_audit})
+                else:
+                    out = _scrub_json(dict(msg))
+            elif self._latest_audit is not None:
+                out = _scrub_json({**msg, "audit": self._latest_audit})
+            else:
+                out = _scrub_json(dict(msg))
+            text = json.dumps(out, separators=(",", ":"), allow_nan=False)
+            self._latest_text = text
+        self._fanout(lambda c: c.put_text(text))
+
+    def publish_audit(self, audit: Mapping[str, Any]) -> None:
+        """Store and broadcast the latest copilot engineering audit to all ``/ws`` clients."""
+        clean = cast("dict[str, Any]", _scrub_json(dict(audit)))
+        with self._lock:
+            self._latest_audit = clean
+            base: dict[str, Any] | None = None
+            if self._latest_text is not None:
+                try:
+                    parsed: Any = json.loads(self._latest_text)
+                    if isinstance(parsed, dict):
+                        base = cast("dict[str, Any]", parsed)
+                except ValueError:
+                    base = None
+            merged = (
+                {**base, "type": "telemetry", "audit": clean}
+                if base is not None
+                else {"type": "telemetry", "audit": clean}
+            )
+            text = json.dumps(merged, separators=(",", ":"), allow_nan=False)
             self._latest_text = text
         self._fanout(lambda c: c.put_text(text))
 
@@ -273,6 +322,9 @@ class ConsoleServer:
                 except Exception:
                     logger.exception("console: on_key failed")
             return
+        if mtype == "copilot_audit":
+            self._on_copilot_audit_message(msg)
+            return
         if (
             mtype in ("view", "fault", "dummy", "calib", "record")
             and self.on_client_message is not None
@@ -297,6 +349,24 @@ class ConsoleServer:
         for client in list(self._clients):
             if client is not sender:
                 client.put_copilot(text)
+
+    def _on_copilot_audit_message(self, msg: dict[str, Any]) -> None:
+        nested = msg.get("audit")
+        if "audit" in msg and not isinstance(nested, dict):
+            return
+        payload = (
+            cast("dict[str, Any]", nested)
+            if isinstance(nested, dict)
+            else {k: v for k, v in msg.items() if k != "type"}
+        )
+        if not payload:
+            return
+        self.publish_audit(payload)
+        if self.on_client_message is not None:
+            try:
+                self.on_client_message(msg)
+            except Exception:
+                logger.exception("console: on_client_message failed")
 
     def _on_reconnect_message(self, msg: dict[str, Any]) -> None:
         target = msg.get("target")

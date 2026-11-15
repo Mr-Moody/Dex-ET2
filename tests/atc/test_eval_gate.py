@@ -38,10 +38,12 @@ needs_models = pytest.mark.skipif(
     not _models_present(), reason="Panda/Inspire MJCFs missing; run scripts/fetch_models.py"
 )
 
-# ``validate`` on the scripted flap rescue's DMP, captured on ``main`` before T-196 touched the
-# validator (SkillValidator(hand_spec, realism=DEFAULT_REALISM), seed 0, 20 rollouts).
+# ``validate`` on the scripted flap rescue's DMP (SkillValidator(hand_spec,
+# realism=DEFAULT_REALISM), seed 0, 20 rollouts). Recaptured after #92's clutch yield: the
+# scripted rescue's arm torque ratio spikes past teleop_yield_ratio, so its demo (and the DMP
+# fitted from it) changed; the validator itself did not.
 GOLDEN_DMP_N_PASSED = 20
-GOLDEN_DMP_MAX_TAU_NM = 1.4538941036760806
+GOLDEN_DMP_MAX_TAU_NM = 1.3064834304972683
 
 
 class _Sink:
