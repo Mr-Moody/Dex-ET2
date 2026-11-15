@@ -61,6 +61,7 @@ FORBIDDEN_T194_T195_AND_LOCKED_FILES: tuple[str, ...] = (
 
 ALLOWED_COMMIT_SCOPES: frozenset[str] = frozenset(
     {
+        "console",
         "input",
         "sim",
         "retarget",

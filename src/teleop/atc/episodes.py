@@ -375,6 +375,7 @@ class EpisodeSink:
             images = self._renderer.render(d, ep.bay)
             self._recorder.add_frame(f.state, f.action, images)
         meta = {**item.meta.to_json(), "recorded_at": ep.started_at, "frames": len(ep.frames)}
+        meta["episode_uid"] = item.uid
         with self._lock:
             early = self._tags.pop(item.uid, None)
         if early:
