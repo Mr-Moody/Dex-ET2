@@ -1,7 +1,7 @@
 ---
 id: T-228
 title: Smooth the rescue glove wrist and finger targets with 1-Euro filters
-status: claimed
+status: in_review
 owner: glove-input-smoothing
 branch: feat/glove-input-smoothing
 depends_on: []
