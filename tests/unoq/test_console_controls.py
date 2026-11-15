@@ -273,6 +273,19 @@ def test_heartbeat_without_a_bay_does_not_restamp_every_beat() -> None:
     assert bridge.state().timestamp_ns == stamp  # else this console always wins the merge
 
 
+def test_clutch_event_does_not_update_selected_bay_timestamp() -> None:
+    clock, _, bridge = _rig()
+    bridge.handle_line("BTN:BAY:2")
+    bay_stamp = bridge.state().selected_bay_timestamp_ns
+    assert bay_stamp is not None
+    clock.advance(0.5)
+    bridge.handle_line("CLUTCH:1")
+    s = bridge.state()
+    assert s.clutch
+    assert s.timestamp_ns > bay_stamp
+    assert s.selected_bay_timestamp_ns == bay_stamp
+
+
 def test_set_power_mask_reaches_the_mcu_and_waits_for_its_echo() -> None:
     _, mcu, bridge = _rig()
     bridge.set_power_mask({1, 3})

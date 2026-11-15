@@ -172,6 +172,15 @@ class ConsoleSource(Protocol):
     def close(self) -> None: ...
 
 
+def _selection_timestamp_ns(state: ConsoleInputState) -> int:
+    """Return the timestamp of ``state``'s last bay selection."""
+    return (
+        state.timestamp_ns
+        if state.selected_bay_timestamp_ns is None
+        else state.selected_bay_timestamp_ns
+    )
+
+
 def merge_console(
     states: Iterable[ConsoleInputState], powered_off: frozenset[int] | None = None
 ) -> ConsoleInputState:
@@ -184,7 +193,9 @@ def merge_console(
     if not items:
         return ConsoleInputState(powered_off=powered_off or frozenset())
     selected = [s for s in items if s.selected_bay is not None]
-    bay = max(selected, key=lambda s: s.timestamp_ns).selected_bay if selected else None
+    winner = max(selected, key=_selection_timestamp_ns) if selected else None
+    bay = winner.selected_bay if winner is not None else None
+    bay_ts = winner.selected_bay_timestamp_ns if winner is not None else None
     estop = any(s.estop for s in items)
     if powered_off is None:
         powered_off = frozenset[int]().union(*(s.powered_off for s in items))
@@ -195,6 +206,7 @@ def merge_console(
         fault_rig_latched=any(s.fault_rig_latched for s in items),
         timestamp_ns=max(s.timestamp_ns for s in items),
         powered_off=powered_off,
+        selected_bay_timestamp_ns=bay_ts,
     )
 
 
@@ -282,8 +294,21 @@ class UnoQConsolePoller:
         now = self._clock()
         with self._lock:
             prev = self._state
-            same = replace(s, timestamp_ns=prev.timestamp_ns) == prev
-            s = replace(s, timestamp_ns=prev.timestamp_ns if same else now)
+            bay_changed = s.selected_bay != prev.selected_bay
+            bay_ts = now if bay_changed else prev.selected_bay_timestamp_ns
+            same = (
+                replace(
+                    s,
+                    timestamp_ns=prev.timestamp_ns,
+                    selected_bay_timestamp_ns=prev.selected_bay_timestamp_ns,
+                )
+                == prev
+            )
+            s = replace(
+                s,
+                timestamp_ns=prev.timestamp_ns if same else now,
+                selected_bay_timestamp_ns=bay_ts,
+            )
             if s.fault_rig_latched and not prev.fault_rig_latched:
                 self._edge = True
             self._state = s

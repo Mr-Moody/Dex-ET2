@@ -351,3 +351,41 @@ def test_a_button_press_on_another_bay_counts_while_a_push_is_in_flight() -> Non
     deaf.s = ConsoleInputState(selected_bay=2, powered_off=frozenset({2}))  # its own press
     ctl.tick()
     assert ctl.console.powered_off == {1, 2}
+
+
+def test_physical_clutch_drives_keyboard_selected_bay_without_switching_bay() -> None:
+    client = _BoardClient()
+    clock = _Clock(time.monotonic_ns())
+    poller = _poller(client, clock)
+    try:
+        ctl = _stage(poller)
+        client.state = ConsoleInputState(selected_bay=2)
+        poller.poll_once()
+        ctl.tick()
+        assert ctl.console.selected_bay == 2
+
+        _key(ctl, "1")
+        ctl.tick()
+        assert ctl.console.selected_bay == 1
+
+        clock.ns = time.monotonic_ns() + 10**9
+        client.state = ConsoleInputState(selected_bay=2, clutch=True)
+        poller.poll_once()
+        ctl.tick()
+        assert ctl.console.selected_bay == 1
+        assert ctl.console.clutch
+
+        clock.ns += 10**8
+        client.state = ConsoleInputState(selected_bay=2, clutch=False)
+        poller.poll_once()
+        ctl.tick()
+        assert ctl.console.selected_bay == 1
+        assert not ctl.console.clutch
+
+        clock.ns += 10**8
+        client.state = ConsoleInputState(selected_bay=3, clutch=False)
+        poller.poll_once()
+        ctl.tick()
+        assert ctl.console.selected_bay == 3
+    finally:
+        poller.close()
