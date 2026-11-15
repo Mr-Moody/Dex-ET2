@@ -58,31 +58,56 @@ def _pos(pose: Pose) -> FloatArray:
 # --------------------------------------------------------------------------- clutch indexing
 
 
+def _hand_xy_frame(rot: FloatArray) -> FloatArray:
+    """Horizontal world basis ``[right, fwd, up]`` aligned with the hand's current heading.
+
+    Uses ``site +X - site +Z`` (fingers + palm normal) so forward never degenerates whether the
+    hand is vertical, pitched 45 deg, or horizontal.
+    """
+    fwd_raw = rot[:, 0] - rot[:, 2]
+    fx, fy = float(fwd_raw[0]), float(fwd_raw[1])
+    fn = math.hypot(fx, fy)
+    if fn < 1e-6:
+        fx, fy = 1.0, 0.0
+    else:
+        fx, fy = fx / fn, fy / fn
+    return np.array([[fy, fx, 0.0], [-fx, fy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
 class RelativeClutchIndexer:
     """Maps glove wrist motion onto the sim wrist, relative to the pose at clutch engage.
 
-    While the clutch is held::
+    While the clutch is held (when ``hand_relative=False``)::
 
         p_cmd = p_w0 + s * R_align (p_g - p_g0)
         R_cmd = R_align R_g R_g0^T R_align^T R_w0
 
-    ``R_align`` rotates the operator's desk frame into the sim world (identity when the glove
-    source already reports the sim's Z-up axes and the operator faces sim +X); ``s`` scales
-    hand travel.
+    When ``hand_relative=True``, each tick's delta is rotated into the hand's current horizontal
+    heading (``_hand_xy_frame``) so operator forward/back and left/right always follow the hand
+    and wrist camera while up/down stays world-vertical.
     """
 
-    def __init__(self, pos_scale: float = 1.0, align: Quat = IDENTITY) -> None:
+    def __init__(
+        self, pos_scale: float = 1.0, align: Quat = IDENTITY, *, hand_relative: bool = False
+    ) -> None:
         if pos_scale <= 0.0:
             raise ValueError("pos_scale must be positive")
         self.pos_scale = pos_scale
+        self.hand_relative = hand_relative
         self._r_align = quat_to_mat(align)
         self._anchor: tuple[FloatArray, FloatArray, FloatArray, FloatArray] | None = None
 
     @classmethod
-    def with_desk_yaw(cls, yaw_rad: float, pos_scale: float = 1.0) -> RelativeClutchIndexer:
+    def with_desk_yaw(
+        cls, yaw_rad: float, pos_scale: float = 1.0, *, hand_relative: bool = False
+    ) -> RelativeClutchIndexer:
         """Operator desk rotated ``yaw_rad`` about +Z relative to the sim world."""
         h = 0.5 * yaw_rad
-        return cls(pos_scale=pos_scale, align=(0.0, 0.0, math.sin(h), math.cos(h)))
+        return cls(
+            pos_scale=pos_scale,
+            align=(0.0, 0.0, math.sin(h), math.cos(h)),
+            hand_relative=hand_relative,
+        )
 
     @property
     def engaged(self) -> bool:
@@ -107,9 +132,21 @@ class RelativeClutchIndexer:
             )
             return current_sim_wrist
         p_w0, r_w0, p_g0, r_g0 = self._anchor
+        p_g = _pos(glove_wrist)
+        r_g = quat_to_mat(glove_wrist.orientation)
+        if self.hand_relative:
+            a = _hand_xy_frame(r_w0) @ self._r_align
+            p = p_w0 + self.pos_scale * (a @ (p_g - p_g0))
+            r_delta = a @ (r_g @ r_g0.T) @ a.T
+            r_next = r_delta @ r_w0
+            self._anchor = (p, r_next, p_g, r_g)
+            return Pose(
+                orientation=mat_to_quat(r_next),
+                position=(float(p[0]), float(p[1]), float(p[2])),
+            )
         a = self._r_align
-        p = p_w0 + self.pos_scale * (a @ (_pos(glove_wrist) - p_g0))
-        r_delta = a @ quat_to_mat(glove_wrist.orientation) @ r_g0.T @ a.T
+        p = p_w0 + self.pos_scale * (a @ (p_g - p_g0))
+        r_delta = a @ r_g @ r_g0.T @ a.T
         return Pose(
             orientation=mat_to_quat(r_delta @ r_w0),
             position=(float(p[0]), float(p[1]), float(p[2])),

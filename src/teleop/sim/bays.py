@@ -51,11 +51,18 @@ BAY2_LATCH = CANONICAL_LATCH.offset(dx=0.08, dy=0.09, dyaw_rad=math.radians(35.0
 WRIST_SITE_POS = (-0.019, 0.0226, 0.137)  # in the hand base frame
 # wxyz, -90 deg about base Y: site x = base z, site y = base y, site z = -base x
 WRIST_SITE_QUAT = (math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0)
-# The base mounts straight on the flange (fingers along the tool axis +Z), which puts the wrist
-# site in the same flange pose as the LEAP palm frame it replaces: site +X along flange +Z and
-# site +Z along flange -X.
+# Mount the hand on a 45-degree angled flange bracket (fingers pitched 45 deg toward world +X at
+# PANDA_HOME). This keeps the Panda flange near vertical (high manipulability, away from the
+# joint6 = 0 wrist singularity) whether the hand is horizontal for teleop or pitched down for the
+# latch routine.
+_HALF_MOUNT = 0.5 * math.radians(45.0)
 HAND_MOUNT_POS = (0.0, 0.0, 0.0)
-HAND_MOUNT_QUAT = (0.0, 0.0, 0.0, 1.0)  # wxyz
+HAND_MOUNT_QUAT = (
+    0.0,
+    0.0,
+    -math.sin(_HALF_MOUNT),
+    math.cos(_HALF_MOUNT),
+)  # wxyz: Rx(45) * Rz(180)
 # A passive compliant wrist (like the compliance devices on real insertion cells): the Inspire
 # fingers have no abduction joint, so without it a push that the stalled bolt stops loads the
 # Panda almost rigidly. Two sprung hinges about the flange X and Y axes give the hand a few mm

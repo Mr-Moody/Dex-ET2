@@ -488,7 +488,9 @@ class _Bay:
     # Rescue-demo contact calibration: encoder-only touch relative to the hold's start.
     demo_touch: TouchDetector = field(default_factory=TouchDetector)
     demo_offset_m: float | None = None
-    indexer: RelativeClutchIndexer = field(default_factory=RelativeClutchIndexer)
+    indexer: RelativeClutchIndexer = field(
+        default_factory=lambda: RelativeClutchIndexer(hand_relative=True)
+    )
     buffer: RescueTrajectoryBuffer | None = None
     clutch_held: bool = False
     auto: _Recovery | None = None
