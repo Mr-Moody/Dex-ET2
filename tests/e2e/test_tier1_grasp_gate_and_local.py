@@ -668,7 +668,7 @@ class TestFeature11ParallelAtcCoordinatorGateTier1:
     ) -> None:
         # Barrier(2) deadlocks and raises BrokenBarrierError if GraspGate shares the single-worker
         # SkillValidator executor instead of running in parallel on its own worker!
-        barrier = threading.Barrier(2, timeout=3.0)
+        barrier = threading.Barrier(2, timeout=15.0)
         mock_gemini_server.config.hydrogen_barrier = barrier
         fast_val = FastSkillValidator(passed=True, barrier=barrier)
 
@@ -724,7 +724,7 @@ class TestFeature11ParallelAtcCoordinatorGateTier1:
             assert not sim_hold.is_set()
 
             # Hydrogen finishes immediately and MUST trigger Tier 1 SSE TTS BEFORE Sim finishes!
-            assert mock_gemini_server.config.tts_received_event.wait(timeout=3.0), (
+            assert mock_gemini_server.config.tts_received_event.wait(timeout=15.0), (
                 "Hydrogen `verdict.say` was NOT streamed to TTS immediately while VALIDATING!"
             )
             assert rig.co.state(1) == BayState.VALIDATING

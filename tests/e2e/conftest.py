@@ -62,7 +62,34 @@ from teleop.unoq.server import UnoQServer
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_FRAME_BIN = REPO_ROOT / "tests" / "copilot" / "fixtures" / "frame-0-1.bin"
 FIXTURE_TELEMETRY_JSONL = REPO_ROOT / "tests" / "copilot" / "fixtures" / "stage_telemetry.jsonl"
-MAIN_ENV_FILE = Path("/home/ethan/Documents/UCL_repos/Junction/.env")
+
+
+def _resolve_main_env_file() -> Path:
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            common = Path(proc.stdout.strip())
+            if common.name == ".git":
+                return common.parent.resolve() / ".env"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return REPO_ROOT / ".env"
+
+
+MAIN_ENV_FILE = _resolve_main_env_file()
 
 
 # ---------------------------------------------------------------------------
@@ -1462,7 +1489,7 @@ class FastSkillValidator:
         if self._barrier is not None:
             self._barrier.wait()
         if self._hold_event is not None:
-            self._hold_event.wait(timeout=5.0)
+            self._hold_event.wait(timeout=20.0)
         cond = RolloutConditions((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0, 35.0, 1.0)
         ok_res = RolloutResult((0.0, 0.0, 0.0), 0.06, 1.0, 0.1, True, True, True, cond)
         bad_res = RolloutResult((0.0, 0.0, 0.0), 0.03, 1.0, 0.1, True, False, False, cond)

@@ -285,10 +285,10 @@ class GraspGate:
         episode_uid: str | None,
     ) -> GraspGateVerdict:
         keyframes = self._render(snapshots, summary.bay_id, model)
-        audit_frames = self._render(audit_snapshots, summary.bay_id, model)
         verdict = self.evaluate(keyframes, summary)
         if self.audit_reviewer is not None:
             try:
+                audit_frames = self._render(audit_snapshots, summary.bay_id, model)
                 self.audit_reviewer.submit(
                     bay=summary.bay_id,
                     skill_id=summary.skill_id,

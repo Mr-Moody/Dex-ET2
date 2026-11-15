@@ -24,6 +24,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -421,10 +422,13 @@ for (const m of indexHtml.matchAll(/<([a-zA-Z0-9-]+)([^>]*\bid="([^"]+)"[^>]*)>/
 
 
 def _run_node_dom_script(js_body: str) -> dict[str, Any]:
+    node_bin = shutil.which("node") or shutil.which("nodejs")
+    if node_bin is None:
+        pytest.skip("Node.js binary not installed")
     env = dict(os.environ)
     env["WEB_DIR"] = str(WEB_DIR)
     proc = subprocess.run(
-        ["/usr/bin/node", "-e", _NODE_MULTI_DOM_HARNESS + "\n" + js_body],
+        [node_bin, "-e", _NODE_MULTI_DOM_HARNESS + "\n" + js_body],
         env=env,
         capture_output=True,
         text=True,

@@ -4,7 +4,7 @@ Offline by default (`RUN_LIVE_GEMINI != "1"`):
 - All 10 Tier 1 & Tier 2 F15 harness, `.env` discovery, secret-redaction, egress-blocker, and
   skip-guard tests run and verify offline determinism with 0 external network calls.
 - The 3 live Gemini API latency & verdict acceptance tests (`RUN_LIVE_GEMINI=1` against
-  `/home/ethan/Documents/UCL_repos/Junction/.env`) skip cleanly when `RUN_LIVE_GEMINI != "1"` and
+  the main checkout `.env`) skip cleanly when `RUN_LIVE_GEMINI != "1"` and
   execute live end-to-end checks when `RUN_LIVE_GEMINI=1`:
   1. Tier 1 `gemini-3.8-flash-lite-tts` (`Kore`) SSE streaming `< 1.5 s` TTFA over persistent
      `IPv4HTTPSConnection` (`AF_INET` + `keep-alive` reuse).

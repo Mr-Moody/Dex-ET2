@@ -18,6 +18,7 @@ import argparse
 import ast
 import dataclasses
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -108,18 +109,24 @@ def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
     return proc.stdout.strip()
 
 
-def _branch_base() -> str:
+def _branch_base() -> str | None:
     """Where this branch leaves ``origin/main`` (or ``main``): only commits above it are ours.
 
     A fixed historic commit would also pull in already-merged ``main`` history (other teams'
-    commits and their trailers), which this branch cannot change.
+    commits and their trailers), which this branch cannot change. Returns ``None`` in shallow
+    CI checkouts where neither ``main`` nor ``8898b76`` is fetched locally.
     """
     for ref in ("origin/main", "main"):
         try:
             return _git("merge-base", "HEAD", ref)
         except subprocess.CalledProcessError:
             continue
-    return "8898b76"
+    proc = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "-e", "8898b76^{commit}"],
+        capture_output=True,
+        timeout=10,
+    )
+    return "8898b76" if proc.returncode == 0 else None
 
 
 def _resolve_atc_parser() -> argparse.ArgumentParser:
@@ -172,6 +179,9 @@ class TestFeature1WorktreeAndRepoIsolationTier1:
     """Tier 1 category-partition tests for F1 (worktree setup, symlinks, golden, commits)."""
 
     def test_f1_t1_running_inside_dedicated_git_worktree_not_main_checkout(self) -> None:
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        if os.environ.get("GITHUB_ACTIONS") == "true" or branch == "main":
+            pytest.skip("Single-checkout CI runner or main branch")
         common_dir = Path(_git("rev-parse", "--path-format=absolute", "--git-common-dir"))
         git_dir = Path(_git("rev-parse", "--path-format=absolute", "--git-dir"))
         toplevel = Path(_git("rev-parse", "--show-toplevel")).resolve()
@@ -183,6 +193,10 @@ class TestFeature1WorktreeAndRepoIsolationTier1:
 
     def test_f1_t1_branch_naming_follows_kebab_convention_without_task_ids(self) -> None:
         branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        if branch == "HEAD":
+            branch = os.environ.get("GITHUB_HEAD_REF", "").strip() or "HEAD"
+        if branch in ("HEAD", "main"):
+            pytest.skip(f"Not on a feature branch ({branch!r})")
         assert "/" in branch, f"Expected <type>/<kebab-summary> branch, got {branch!r}"
         assert not re.search(r"\bT-\d+\b", branch, re.IGNORECASE), (
             f"Branch name {branch!r} must not contain T-NNN task IDs per CLAUDE.md"
@@ -190,6 +204,13 @@ class TestFeature1WorktreeAndRepoIsolationTier1:
         assert not re.search(r"wave|agent|claude", branch, re.IGNORECASE)
 
     def test_f1_t1_worktree_descends_from_baseline_commit_8898b76(self) -> None:
+        has_base = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", "8898b76^{commit}"],
+            capture_output=True,
+            timeout=10,
+        )
+        if has_base.returncode != 0:
+            pytest.skip("Baseline commit 8898b76 not fetched in shallow checkout")
         proc = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", "8898b76", "HEAD"],
             capture_output=True,
@@ -222,7 +243,10 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
     """Tier 2 boundary & negative tests for F1 (forbidden files, trailers, scopes, secrets)."""
 
     def test_f1_t2_zero_modifications_to_t194_t195_and_locked_files_since_base(self) -> None:
-        committed_changed = set(_git("diff", "--name-only", f"{_branch_base()}..HEAD").splitlines())
+        base = _branch_base()
+        if base is None:
+            pytest.skip("Shallow checkout without base ref")
+        committed_changed = set(_git("diff", "--name-only", f"{base}..HEAD").splitlines())
         working_changed = set(_git("diff", "--name-only", "HEAD").splitlines())
         staged_changed = set(_git("diff", "--cached", "--name-only").splitlines())
         all_changed = committed_changed | working_changed | staged_changed
@@ -232,10 +256,11 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
         )
 
     def test_f1_t2_commits_above_base_use_allowed_conventional_scopes_only(self) -> None:
+        base = _branch_base()
+        if base is None:
+            pytest.skip("Shallow checkout without base ref")
         subjects = [
-            line
-            for line in _git("log", "--format=%s", f"{_branch_base()}..HEAD").splitlines()
-            if line
+            line for line in _git("log", "--format=%s", f"{base}..HEAD").splitlines() if line
         ]
         for subj in subjects:
             m = CONVENTIONAL_COMMIT_RE.match(subj)
@@ -249,7 +274,10 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
             )
 
     def test_f1_t2_commits_above_base_contain_zero_ai_attribution_trailers(self) -> None:
-        full_log = _git("log", "--format=%B", f"{_branch_base()}..HEAD")
+        base = _branch_base()
+        if base is None:
+            pytest.skip("Shallow checkout without base ref")
+        full_log = _git("log", "--format=%B", f"{base}..HEAD")
         assert not re.search(r"Co-Authored-By:", full_log, re.IGNORECASE), (
             "Commits must NOT include Co-Authored-By trailers"
         )
