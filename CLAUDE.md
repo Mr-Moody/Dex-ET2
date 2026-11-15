@@ -51,3 +51,15 @@ Key rules for parallel agents on the `T-100`–`T-160` track:
 Spec `docs/superpowers/specs/2026-11-14-act-recovery-policy-design.md`, plan
 `docs/superpowers/plans/2026-11-14-act-recovery-plan.md` (Global Constraints and File Ownership
 Map there). `T-190` lands first; `recovery_backend: dmp` must stay byte-for-byte today's behaviour.
+
+## Test Hygiene (Strict — ADR 0003)
+
+See `docs/adr/0003-lean-behavioral-test-suite.md`. All agents must obey these hard limits:
+
+1. **Hard budget:** Keep `tests/` at **<= 12 `test_*.py` files** (plus `tests/conftest.py`) and **< 4,000 LOC** total. Never create a new `test_*.py` file for a task or PR without explicit user approval; add concise behavioral cases to the existing subsystem test file instead.
+2. **Behavioral contracts only:** Test math/physics invariants (quaternions, IK, DMP, Mahalanobis, torque bounds), wire/serialization protocols, state-machine transitions, safety latches, and CLI/gate contracts.
+3. **Forbidden patterns:**
+   - Never read or regex-match `.py`, `.html`, `.css`, or `.js` source files or run `ast.parse()` in tests, and never add `// <marker>` comments or test-only CLI flags to `src/`.
+   - Never instantiate classes via `__new__` or reach into `_private` attributes (`reportPrivateUsage`).
+   - Never write unit tests for `@dataclass` defaults, `Enum` values, module constants, UI copy strings, or mocked subprocess command lines (`nmcli`, `ip`, `tts`).
+4. **Shared fixtures:** Reuse `needs_models`, `models_present`, `RecordingComplianceSink`, `NullReasoner`, `offscreen_render_ok`, `inspire_spec`, and `unoq_client` from `tests/conftest.py` instead of redefining local copies.

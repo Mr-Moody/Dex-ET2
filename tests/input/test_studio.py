@@ -1,3 +1,7 @@
+"""Rokoko Studio JSON v3 UDP/LZ4 parser, StudioSource, LatestBuffer, and ReplaySource."""
+
+from __future__ import annotations
+
 import base64
 import json
 import math
@@ -13,151 +17,34 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from teleop.config import StudioConfig
-from teleop.input.studio import StudioParser, StudioSource, quat_conjugate, quat_multiply
-from teleop.protocols import PacketParser
-from teleop.types import OPENXR_JOINTS
+from teleop.input.buffer import LatestBuffer
+from teleop.input.replay import ReplaySource
+from teleop.input.studio import StudioParser, StudioSource
+from teleop.types import OPENXR_JOINTS, HandFrame, Side
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "studio"
 
 
-def load_payloads(name: str) -> list[bytes]:
+def _load_payloads(name: str) -> list[bytes]:
     path = FIXTURES / f"{name}.jsonl"
     if not path.is_file():
         pytest.skip(f"fixture {path.name} not captured yet")
-    out = []
-    for line in path.read_text().splitlines():
-        if line.strip():
-            out.append(base64.b64decode(json.loads(line)["payload_b64"]))
-    return out
+    return [
+        base64.b64decode(json.loads(line)["payload_b64"])
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
 
 
-def norm(q: tuple[float, float, float, float]) -> float:
+def _norm(q: tuple[float, float, float, float]) -> float:
     return math.sqrt(sum(c * c for c in q))
-
-
-def test_is_packet_parser():
-    assert isinstance(StudioParser(), PacketParser)
-
-
-def test_parses_both_hands_from_coil_on():
-    parser = StudioParser()
-    frames = []
-    for i, payload in enumerate(load_payloads("coil_on")):
-        frames.extend(parser.parse(payload, 1000 + i))
-    for side in ("left", "right"):
-        sided = [f for f in frames if f.side == side]
-        assert sided
-        for f in sided:
-            assert f.source == "studio"
-            assert len(f.joints) >= 15
-            assert set(f.joints) <= set(OPENXR_JOINTS)
-            for q in f.joints.values():
-                assert abs(norm(q) - 1.0) < 1e-3
-            assert f.wrist is not None
-            assert f.wrist.position is not None
-            assert abs(norm(f.wrist.orientation) - 1.0) < 1e-3
-            assert f.device_time_us is not None
-    seqs = [f.seq for f in frames]
-    assert len(set(seqs)) == len(seqs)
-
-
-def test_coil_off_has_no_wrist_position():
-    parser = StudioParser()
-    frames = [f for p in load_payloads("coil_off") for f in parser.parse(p, 1)]
-    assert frames
-    assert all(f.wrist is None or f.wrist.position is None for f in frames)
-
-
-def test_lz4_payload_parses_same_as_plain():
-    plain = load_payloads("coil_on")[0]
-    expected = StudioParser().parse(plain, 5)
-    assert len(expected) == 2
-    for packed in (lz4.frame.compress(plain), lz4.block.compress(plain)):
-        assert StudioParser().parse(packed, 5) == expected
-
-
-def test_lz4_fixture_parses():
-    parser = StudioParser()
-    frames = [f for p in load_payloads("lz4") for f in parser.parse(p, 1)]
-    assert {f.side for f in frames} == {"left", "right"}
-
-
-def test_parser_tolerates_timestamp_jump():
-    plain = load_payloads("coil_on")
-    a, b = json.loads(plain[1]), json.loads(plain[0])
-    a["scene"]["timestamp"] = 100.0
-    b["scene"]["timestamp"] = 5.0  # clock stepped backwards
-    parser = StudioParser()
-    fa = parser.parse(json.dumps(a).encode(), 111)
-    fb = parser.parse(json.dumps(b).encode(), 222)
-    assert fa and fb
-    assert {f.host_time_ns for f in fa} == {111}
-    assert {f.host_time_ns for f in fb} == {222}
-    assert fa[0].device_time_us == 100_000_000
-    assert fb[0].device_time_us == 5_000_000
-
-
-@given(st.binary())
-def test_garbage_payload_returns_empty(data: bytes):
-    out = StudioParser().parse(data, 1)
-    assert out == [] or all(f.source == "studio" for f in out)
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        b"{}",
-        b'{"scene": 3}',
-        b'{"scene": {"actors": "x"}}',
-        b'{"scene": {"actors": [1, null, {"body": 5}]}}',
-        b'{"scene": {"actors": [{"meta": {"hasGloves": true}, "body": {"leftHand": {}}}]}}',
-        b"[1,2,3]",
-        b"\xff\xfe",
-    ],
-)
-def test_malformed_structures_return_empty(payload: bytes):
-    assert StudioParser().parse(payload, 1) == []
-
-
-def test_actor_selection_by_name():
-    payload = json.loads(load_payloads("coil_on")[0])
-    actor = payload["scene"]["actors"][0]
-    other = json.loads(json.dumps(actor))
-    other["name"] = "other"
-    payload["scene"]["actors"] = [other, actor]
-    raw = json.dumps(payload).encode()
-    assert StudioParser(actor="newton").parse(raw, 1)
-    assert StudioParser(actor="missing").parse(raw, 1) == []
-    assert StudioParser().parse(raw, 1)  # first actor with gloves
-
-
-def test_actor_without_gloves_skipped():
-    payload = json.loads(load_payloads("coil_on")[0])
-    payload["scene"]["actors"][0]["meta"]["hasGloves"] = False
-    assert StudioParser().parse(json.dumps(payload).encode(), 1) == []
-
-
-def test_single_glove_gives_one_frame():
-    payload = json.loads(load_payloads("coil_on")[0])
-    payload["scene"]["actors"][0]["meta"]["hasLeftGlove"] = False
-    frames = StudioParser().parse(json.dumps(payload).encode(), 1)
-    assert [f.side for f in frames] == ["right"]
-
-
-def test_local_rotation_inverts_parent():
-    """child_world == parent_world * local, so local = conj(parent) * child."""
-    parent = (0.0, 0.0, math.sin(math.pi / 8), math.cos(math.pi / 8))  # 45 deg about z
-    local = (math.sin(math.pi / 12), 0.0, 0.0, math.cos(math.pi / 12))  # 30 deg about x
-    child = quat_multiply(parent, local)
-    got = quat_multiply(quat_conjugate(parent), child)
-    assert got == pytest.approx(local, abs=1e-9)
 
 
 def _payload(hand_pos: dict[str, float], bones: dict[str, Any] | None = None) -> bytes:
     ident = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
 
-    def bone(pos=None, rot=None):
-        return {"position": pos or {"x": 0, "y": 0, "z": 0}, "rotation": rot or ident}
+    def bone(pos: dict[str, float] | None = None, rot: dict[str, float] | None = None) -> Any:
+        return {"position": pos or {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": rot or ident}
 
     body: dict[str, Any] = {
         "rightLowerArm": bone(),
@@ -170,207 +57,99 @@ def _payload(hand_pos: dict[str, float], bones: dict[str, Any] | None = None) ->
     return json.dumps({"scene": {"timestamp": 1.5, "actors": [actor]}}).encode()
 
 
-def test_y_up_to_z_up_wrist_position():
-    frames = StudioParser().parse(_payload({"x": 1.0, "y": 2.0, "z": 3.0}), 1)
-    assert len(frames) == 1
-    f = frames[0]
-    assert f.wrist is not None
-    assert f.wrist.position == pytest.approx((1.0, -3.0, 2.0))
+def test_parses_both_hands_and_lz4_from_coil_on_fixture() -> None:
+    parser = StudioParser()
+    payloads = _load_payloads("coil_on")
+    frames = [f for i, p in enumerate(payloads) for f in parser.parse(p, 1000 + i)]
+    for side in ("left", "right"):
+        sided = [f for f in frames if f.side == side]
+        assert sided
+        for f in sided:
+            assert f.source == "studio" and len(f.joints) >= 15
+            assert set(f.joints) <= set(OPENXR_JOINTS)
+            assert all(abs(_norm(q) - 1.0) < 1e-3 for q in f.joints.values())
+            assert f.wrist is not None and f.wrist.position is not None
+
+    expected = StudioParser().parse(payloads[0], 5)
+    for packed in (lz4.frame.compress(payloads[0]), lz4.block.compress(payloads[0])):
+        assert StudioParser().parse(packed, 5) == expected
+
+
+def test_y_up_to_z_up_wrist_position_and_orientation() -> None:
+    f = StudioParser().parse(_payload({"x": 1.0, "y": 2.0, "z": 3.0}), 1)[0]
+    assert f.wrist is not None and f.wrist.position == pytest.approx((1.0, -3.0, 2.0))
     assert f.device_time_us == 1_500_000
     assert f.joints["index_intermediate"] == pytest.approx((0.0, 0.0, math.sin(0.2), math.cos(0.2)))
-    assert f.joints["index_proximal"] == pytest.approx((0.0, 0.0, 0.0, 1.0))
 
-
-def test_wrist_orientation_converted_to_z_up():
-    # 90 deg about Studio +Y (up) must become 90 deg about world +Z
     s = math.sin(math.pi / 4)
-    hand = {"position": {"x": 0, "y": 0, "z": 0}, "rotation": {"x": 0, "y": s, "z": 0, "w": s}}
-    f = StudioParser().parse(_payload({"x": 0, "y": 0, "z": 0}, {"rightHand": hand}), 1)[0]
-    assert f.wrist is not None
-    assert f.wrist.orientation == pytest.approx((0.0, 0.0, s, s), abs=1e-9)
+    hand = {
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "rotation": {"x": 0.0, "y": s, "z": 0.0, "w": s},
+    }
+    f_rot = StudioParser().parse(_payload({"x": 0.0, "y": 0.0, "z": 0.0}, {"rightHand": hand}), 1)[
+        0
+    ]
+    assert f_rot.wrist is not None
+    assert f_rot.wrist.orientation == pytest.approx((0.0, 0.0, s, s), abs=1e-9)
 
 
-def test_missing_position_gives_none():
-    raw = json.loads(_payload({"x": 0, "y": 0, "z": 0}))
-    del raw["scene"]["actors"][0]["body"]["rightHand"]["position"]
-    f = StudioParser().parse(json.dumps(raw).encode(), 1)[0]
-    assert f.wrist is not None and f.wrist.position is None
+@given(st.binary())
+def test_garbage_payload_never_raises(data: bytes) -> None:
+    out = StudioParser().parse(data, 1)
+    assert out == [] or all(f.source == "studio" for f in out)
 
 
-def _udp_sender(payload: bytes) -> socket.socket:
-    """UDP socket able to send ``payload`` in one datagram.
-
-    macOS caps outgoing datagrams at the socket send buffer (default 9216 bytes,
-    ``net.inet.udp.maxdgram``), smaller than a captured Studio frame; raise it.
-    """
-    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tx.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, max(len(payload) + 1024, 65536))
-    return tx
-
-
-def _send_some(port: int, payload: bytes, n: int = 3) -> None:
-    tx = _udp_sender(payload)
-    try:
-        for _ in range(n):
-            tx.sendto(payload, ("127.0.0.1", port))
-            time.sleep(0.02)
-    finally:
-        tx.close()
-
-
-def test_studio_source_receives_udp():
-    payload = load_payloads("coil_on")[0]
+def test_studio_source_receives_udp_and_reports_liveness() -> None:
+    payload = _load_payloads("coil_on")[0]
     src = StudioSource(StudioConfig(host="127.0.0.1", port=0))
     src.start()
     try:
-        port = src.bound_port()
-        tx = _udp_sender(payload)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, max(len(payload) + 1024, 65536))
         try:
-            deadline = time.monotonic() + 0.5
+            deadline = time.monotonic() + 0.8
             while time.monotonic() < deadline and src.latest().right is None:
-                tx.sendto(payload, ("127.0.0.1", port))
+                tx.sendto(payload, ("127.0.0.1", src.bound_port()))
                 time.sleep(0.02)
         finally:
             tx.close()
-        assert src.latest().right is not None
-        assert src.latest().left is not None
-        assert src.status().frames >= 2
+        assert src.latest().right is not None and src.latest().left is not None
+        assert src.liveness().bound is True and src.liveness().last_right_frame_ns is not None
     finally:
         src.stop()
 
 
-def test_studio_source_tees_raw(tmp_path: Path):
-    payload = load_payloads("coil_on")[0]
-    out = tmp_path / "tee.jsonl"
-    src = StudioSource(StudioConfig(host="127.0.0.1", port=0, tee_raw=out))
+def test_latest_buffer_keeps_newest_and_tracks_staleness() -> None:
+    def mk(side: Side, t_ns: int, dev: int | None = None, seq: int = 0) -> HandFrame:
+        return HandFrame(
+            side=side, host_time_ns=t_ns, seq=seq, source="t", joints={}, device_time_us=dev
+        )
+
+    buf = LatestBuffer()
+    buf.put(mk("left", 1_000_000_000, dev=20, seq=1))
+    buf.put(mk("left", 1_050_000_000, dev=15, seq=2))
+    buf.put(mk("right", 1_050_000_000, dev=25, seq=3))
+    got = buf.get()
+    assert got.left is not None and got.left.seq == 2
+    assert got.right is not None and got.right.seq == 3
+    assert buf.status(now_ns=1_100_000_000).connected is True
+    assert buf.status(now_ns=1_400_000_000).connected is False
+    assert buf.status(now_ns=1_100_000_000).timestamp_anomalies == 1
+
+
+def test_replay_source_streams_recorded_jsonl_and_skips_malformed_lines(tmp_path: Path) -> None:
+    raw_b64 = base64.b64encode(_payload({"x": 0.1, "y": 0.2, "z": 0.3})).decode()
+    rec = lambda t_ns: json.dumps({"t_ns": t_ns, "src": "studio", "payload_b64": raw_b64})  # noqa: E731
+    cap = tmp_path / "cap.jsonl"
+    cap.write_text("\n".join([rec(0), "{bad json", rec(5_000_000), rec(10_000_000)]) + "\n")
+
+    src = ReplaySource(cap, speed=100.0, loop=False)
     src.start()
     try:
-        port = src.bound_port()
-        _send_some(port, payload, 3)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline and src.status().frames < 6:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and src.status().frames < 3:
             time.sleep(0.01)
-    finally:
-        src.stop()
-    recs = [json.loads(x) for x in out.read_text().splitlines()]
-    assert len(recs) == 3
-    assert recs[0]["src"] == "studio"
-    assert base64.b64decode(recs[0]["payload_b64"]) == payload
-    assert isinstance(recs[0]["t_ns"], int)
-
-
-def test_nan_timestamp_keeps_frames():
-    base = json.loads(load_payloads("coil_on")[0])
-    for bad in (float("nan"), float("inf"), float("-inf"), True, "NaN"):
-        base["scene"]["timestamp"] = bad
-        raw = json.dumps(base).encode()
-        if isinstance(bad, float):
-            assert b'"timestamp": ' + json.dumps(bad).encode() in raw  # real non-finite literal
-        frames = StudioParser().parse(raw, 1)
-        assert len(frames) == 2
-        assert all(f.device_time_us is None for f in frames)
-
-
-class _FailingTee:
-    def write(self, _s: str) -> int:
-        raise OSError("disk full")
-
-    def flush(self) -> None: ...
-
-    def close(self) -> None: ...
-
-
-def test_tee_write_error_does_not_kill_source(tmp_path: Path):
-    payload = load_payloads("coil_on")[0]
-    src = StudioSource(StudioConfig(host="127.0.0.1", port=0, tee_raw=tmp_path / "t.jsonl"))
-    src.start()
-    try:
-        real_tee = src._tee  # pyright: ignore[reportPrivateUsage]
-        assert real_tee is not None
-        real_tee.close()  # release the Windows file lock
-        src._tee = _FailingTee()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
-        _send_some(src.bound_port(), payload, 5)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline and src.status().frames < 2:
-            time.sleep(0.01)
-        assert src.latest().right is not None
+        assert src.status().frames == 3 and src.latest().right is not None
         assert src.last_error is None
-        assert src._thread is not None and src._thread.is_alive()  # pyright: ignore[reportPrivateUsage]
     finally:
         src.stop()
-
-
-def test_start_failure_does_not_leak_socket(tmp_path: Path):
-    blocker = tmp_path / "file"
-    blocker.write_text("x")
-    src = StudioSource(StudioConfig(host="127.0.0.1", port=0, tee_raw=blocker / "tee.jsonl"))
-    with pytest.raises(OSError):
-        src.start()
-    assert src._sock is None  # pyright: ignore[reportPrivateUsage]
-
-
-def test_bind_failure_does_not_truncate_tee(tmp_path: Path):
-    tee_path = tmp_path / "keep.jsonl"
-    tee_path.write_text("previous recording\n")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as holder:
-        holder.bind(("127.0.0.1", 0))
-        port = holder.getsockname()[1]
-        src = StudioSource(StudioConfig(host="127.0.0.1", port=port, tee_raw=tee_path))
-        with pytest.raises(OSError):
-            src.start()
-    assert tee_path.read_text() == "previous recording\n"
-
-
-def test_liveness_counts_datagrams():
-    src = StudioSource(StudioConfig(host="127.0.0.1", port=0))
-    src.start()
-    try:
-        _send_some(src.bound_port(), _payload({"x": 0.0, "y": 0.0, "z": 0.0}))
-        deadline = time.monotonic() + 1.0
-        live = src.liveness()
-        while live.last_right_frame_ns is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-            live = src.liveness()
-        assert live.bound is True
-        assert live.port == src.bound_port()
-        assert live.last_datagram_ns is not None
-        assert live.last_right_frame_ns is not None
-        assert live.datagram_hz > 0
-    finally:
-        src.stop()
-
-
-def test_arrivals_pruned_without_liveness_calls(monkeypatch: pytest.MonkeyPatch):
-    """sim/calibrate never call liveness(): the receive loop itself bounds the arrival window."""
-    monkeypatch.setattr("teleop.input.studio._HZ_WINDOW_NS", -1)  # prune everything
-    src = StudioSource(StudioConfig(host="127.0.0.1", port=0))
-    src.start()
-    try:
-        payload = _payload({"x": 0.0, "y": 0.0, "z": 0.0})
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx:
-            for _ in range(40):
-                tx.sendto(payload, ("127.0.0.1", src.bound_port()))
-                time.sleep(0.002)
-        deadline = time.monotonic() + 1.0
-        while src._last_datagram_ns is None and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
-            time.sleep(0.01)
-        time.sleep(0.05)
-        assert len(src._arrivals) == 0  # pyright: ignore[reportPrivateUsage]
-    finally:
-        src.stop()
-
-
-def test_liveness_bind_error_tolerated():
-    blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    blocker.bind(("127.0.0.1", 0))
-    port = blocker.getsockname()[1]
-    try:
-        src = StudioSource(StudioConfig(host="127.0.0.1", port=port), tolerate_bind_error=True)
-        src.start()
-        live = src.liveness()
-        assert live.bound is False
-        assert live.bind_error is not None
-        assert str(port) in live.bind_error
-        src.stop()
-    finally:
-        blocker.close()

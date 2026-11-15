@@ -154,7 +154,7 @@ def cmd_list(root: Path, status: str | None, ready: bool) -> int:
     return 0
 
 
-def cmd_claim(root: Path, tid: str, agent: str, fetch: bool) -> int:
+def cmd_claim(root: Path, tid: str, agent: str, fetch: bool = True) -> int:
     tasks = load_tasks(root / "tasks")
     task = _find(tasks, tid)
     if task is None:
@@ -243,7 +243,6 @@ def main(argv: list[str] | None = None) -> int:
     cl = sub.add_parser("claim")
     cl.add_argument("id")
     cl.add_argument("--agent", required=True)
-    cl.add_argument("--no-fetch", action="store_true", help=argparse.SUPPRESS)  # tests only
     sub.add_parser("release").add_argument("id")
     st = sub.add_parser("status")
     st.add_argument("id")
@@ -255,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         case "list":
             return cmd_list(root, a.status, a.ready)
         case "claim":
-            return cmd_claim(root, a.id, a.agent, not a.no_fetch)
+            return cmd_claim(root, a.id, a.agent)
         case "release":
             return cmd_release(root, a.id)
         case "status":
