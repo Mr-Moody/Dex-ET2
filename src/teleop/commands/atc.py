@@ -45,6 +45,7 @@ import yaml
 
 from teleop.app import make_source
 from teleop.atc.coordinator import DEFAULT_REALISM, OperatorInput
+from teleop.atc.glove_filter import GloveInputFilter
 from teleop.atc.glove_select import SelectingGlove
 from teleop.atc.hud import hud_lines, hud_overlays
 from teleop.atc.recovery import RecoveryBackend
@@ -122,6 +123,7 @@ class AtcConfig:
     realism: float = DEFAULT_REALISM  # latch-pose error and gate randomization scale (0: off)
     gate_pass_min: int = GATE_PASS_MIN  # randomized skill gate: deploy at >= N of 20
     dummy_glove: bool = False  # TODO(rokoko-gloves-swap): temporary dummy UDP/UI operator
+    glove_filter: bool = True  # 1-Euro smoothing of the glove wrist pose and finger targets
 
 
 _PATH_FIELDS = {"replay_file", "calibration", "act_checkpoint", "record_episodes"}
@@ -205,12 +207,15 @@ class GloveOperator:
         *,
         hand: HandSpec | None = None,
         ctrlrange: Mapping[str, tuple[float, float]] | None = None,
+        smoothing: GloveInputFilter | None = None,
     ) -> None:
         self.source = source
         self.wrist = wrist
         self.retargeter = retargeter
         self.hand = hand
         self.ctrlrange = dict(ctrlrange) if ctrlrange is not None else None
+        self.smoothing = smoothing
+        self._smoothed_for: Retargeter | None = None
 
     def recalibrate(self, calib: Calibration) -> set[tuple[Side, str]]:
         """Swap in a retargeter built from ``calib``; returns the actuators left on defaults.
@@ -255,14 +260,25 @@ class GloveOperator:
             cast("Retargeter", retarget_cls(hand, {"right": ranges}, calib)),
             hand=hand,
             ctrlrange=ranges,
+            smoothing=GloveInputFilter() if cfg.glove_filter else None,
         )
 
     def latest(self) -> OperatorInput | None:
         frame = self.source.latest().right
         if frame is None:
             return None
-        targets = self.retargeter.retarget(frame).positions
-        return OperatorInput(self.wrist.wrist(frame).pose, dict(targets))
+        retargeter = self.retargeter
+        targets = retargeter.retarget(frame).positions
+        wrist = self.wrist.wrist(frame).pose
+        if self.smoothing is None:
+            return OperatorInput(wrist, dict(targets))
+        if retargeter is not self._smoothed_for:
+            # A recalibration swapped the retargeter (from the console thread): the finger
+            # targets jump to the new ranges, so restart the filters rather than glide there.
+            self.smoothing.reset()
+            self._smoothed_for = retargeter
+        wrist, smoothed = self.smoothing.step(frame, wrist, targets)
+        return OperatorInput(wrist, smoothed)
 
     @contextlib.contextmanager
     def running(self) -> Generator[GloveOperator]:
