@@ -15,13 +15,17 @@ Later tasks add their own sections below.
 
 The copilot never controls a robot.
 
-- It never sends key presses or any other control message to the console.
+- It never sends key presses or any other control message to the console. The one thing it
+  writes is display text for the console's Copilot panel (`{"type": "copilot", ...}`, see
+  [Copilot panel](#copilot-panel-t-215)).
 - It never imports `teleop.atc.coordinator`.
 - It never blocks or changes the 60 Hz loop, stall detection, the DMP fit, the 3-rollout gate or
   any safety abort.
 
 The human and the existing gates decide. `tests/copilot/test_gemini.py` checks the package
-source for coordinator imports, `"key"` messages and `send` calls.
+source for coordinator imports, `"key"` messages and `send` calls. The only module allowed a
+`send` is `publish.py`, and `tests/copilot/test_publish.py` checks it can only carry `copilot`
+messages.
 
 ## Setup
 
@@ -449,3 +453,21 @@ OpenAI-compatible `/v1/chat/completions` endpoint.
 | CPU / Intel Iris Xe laptop | `gemma4:e4b` (4-bit) | ~2–5 s (~15–30 tok/s) | ~5–12 s (vision prefill dominates) | The 1 s template is spoken first; text-only calls usually land inside the 8 s budget as an `(update)`, while image calls on CPU may hit the 8 s cut-off. Prefer `--no-images` on CPU. |
 | >= 16 GB NVIDIA GPU (e.g. RTX 4080 / A4000) | `gemma4:12b` (4-bit) or `gemma4:e4b` | ~0.3–0.8 s (~80–140 tok/s) | ~0.7–1.8 s | `e4b` often answers inside 1 s directly; `12b` answers in ~1–2 s, replacing queued templates or printing right after speech starts, well inside the 8 s budget. |
 
+## Copilot panel (T-215)
+
+`python -m teleop.copilot run` also shows every call-out in the fleet ops console, in a
+**Copilot** panel at the top of the rail. The panel is hidden until the first message.
+
+- **What it shows:** per bay, the latest call-out (severity as the row colour, the spoken line,
+  the detail, the time) and, when a review has been sent, the latest verdict (approved, flagged,
+  not enough evidence). Call-outs that refine a template line replace it.
+- **Protocol:** the copilot posts `{"type": "copilot", "bay", "severity", "say", "detail",
+  "source", "verdict"?}` on its console connection. The server validates it (bay 1-4, severity
+  `info`/`attention`/`alarm`, verdict `approve`/`flag`/`insufficient_evidence`, bounded text),
+  adds `seq` and `wall`, keeps the last 20 and sends it to every *other* client. A page that
+  connects or reloads gets the kept messages first. Copilot messages never reach the key handler.
+- **Advisory only:** no key or control message is involved. The page shows the text with
+  `textContent`, never as markup.
+- **Turn it off:** `--no-panel`. If the console is down, messages wait (at most 20) and are sent
+  after the feed reconnects.
+- **Reviews:** the `verdict` field is ready for `T-213`; nothing sends one yet.

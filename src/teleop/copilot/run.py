@@ -6,8 +6,9 @@ first (``uv run teleop atc --source synthetic``), then run this in a second term
 
 Call-outs are spoken with the system voice straight away. ``--gemini-tts`` tries Gemini TTS first
 (the system voice takes over after 1.5 s); live it was slower than that on every line, so it is
-off by default. Without ``GEMINI_API_KEY`` it still runs, with template call-outs only. Advisory
-only: it never sends anything to the console.
+off by default. Without ``GEMINI_API_KEY`` it still runs, with template call-outs only. Call-outs
+also appear in the console page's Copilot panel (``--no-panel`` turns that off). Advisory only:
+the only thing it posts to the console is those display messages, never a key or a control.
 """
 
 from __future__ import annotations
@@ -21,13 +22,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
-from teleop.copilot.callouts import CalloutService, CopilotOutputs
+from teleop.copilot.callouts import Callout, CalloutService, CopilotOutputs
 from teleop.copilot.config import CopilotConfig
 from teleop.copilot.events import EventDetector
 from teleop.copilot.feed import CameraFrame, FeedClient
 from teleop.copilot.frames import FrameStore
 from teleop.copilot.gemini import GeminiClient
 from teleop.copilot.local import LocalModelClient
+from teleop.copilot.publish import DisplayOutbox
 from teleop.copilot.speech import Speaker
 
 DEFAULT_LOG_DIR = Path("runs") / "copilot"
@@ -39,16 +41,23 @@ async def run(
     client: GeminiClient | None,
     speaker: Speaker,
     local_client: LocalModelClient | None = None,
+    outbox: DisplayOutbox | None = None,
 ) -> None:
     store = FrameStore()
     detector = EventDetector()
+
+    def show(callout: Callout) -> None:
+        outputs.callout(callout)
+        if outbox is not None:
+            outbox.post_callout(callout)
+
     service = CalloutService(
         client,
         model=cfg.fast_model,
         local_client=local_client,
         local_model=cfg.local_model,
         thinking_level=cfg.fast_thinking,
-        sink=outputs.callout,
+        sink=show,
         speaker=speaker,
         frame_for=store.latest,
         no_images=cfg.no_images,
@@ -63,7 +72,7 @@ async def run(
     def on_frame(frame: CameraFrame) -> None:
         store.add(frame)
 
-    feed = FeedClient(cfg.console_url, on_telemetry, on_frame)
+    feed = FeedClient(cfg.console_url, on_telemetry, on_frame, outbox=outbox)
     try:
         await feed.run()
     finally:
@@ -80,6 +89,9 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
         "--gemini-tts",
         action="store_true",
         help="speak with Gemini TTS (system voice after 1.5 s); default: system voice at once",
+    )
+    parser.add_argument(
+        "--no-panel", action="store_true", help="do not show call-outs in the console page"
     )
     parser.add_argument("--env-file", help="read this .env instead of discovering one")
     parser.add_argument(
@@ -117,6 +129,7 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
             file=sys.stderr,
         )
     outputs = CopilotOutputs(stdout, Path(args.log_dir))
+    outbox = None if args.no_panel else DisplayOutbox()
     speaker = Speaker(
         client if args.gemini_tts else None,
         tts_model=cfg.tts_model,
@@ -127,11 +140,12 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
     outputs.note(
         f"copilot watching {url}: call-outs {_callout_label(cfg, client, local_client)}, "
         f"speech {_speech_label(cfg, client is not None and args.gemini_tts)}, "
+        f"panel {'off' if outbox is None else 'on'}, "
         f"images {'off' if cfg.no_images else 'on'}, log {outputs.log_path()} (Ctrl+C to stop)"
     )
     try:
         with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(run(cfg, outputs, client, speaker, local_client))
+            asyncio.run(run(cfg, outputs, client, speaker, local_client, outbox))
     finally:
         speaker.close()
     return 0

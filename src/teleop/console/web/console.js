@@ -66,6 +66,8 @@ const ui = {
   lastAuditKey: null,
   telemetry: null,
   lastActionSeq: null, // null until the first telemetry, so a reload does not replay old toasts
+  copilot: [], // relayed copilot messages, oldest first; the server replays them on connect
+  copilotKey: null,
   lastBackendNote: null, // likewise for recovery notes
   briefKey: null,
   // "grid" by default: a stall or rescue never rearranges the cameras on its own. "auto"
@@ -139,6 +141,35 @@ function recoveryToast(prevNote, rec) {
   return { text: note, level: /unavailable|error|failed/i.test(note) ? "warn" : "info" };
 }
 // </recovery>
+
+// <copilot>
+// Call-outs and review verdicts from the advisory copilot process, relayed by the console
+// server ({"type": "copilot", seq, wall, bay, severity, say, detail, source, verdict}). The
+// panel shows the newest of each kind per bay: its latest call-out and its latest review.
+const COPILOT_KEEP = 20;
+const COPILOT_VERDICT_TEXT = {
+  approve: "Review: approved",
+  flag: "Review: flagged",
+  insufficient_evidence: "Review: not enough evidence",
+};
+
+function copilotAdd(history, msg) {
+  return [...history, msg].slice(-COPILOT_KEEP);
+}
+
+function copilotRows(history) {
+  const seen = new Set();
+  const rows = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    const key = `${m.bay == null ? 0 : m.bay}:${m.verdict ? "review" : "callout"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(m);
+  }
+  return rows; // newest first
+}
+// </copilot>
 
 const CAM_BTNS = [
   ["cctv", "CCTV"],
@@ -1284,6 +1315,35 @@ function updateRecovery(t) {
   if (news) toast("Recovery", news.text, news.level);
 }
 
+function updateCopilot() {
+  const rows = copilotRows(ui.copilot);
+  const key = rows.map((m) => m.seq).join(",");
+  if (key === ui.copilotKey) return;
+  ui.copilotKey = key;
+  $("panel-copilot").hidden = !rows.length;
+  const list = $("copilot-list");
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    n.textContent = text;
+    return n;
+  };
+  list.replaceChildren(
+    ...rows.map((m) => {
+      const li = document.createElement("li");
+      li.dataset.severity = m.severity;
+      li.append(el("span", "cop__bay", m.bay == null ? "Fleet" : `Bay ${m.bay}`), el("span", "cop__say", m.say), el("time", "", m.wall || ""));
+      if (m.verdict) {
+        const v = el("span", "cop__verdict", COPILOT_VERDICT_TEXT[m.verdict] || m.verdict);
+        v.dataset.verdict = m.verdict;
+        li.append(v);
+      }
+      if (m.detail) li.append(el("span", "cop__detail", m.detail));
+      return li;
+    })
+  );
+}
+
 function syncViewBar() {
   const t = ui.telemetry;
   const vmode = (t && t.view && t.view.mode) || ui.view.mode;
@@ -1645,6 +1705,8 @@ function connect() {
   ws.onopen = () => {
     backoff = 1000;
     setLink(true);
+    ui.copilot = []; // the server replays its kept messages on every connect
+    updateCopilot();
     sendClient({
       type: "view",
       mode: ui.view.mode,
@@ -1663,6 +1725,9 @@ function connect() {
       if (msg.type === "telemetry") {
         render(msg);
         document.dispatchEvent(new CustomEvent("telemetry", { detail: msg }));
+      } else if (msg.type === "copilot") {
+        ui.copilot = copilotAdd(ui.copilot, msg);
+        updateCopilot();
       }
     } else {
       onFrame(ev.data);

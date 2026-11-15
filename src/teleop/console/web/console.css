@@ -784,6 +784,26 @@ body[data-page="data"] .bar__views { visibility: hidden; }
 .spark.is-low .spark__val { font-weight: 700; }
 .spark.is-standby { color: var(--muted); }
 
+/* copilot panel: advisory call-outs; severity is the row's rule colour, verdict a small label */
+.cop { display: grid; gap: 4px; max-height: 15rem; overflow-y: auto; }
+.cop li {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0 0.6rem; align-items: baseline;
+  padding: 0.3rem 0.5rem; border-left: 3px solid var(--sev, var(--faint)); background: var(--panel-2);
+}
+.cop li[data-severity="attention"] { --sev: var(--queued); }
+.cop li[data-severity="alarm"] { --sev: var(--stalled); }
+.cop__bay { font-size: var(--t-xs); font-weight: 700; color: var(--muted); white-space: nowrap; }
+.cop__say { font-size: var(--t-s); overflow-wrap: anywhere; }
+.cop time { font-size: var(--t-xs); color: var(--muted); }
+.cop__detail { grid-column: 2 / -1; color: var(--muted); font-size: var(--t-xs); overflow-wrap: anywhere; }
+.cop__verdict {
+  grid-column: 2 / -1; justify-self: start; padding: 0 0.35rem; border: 1px solid currentColor;
+  border-radius: 3px; font-size: var(--t-xs); font-weight: 700;
+}
+.cop__verdict[data-verdict="approve"] { color: var(--nominal); }
+.cop__verdict[data-verdict="flag"] { color: var(--stalled); }
+.cop__verdict[data-verdict="insufficient_evidence"] { color: var(--validating); }
+
 .gate { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 0.8rem; align-items: center; }
 .gate__big { grid-row: span 2; font-size: var(--t-xl); font-weight: 300; line-height: 1; }
 .gate__verdict { font-size: var(--t-s); }
