@@ -189,9 +189,15 @@ class PandaDiffIK:
         q_null = self.nullspace_gain * (self.q_home - q) - (
             self.limit_gain * norm_dist / np.maximum(1.0 - norm_dist**2, 0.05)
         )
-        dq = dq_task + null @ q_null
-
+        dq_null = null @ q_null
+        # Cap the nullspace step so it cannot dominate dq_task or ping-pong near singularities.
         step = self.qdot_max * dt
+        max_null = 0.25 * step
+        null_norm = float(np.linalg.norm(dq_null))
+        if null_norm > max_null:
+            dq_null = dq_null * (max_null / null_norm)
+        dq = dq_task + dq_null
+
         q_next = np.clip(q + np.clip(dq, -step, step), self.q_min, self.q_max)
         self._q_cmd = q_next
         return q_next

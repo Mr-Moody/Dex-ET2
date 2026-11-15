@@ -259,11 +259,11 @@ def _rz(a: float) -> FloatArray:
 
 
 ROUTINE = RoutineSpec(
-    yaw=-2.2,
+    yaw=-1.8,
     pitch=0.0,
     roll=-0.4,
-    start_x=-0.0021,
-    y=0.023,
+    start_x=-0.0217,
+    y=0.0399,
     z=0.1163,
     fingers={
         "index": 0.5,
@@ -930,7 +930,7 @@ class AtcCoordinator:
                 bay.move = None
         if bay.hold_pose is None:
             bay.hold_pose = bay.rig.wrist_pose()
-        self._command(bay, bay.hold_pose)
+        self._command(bay, bay.hold_pose, v_cmd=0.0)
 
     def _control(
         self, bay: _Bay, console: ConsoleInputState, operator: OperatorInput | None

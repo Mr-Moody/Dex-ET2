@@ -20,7 +20,7 @@ POSE_SIGMA_YAW_RAD = math.radians(1.5)
 TOUCH_SIGMA_M = 0.001
 MAX_TOUCH_SIGMAS = 4.0
 HOOK_BACK_X_M = HOOK_POS[0] - HOOK_HALF[0]  # hook back face in the latch frame at x_bolt = 0
-INDEX_PAD_RADIUS_M = 0.0144  # index tip site to its hook contact along latch +X (tuned)
+INDEX_PAD_RADIUS_M = 0.0130  # index tip site to its hook contact along latch +X (tuned)
 
 
 @dataclass(frozen=True, slots=True)
