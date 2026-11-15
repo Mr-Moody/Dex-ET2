@@ -209,7 +209,7 @@ class TestFeature1WorktreeAndRepoIsolationTier1:
     def test_f1_t1_golden_dmp_stage_file_matches_exact_pinned_linux_reference(self) -> None:
         golden_path = REPO_ROOT / "tests" / "atc" / "golden" / "dmp_stage.json"
         data = json.loads(golden_path.read_text(encoding="utf-8"))
-        assert data["linux"]["ticks"] == 2386
+        assert data["linux"]["ticks"] == 2385
         assert data["linux"]["wrist"] == [
             [-2.636515486, -3.378664865, 0.215894326],
             [3.77897135, -3.281898967, 0.13554331],

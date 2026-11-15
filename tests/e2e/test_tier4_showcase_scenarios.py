@@ -1,7 +1,7 @@
 """Tier 4 realistic end-to-end hackathon showcase scenarios (offline & loopback wire-protocol).
 
 Scenarios (per `TEST_INFRA.md` § Real-World Application Scenarios):
-1. Offline Headless Showcase & `dmp_stage.json` Golden Determinism (`2386` ticks, exact 9-decimal
+1. Offline Headless Showcase & `dmp_stage.json` Golden Determinism (`2385` ticks, exact 9-decimal
    wrist coordinates, 0 external network sockets).
 2. Full 3-Tier Loopback Showcase: Startup Precache -> Stall Cue -> Clutch Rescue -> Parallel Sim +
    Hydrogen Approve + SSE TTS -> Skill Deployed -> Bay 2 Recovery -> Silent Argon Audit ->
@@ -92,13 +92,13 @@ def _wait(pred: Callable[[], bool], timeout_s: float = 5.0) -> None:
 class TestTier4RealisticShowcaseScenarios:
     """End-to-end hackathon booth showcase scenarios across physics, network, UI, and dataset QC."""
 
-    def test_t4_scenario1_offline_headless_2386_tick_golden_stage_determinism(
+    def test_t4_scenario1_offline_headless_2385_tick_golden_stage_determinism(
         self,
         unoq_client: UnoQClient,
         monkeypatch: pytest.MonkeyPatch,
         block_external_network_egress: list[Any],
     ) -> None:
-        """Scenario 1 (F1, F8, F11, F12): Full 6-beat scripted show matches 2386-tick golden."""
+        """Scenario 1 (F1, F8, F11, F12): Full 6-beat scripted show matches 2385-tick golden."""
         assert_mujoco_models_present()
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("COPILOT_LOCAL_URL", raising=False)
@@ -135,7 +135,7 @@ class TestTier4RealisticShowcaseScenarios:
                 assert ticks == golden[sys.platform]["ticks"]
                 assert wrist == golden[sys.platform]["wrist"]
 
-            # Strictly zero non-loopback network attempts throughout the entire 2386-tick show
+            # Strictly zero non-loopback network attempts throughout the entire 2385-tick show
             external = [
                 a
                 for a in block_external_network_egress

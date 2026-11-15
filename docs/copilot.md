@@ -62,7 +62,7 @@ The hard real-time and control safety boundaries remain strictly enforced:
 - **100% deterministic offline fallback:** When `GEMINI_API_KEY` is unset, `--no-gemini` is passed
   to `teleop atc`, or `--headless` is active (and `COPILOT_LOCAL_URL` is unset), `GraspGate`
   defaults to deterministic physics-only pass-through with zero network calls, preserving the exact
-  `2386`-tick golden trajectory in `tests/atc/test_recovery.py`.
+  `2385`-tick golden trajectory in `tests/atc/test_recovery.py`.
 
 ## Setup
 
@@ -528,7 +528,7 @@ CI, and `--headless` runs remain 100% deterministic:
 3. **Deterministic physics-only** (`--headless`, or `--no-gemini` / unset `GEMINI_API_KEY` when
    `COPILOT_LOCAL_URL` is unset, including all default `pytest` runs): Zero external network calls
    and zero audio subprocesses; `SkillValidator` governs alone (`source="physics_only"`) and
-   `tests/atc/test_recovery.py` preserves its exact `2386`-tick golden trajectory
+   `tests/atc/test_recovery.py` preserves its exact `2385`-tick golden trajectory
    (`tests/atc/golden/dmp_stage.json`).
 
 Example local Gemma setup (e.g. Ollama on `http://127.0.0.1:11434/v1`):

@@ -207,7 +207,8 @@ class CoordinatorConfig:
     gate_deadline_s: float = 10.0
     push_lead_limit_m: float = 0.006  # free slides track ~5 mm behind; a stall stays gentle
     # Clutch teleop target bounds (see ``AtcCoordinator._teleop_target``). The scripted
-    # rescue leads <= 7 mm and 0.033 rad and peaks at an arm torque ratio of 0.47.
+    # rescue leads <= 7 mm and 0.033 rad; its arm torque ratio stays <= 0.36 except two brief
+    # spikes (0.56, 0.62) that each make it yield for a tick (captured in the golden run).
     teleop_lead_m: float = 0.03  # free space: ~0.3 m/s tracking
     teleop_lead_rad: float = 0.15
     teleop_contact_ratio: float = 0.25  # loaded arm: tighten the lead ...
@@ -1037,7 +1038,7 @@ class AtcCoordinator:
         ``teleop_contact_lead_m`` once the last sensed arm torque ratio reaches
         ``teleop_contact_ratio``; from ``teleop_yield_ratio`` the arm yields for a tick (target
         = measured wrist, IK restarted from the measurement) instead of pushing on to the guard.
-        The guard itself is unchanged. The scripted rescue stays inside every bound.
+        The guard itself is unchanged. The scripted rescue yields on two brief torque spikes.
         """
         cfg = self.config
         if bay.arm_ratio >= cfg.teleop_yield_ratio:

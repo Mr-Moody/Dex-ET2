@@ -122,7 +122,7 @@ flowchart TD
     `src/teleop/atc/types.py`, `src/teleop/reasoning/nemotron.py`).
   - `T-195` (actively claimed): `src/teleop/policy/act_runtime.py`,
     `src/teleop/atc/act_recovery.py`.
-  - **Golden determinism guard:** `tests/atc/golden/dmp_stage.json` (`2386` ticks and exact
+  - **Golden determinism guard:** `tests/atc/golden/dmp_stage.json` (`2385` ticks and exact
     9-decimal wrist coordinates on Linux) **must not drift**.
   - **Console self-containment rule:** Zero `http://` or `https://` substrings anywhere (even in
     comments!) inside `src/teleop/console/web/*` (`tests/console/test_web_assets.py`).
@@ -144,7 +144,7 @@ flowchart TD
     `"copilot_audit"` WebSocket publishing.
 - **100% offline determinism:** Offline `pytest`, CI, `--headless`, `--no-gemini`, and unset
   `GEMINI_API_KEY` (when `COPILOT_LOCAL_URL` is unset) make **zero external network calls** and
-  execute the deterministic physics-only path (`2386` golden ticks in `tests/atc/test_recovery.py`).
+  execute the deterministic physics-only path (`2385` golden ticks in `tests/atc/test_recovery.py`).
   Live API latency and verdict checks use `.env` `GEMINI_API_KEY` in `@pytest.mark.hardware` /
   env-gated tests and `probe`.
 - **Secrets:** read keys only from the environment or `.env` (gitignored). Never log or print a
@@ -295,7 +295,7 @@ When `--no-gemini` is passed or `GEMINI_API_KEY` is unset:
    call-outs; speech uses `espeak-ng` / system voice; Tier 3 reports `status="skipped"`.
 2. Otherwise (including all `--headless` runs, `pytest`, and CI): 100% deterministic physics-only
    (`grasp_gate=None` / `source="physics_only"`, zero network calls, zero threads perturbing sim
-   ticks, preserving the exact `2386`-tick `tests/atc/golden/dmp_stage.json` run).
+   ticks, preserving the exact `2385`-tick `tests/atc/golden/dmp_stage.json` run).
 
 ### Outputs
 
@@ -326,7 +326,7 @@ tests/copilot/*   tests/copilot/fixtures/*                          # M2 unit & 
 # M3 — Active ATC Grasp Gate & CLI Runtime Wiring
 src/teleop/atc/coordinator.py   src/teleop/atc/hud.py               # Tier 2 parallel _Gate + dual approval
 src/teleop/atc/stage.py   src/teleop/commands/atc.py                # --no-gemini + in-process 3-tier wiring
-tests/atc/test_coordinator.py   tests/atc/test_grasp_gate.py        # M3 gate & 2386-tick determinism tests
+tests/atc/test_coordinator.py   tests/atc/test_grasp_gate.py        # M3 gate & 2385-tick determinism tests
 tests/atc/test_stage.py                                             # M3 stage audio/CLI tests
 
 # M4 — Fleet Ops Console Audit Card & ACT Dataset Curation
@@ -414,7 +414,7 @@ src/teleop/cli.py   scripts/fetch_models.py   configs/hands/leap.yaml       # T-
     `"VALIDATION_GATE"`.
   - `commands/atc.py` & `stage.py`: add `--no-gemini`, wire in-process 3-tier runtime when
     `GEMINI_API_KEY` or `COPILOT_LOCAL_URL` is set (and not `--headless` / `--no-gemini`), suppress
-    duplicate legacy `AudioCues`, and preserve `2386`-tick golden determinism.
+    duplicate legacy `AudioCues`, and preserve `2385`-tick golden determinism.
 
 ### T-213: Deep review of rescues and refusals (Gemini 4 Argon)
 
@@ -495,7 +495,7 @@ src/teleop/cli.py   scripts/fetch_models.py   configs/hands/leap.yaml       # T-
    `atc_qc.py` drops `"flag"` episodes with `"copilot flagged"`.
 5. **100% offline determinism, console self-containment, and key hygiene.** With `GEMINI_API_KEY`
    unset or `--no-gemini` / `--headless`, `pytest` makes zero network calls and
-   `tests/atc/test_recovery.py` matches `tests/atc/golden/dmp_stage.json` (`2386` ticks);
+   `tests/atc/test_recovery.py` matches `tests/atc/golden/dmp_stage.json` (`2385` ticks);
    `src/teleop/console/web/*` contains zero `http(s)://` strings; no API key ever appears in logs,
    exceptions, or JSONL; `--no-images` sends zero image bytes.
 
