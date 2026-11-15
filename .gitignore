@@ -221,6 +221,7 @@ __marimo__/
 
 # Project
 /data/
+/models/
 /outputs/
 /runs/
 .env
