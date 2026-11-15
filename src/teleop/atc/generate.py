@@ -111,7 +111,7 @@ class _JitteredGlove(ScriptedGlove):
 
 
 class _Counter:
-    """Observer shim: forwards to the sink and counts successful episodes it saved."""
+    """Observer shim: forwards to the sink, saving and counting only successful episodes."""
 
     def __init__(self, inner: object) -> None:
         self.inner = inner
@@ -123,7 +123,9 @@ class _Counter:
     def on_episode_end(self, bay_id: int, success: bool, aborted_reason: str | None) -> None:
         if success:
             self.successes += 1
-        self.inner.on_episode_end(bay_id, success, aborted_reason)  # type: ignore[attr-defined]
+            self.inner.on_episode_end(bay_id, success, aborted_reason)  # type: ignore[attr-defined]
+        else:  # QC would drop it: skip the camera render and video encode
+            self.inner.drop(bay_id)  # type: ignore[attr-defined]
 
 
 def _between_cycles(controller: StageController, bay: int) -> bool:

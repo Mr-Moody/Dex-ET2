@@ -258,6 +258,10 @@ class EpisodeSink:
             self._pending += 1
         self._queue.put(_Finished(ep, meta))
 
+    def drop(self, bay_id: int) -> None:
+        """Forget the bay's open episode without saving it (saves the render and encode)."""
+        self._open.pop(bay_id, None)
+
     def close(self) -> None:
         """Drop open episodes, write the finished ones and finalise the dataset."""
         if self._closed:
