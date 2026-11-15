@@ -784,7 +784,29 @@ body[data-page="data"] .bar__views { visibility: hidden; }
 .spark.is-low .spark__val { font-weight: 700; }
 .spark.is-standby { color: var(--muted); }
 
-/* copilot panel: advisory call-outs; severity is the row's rule colour, verdict a small label */
+/* copilot section: one heading, then a fold per copilot part (call-outs, second opinion) */
+.copilot__fold + .copilot__fold { margin-top: 0.35rem; }
+.copilot__fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  color: var(--muted);
+}
+.copilot__fold > summary::-webkit-details-marker { display: none; }
+.copilot__fold > summary::before { content: "+"; width: 0.8em; font-weight: 700; }
+.copilot__fold[open] > summary::before { content: "−"; }
+.copilot__fold > summary:hover { color: var(--text); }
+.copilot__fold[open] > summary { margin-bottom: 0.3rem; }
+/* the fold's summary already names the card */
+.copilot .argon { padding: 0.1rem 0 0.2rem 0.6rem; }
+.copilot .argon__name { display: none; }
+
+/* copilot call-outs; severity is the row's rule colour, verdict a small label */
 .cop { display: grid; gap: 4px; max-height: 15rem; overflow-y: auto; }
 .cop li {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0 0.6rem; align-items: baseline;
