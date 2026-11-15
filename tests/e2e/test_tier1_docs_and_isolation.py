@@ -56,7 +56,8 @@ FORBIDDEN_T194_T195_AND_LOCKED_FILES: tuple[str, ...] = (
     ".env.example",
     ".pre-commit-config.yaml",
     "src/teleop/compliance/solana.py",
-    "tests/atc/golden/dmp_stage.json",
+    # Not tests/atc/golden/dmp_stage.json: test_recovery.py guards it, and it may be recaptured
+    # when the show changes on purpose (it was after #92's clutch yield).
 )
 
 ALLOWED_COMMIT_SCOPES: frozenset[str] = frozenset(

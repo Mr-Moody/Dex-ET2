@@ -26,13 +26,14 @@ Plan and task list: `docs/superpowers/plans/2026-11-14-operator-copilot-plan.md`
   writes is display text for the console's Copilot panel (`{"type": "copilot", ...}`, see
   [Copilot panel](#copilot-panel-t-215)).
 - It never imports `teleop.atc.coordinator`.
-- It never blocks or changes the 60 Hz loop, stall detection, the DMP fit, the 3-rollout gate or
-  any safety abort.
+- It never blocks or changes the 60 Hz loop, stall detection, the DMP fit or any safety abort.
+- The one exception is skill promotion: the Tier 2 grasp gate can withhold a skill the rollouts
+  passed (see [Active grasp gating](#active-grasp-gating-and-retained-safety-boundaries)).
 
-The human and the existing gates decide. `tests/copilot/test_gemini.py` checks the package
-source for coordinator imports, `"key"` messages and `send` calls. The only module allowed a
-`send` is `publish.py`, and `tests/copilot/test_publish.py` checks it can only carry `copilot`
-messages.
+The operator, the rollouts and (for skill promotion) the grasp gate decide.
+`tests/copilot/test_gemini.py` checks the package source for coordinator or stage imports,
+`.on_key` calls and `"key"` messages. Display sends (`copilot`, `copilot_audit`) are allowed, and
+`tests/copilot/test_publish.py` checks `publish.py` can only carry `copilot` messages.
 
 ## Active grasp gating and retained safety boundaries
 
