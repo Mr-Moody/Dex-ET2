@@ -215,6 +215,7 @@ class ConsoleInputState:
     fault_rig_latched: bool = False
     timestamp_ns: int = 0  # time.monotonic_ns() of the last change
     powered_off: frozenset[int] = frozenset()  # bays whose power the E-stop cut (latched)
+    selected_bay_timestamp_ns: int | None = None  # last selected_bay change (None: timestamp_ns)
 
     def __post_init__(self) -> None:
         if self.selected_bay is not None:

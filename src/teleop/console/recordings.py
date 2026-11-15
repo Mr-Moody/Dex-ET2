@@ -22,7 +22,7 @@ import logging
 import re
 import shutil
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +58,7 @@ class _Desk:
 
     active: _Active | None = None
     saving: dict[str, SinkLike] = field(default_factory=dict[str, SinkLike])
+    recent: list[SinkLike] = field(default_factory=list[SinkLike])
     closing: set[str] = field(default_factory=set[str])  # saving ids with a closer running
     deleting: set[str] = field(default_factory=set[str])
     pending_observer: list[SinkLike | None] = field(default_factory=list[SinkLike | None])
@@ -80,6 +81,17 @@ def _read_episodes(sidecar: Path) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         d = cast("dict[str, Any]", raw)
+        audit_raw = d.get("audit")
+        audit_note: str | None = None
+        if isinstance(audit_raw, dict):
+            audit_map = cast("dict[str, Any]", audit_raw)
+            note_val = audit_map.get("operator_note")
+            if isinstance(note_val, str) and note_val.strip():
+                audit_note = note_val.strip()
+        tag_raw = d.get("dataset_tag")
+        dataset_tag = (
+            tag_raw.strip().lower() if isinstance(tag_raw, str) and tag_raw.strip() else None
+        )
         out.append(
             {
                 "index": d.get("episode_index"),
@@ -90,6 +102,8 @@ def _read_episodes(sidecar: Path) -> list[dict[str, Any]]:
                 "success": bool(d.get("success")),
                 "frames": d.get("frames"),
                 "reason": d.get("aborted_reason"),
+                "dataset_tag": dataset_tag,
+                "audit_note": audit_note,
             }
         )
     return out
@@ -286,10 +300,35 @@ class RecordingDesk:
         except Exception:
             logger.exception("console: finalising recording %s failed", rid)
         finally:
+            with self._lock:
+                self._desk.recent.append(sink)
+                if len(self._desk.recent) > 8:
+                    del self._desk.recent[:-8]
             self.rescan()  # list it as saved before dropping "saving": it never blinks out
             with self._lock:
                 self._desk.saving.pop(rid, None)
                 self._desk.closing.discard(rid)
+
+    def tag_episode(
+        self, uid: str, *, dataset_tag: str, audit: Mapping[str, Any] | None = None
+    ) -> bool:
+        """Forward a Tier 3 Argon ``dataset_tag`` to the active, saving, or recently saved sink."""
+        with self._lock:
+            candidates: list[SinkLike] = []
+            if self._desk.active is not None:
+                candidates.append(self._desk.active.sink)
+            candidates.extend(self._desk.saving.values())
+            candidates.extend(reversed(self._desk.recent))
+        for sink in candidates:
+            tagger = getattr(sink, "tag_episode", None)
+            if callable(tagger):
+                try:
+                    if bool(tagger(uid, dataset_tag=dataset_tag, audit=audit)):
+                        self.rescan()
+                        return True
+                except Exception:
+                    logger.exception("console: tagging episode %s failed", uid)
+        return False
 
     # ------------------------------------------------------------------ scanning
 

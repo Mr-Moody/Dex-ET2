@@ -94,6 +94,10 @@ class PandaDiffIK:
         qdot_max: float = QDOT_MAX,
         q_home: tuple[float, ...] = PANDA_HOME,
         resync_tol: float = 0.1,
+        pos_weight: float = 1.0,
+        rot_weight: float = 0.4,
+        limit_gain: float = 0.25,
+        manip_thresh: float = 0.02,
     ) -> None:
         p = _norm_prefix(bay_prefix)
         self._model = model
@@ -103,6 +107,10 @@ class PandaDiffIK:
         self.nullspace_gain = nullspace_gain
         self.qdot_max = qdot_max
         self.resync_tol = resync_tol
+        self.pos_weight = pos_weight
+        self.rot_weight = rot_weight
+        self.limit_gain = limit_gain
+        self.manip_thresh = manip_thresh
         self.q_home: FloatArray = np.asarray(q_home, dtype=float)
         self.site_id = int(model.site(f"{p}wrist_site").id)
         joints = [model.joint(f"{p}{n}") for n in ARM_JOINTS]
@@ -155,12 +163,41 @@ class PandaDiffIK:
         mj.mj_jacSite(m, s, self._jacp, self._jacr, self.site_id)
         jac = np.vstack([self._jacp[:, self.dof_adr], self._jacr[:, self.dof_adr]])
 
-        jjt = jac @ jac.T + (self.damping**2) * np.eye(6)
-        dq_task = jac.T @ np.linalg.solve(jjt, e)
-        null = np.eye(7) - np.linalg.pinv(jac) @ jac
-        dq = dq_task + null @ (self.nullspace_gain * (self.q_home - q))
+        weights = np.array([self.pos_weight] * 3 + [self.rot_weight] * 3, dtype=float)
+        e_w = weights * e
+        jac_w = weights[:, None] * jac
 
+        # Adaptive damping: low damping in well-conditioned poses, ramping up near singularities.
+        jjt_raw = jac_w @ jac_w.T
+        manip = math.sqrt(max(float(np.linalg.det(jjt_raw)), 0.0))
+        lam_min = min(0.005, self.damping)
+        if manip < self.manip_thresh and self.manip_thresh > 0.0:
+            ratio = 1.0 - manip / self.manip_thresh
+            lam2 = lam_min**2 + (self.damping**2 - lam_min**2) * (ratio**2)
+        else:
+            lam2 = lam_min**2
+
+        jjt = jjt_raw + lam2 * np.eye(6)
+        dq_task = jac_w.T @ np.linalg.solve(jjt, e_w)
+        # Bounded-rcond pinv keeps nullspace orthogonal to jac_w (zero steady-state leakage)
+        # while avoiding rank-blowup near singularities.
+        null = np.eye(7) - np.linalg.pinv(jac_w, rcond=1e-3) @ jac_w
+
+        q_mid = 0.5 * (self.q_min + self.q_max)
+        half_span = np.maximum(0.5 * (self.q_max - self.q_min), 1e-6)
+        norm_dist = (q - q_mid) / half_span
+        q_null = self.nullspace_gain * (self.q_home - q) - (
+            self.limit_gain * norm_dist / np.maximum(1.0 - norm_dist**2, 0.05)
+        )
+        dq_null = null @ q_null
+        # Cap the nullspace step so it cannot dominate dq_task or ping-pong near singularities.
         step = self.qdot_max * dt
+        max_null = 0.25 * step
+        null_norm = float(np.linalg.norm(dq_null))
+        if null_norm > max_null:
+            dq_null = dq_null * (max_null / null_norm)
+        dq = dq_task + dq_null
+
         q_next = np.clip(q + np.clip(dq, -step, step), self.q_min, self.q_max)
         self._q_cmd = q_next
         return q_next

@@ -1,15 +1,18 @@
-"""The copilot's voice: one short queue, Gemini TTS, and the system voice as a fallback.
+"""The copilot's voice: SSE-streamed Gemini TTS, raw PCM pipe playback, pre-cache & fallback.
 
 - **Queue.** At most ``max_waiting`` (2) lines wait. An alarm jumps ahead of every non-alarm
   line; when the queue is full, the oldest non-alarm line is dropped to make room. A line that
   has waited longer than ``stale_after_s`` (10 s) is dropped instead of spoken.
-- **Gemini TTS** turns the line into a WAV, which is played with the first available of
-  ``paplay``, ``aplay``, ``afplay`` or PowerShell ``SoundPlayer``.
-- **Fallback.** If TTS fails or has not answered within ``tts_deadline_s`` (1.5 s), the same line
-  is spoken with the system voice. A late WAV is dropped, never played out of order.
-- **Mute.** With ``mute`` set nothing is spoken; the call-outs are still printed and logged.
+- **Tier 1 Streaming Gemini TTS** streams 24 kHz 16-bit mono ``s16le`` PCM chunks over SSE and
+  pipes them directly into ``paplay --raw`` / ``aplay`` (or wraps them via ``pcm_to_wav`` when
+  raw players are absent). Unary ``Synthesizer.synthesize`` WAV playback remains supported.
+- **Startup Pre-Cache.** :meth:`Speaker.precache_cues` warms the persistent TLS socket and caches
+  fixed deterministic telemetry cues in memory so repeated cues play with zero network calls.
+- **Fallback.** If chunk 1 exceeds ``first_chunk_timeout_s`` (~1.8 s) or TTS fails, the line
+  immediately falls back to ``espeak-ng -s 230`` / the OS system voice.
+- **Mute.** With ``mute`` set nothing is spoken and zero network or audio subprocess calls occur.
 
-Speech runs on its own worker thread, so it never blocks the console feed.
+Speech runs on its own worker thread, so it never blocks the console feed or physics loop.
 """
 
 from __future__ import annotations
@@ -25,37 +28,60 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol, cast
 
-from teleop.copilot.gemini import GeminiError
+from teleop.copilot.gemini import GeminiError, pcm_to_wav
 from teleop.copilot.prompts import Severity
+from teleop.copilot.tts_stream import DEFAULT_FIRST_CHUNK_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
 MAX_WAITING = 2
 STALE_AFTER_S = 10.0
-TTS_DEADLINE_S = 1.5  # Gemini TTS took 4+ s on every live line; see docs/copilot.md
-TTS_REQUEST_TIMEOUT_S = 15.0  # per-socket limit for the late request; the deadline is above
-WAV_CACHE_SIZE = 32  # template lines repeat ("Clutch engaged on bay 1."), so keep their audio
+TTS_DEADLINE_S = 1.5
+TTS_REQUEST_TIMEOUT_S = 15.0
+WAV_CACHE_SIZE = 64
 PLAY_TIMEOUT_S = 30.0
-# Faster than the default voices (which made lines take 3-7 s): System.Speech runs -10..10 (0 is
-# normal, 2 is about a third faster); macOS ``say`` and ``espeak`` default to about 175 words a
-# minute; ``spd-say`` takes -100..100.
 WINDOWS_VOICE_RATE = 2
 WORDS_PER_MINUTE = 230
 SPD_SAY_RATE = 30
+
+DEFAULT_FIXED_CUES: tuple[str, ...] = (
+    "Bay 1 stalled on a flap jam. Rescue needed.",
+    "Bay 1 refused. Jam is out of distribution. Inspect before rescue.",
+    "Clutch engaged on bay 1.",
+    "Bolt cleared on bay 1.",
+    "Clutch released early on bay 1. Bolt not cleared.",
+    "Bay 1 rescue captured. Validating the skill.",
+    "Bay 1 skill passed. Shared with the fleet.",
+    "Bay 1 skill failed the gate. Not shared.",
+    "Bay 2 is reusing a fleet skill.",
+)
 
 Clock = Callable[[], int]
 
 
 class Synthesizer(Protocol):
-    """What the speaker needs from :class:`~teleop.copilot.gemini.GeminiClient`."""
+    """Unary WAV synthesizer protocol (:meth:`GeminiClient.synthesize`)."""
 
     def synthesize(self, text: str, model: str, voice: str, timeout_s: float) -> bytes: ...
+
+
+class StreamingSynthesizer(Protocol):
+    """Tier 1 SSE PCM streaming synthesizer protocol (:class:`GeminiStreamingTTS`)."""
+
+    def stream_pcm(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        first_chunk_timeout_s: float = DEFAULT_FIRST_CHUNK_TIMEOUT_S,
+        total_timeout_s: float = 8.0,
+    ) -> Iterator[bytes]: ...
 
 
 @dataclass(slots=True)
@@ -76,15 +102,33 @@ class Spoken:
     route: str  # "tts", "system", "dropped_stale" or "muted"
     tts_ms: float | None = None
     note: str = ""
-    start_ms: float | None = None  # from queueing the line to the voice or player starting
-    speak_ms: float | None = None  # how long speaking it took
+    start_ms: float | None = None
+    speak_ms: float | None = None
 
 
 # -- players ------------------------------------------------------------------------------------
 
 
+def raw_pcm_player_command() -> list[str] | None:
+    """Command accepting raw 24 kHz 16-bit signed LE mono PCM on ``stdin``, or ``None``."""
+    if platform.system() == "Windows":
+        return None
+    if shutil.which("paplay"):
+        return [
+            "paplay",
+            "--raw",
+            "--format=s16le",
+            "--rate=24000",
+            "--channels=1",
+            "--latency-msec=40",
+        ]
+    if shutil.which("aplay"):
+        return ["aplay", "-q", "-f", "S16_LE", "-r", "24000", "-c", "1", "-t", "raw", "-"]
+    return None
+
+
 def system_voice_command(text: str) -> list[str] | None:
-    """The OS speech command for ``text``, or ``None`` when there is no synthesizer."""
+    """The OS speech command for ``text``, preferring ``espeak-ng -s 230`` on Linux."""
     system = platform.system()
     if system == "Windows":
         quoted = text.replace("'", "''")
@@ -96,11 +140,13 @@ def system_voice_command(text: str) -> list[str] | None:
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
     if system == "Darwin":
         return ["say", "-r", str(WORDS_PER_MINUTE), text]
-    if shutil.which("spd-say"):
-        return ["spd-say", "-r", str(SPD_SAY_RATE), text]
     for tool in ("espeak-ng", "espeak"):
         if shutil.which(tool):
             return [tool, "-s", str(WORDS_PER_MINUTE), text]
+    if shutil.which("spd-say"):
+        return ["spd-say", "-w", "-r", str(SPD_SAY_RATE), text]
+    if shutil.which("say"):
+        return ["say", "-r", str(WORDS_PER_MINUTE), text]
     return None
 
 
@@ -138,6 +184,71 @@ def play_wav(wav: bytes) -> None:
             os.unlink(path)
 
 
+def stream_raw_pcm(
+    chunks: Iterable[bytes],
+    *,
+    cmd: Sequence[str] | None = None,
+    wav_player: Callable[[bytes], None] = play_wav,
+) -> tuple[bytes, str]:
+    """Stream 24 kHz s16le mono PCM chunks to ``paplay``/``aplay``, or fall back to WAV.
+
+    Pulls chunk 1 BEFORE spawning any subprocess so a first-chunk TTS timeout never spawns an
+    empty ``paplay`` pipe. Sets ``proc.stdin = None`` after closing ``stdin`` per Python 3.12
+    ``subprocess`` rules.
+    """
+    it = iter(chunks)
+    first_chunk = b""
+    for candidate in it:
+        if candidate:
+            first_chunk = candidate
+            break
+    if not first_chunk:
+        raise OSError("TTS stream yielded zero audio bytes")
+
+    raw_cmd = list(cmd) if cmd is not None else raw_pcm_player_command()
+    if raw_cmd is None:
+        collected = [first_chunk]
+        for chunk in it:
+            if chunk:
+                collected.append(chunk)
+        pcm_all = b"".join(collected)
+        wav_player(pcm_to_wav(pcm_all))
+        return pcm_all, "wav_fallback"
+
+    collected_pcm: list[bytes] = [first_chunk]
+    proc = subprocess.Popen(
+        raw_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(first_chunk)
+            proc.stdin.flush()
+            for chunk in it:
+                if not chunk:
+                    continue
+                collected_pcm.append(chunk)
+                proc.stdin.write(chunk)
+                proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            logger.debug("copilot raw PCM pipe ended early: %s", exc)
+    finally:
+        if proc.stdin is not None:
+            with contextlib.suppress(BrokenPipeError, OSError):
+                proc.stdin.close()
+            proc.stdin = None
+        try:
+            proc.wait(timeout=PLAY_TIMEOUT_S)
+        except subprocess.SubprocessError:
+            with contextlib.suppress(OSError):
+                proc.kill()
+                proc.wait(timeout=1.0)
+    return b"".join(collected_pcm), "raw_pcm"
+
+
 def speak_system(text: str) -> None:
     """Speak ``text`` with the OS voice (blocking); log it when there is no voice."""
     cmd = system_voice_command(text)
@@ -162,13 +273,7 @@ NEWLINE = bytes([10])
 
 
 class WindowsVoice:
-    """One long-running PowerShell ``SpeechSynthesizer``, fed one line at a time on stdin.
-
-    Starting PowerShell and loading System.Speech takes 1-2 s, so doing it once (at start-up, via
-    :meth:`warm`) instead of per line takes that delay off every call-out. Calls block until the
-    line has been spoken. If the process dies or hangs it is restarted for the next line, and the
-    current line falls back to the one-shot :func:`speak_system`.
-    """
+    """One long-running PowerShell ``SpeechSynthesizer``, fed one line at a time on stdin."""
 
     def __init__(self, line_timeout_s: float = VOICE_LINE_TIMEOUT_S) -> None:
         self._proc: subprocess.Popen[bytes] | None = None
@@ -204,7 +309,7 @@ class WindowsVoice:
         return proc
 
     def __call__(self, text: str) -> None:
-        line = " ".join(text.split())  # one line: the voice reads up to the newline
+        line = " ".join(text.split())
         with self._lock:
             try:
                 proc = self._ensure()
@@ -212,7 +317,7 @@ class WindowsVoice:
                 proc.stdin.write(line.encode("utf-8") + NEWLINE)
                 proc.stdin.flush()
                 while (reply := self._replies.get(timeout=self._timeout_s)) not in ("done", "eof"):
-                    pass  # "ready" from start-up
+                    pass
                 if reply == "done":
                     return
                 raise OSError("voice process exited")
@@ -232,15 +337,26 @@ class WindowsVoice:
             if self._proc is not None and self._proc.stdin is not None:
                 with contextlib.suppress(OSError):
                     self._proc.stdin.close()
+                self._proc.stdin = None
             self._kill()
 
 
 def default_system_voice() -> Callable[[str], None]:
-    """A persistent voice on Windows; elsewhere ``say``/``spd-say`` start fast enough per line."""
+    """A persistent voice on Windows; elsewhere ``espeak-ng``/``say`` start fast per line."""
     return WindowsVoice() if platform.system() == "Windows" else speak_system
 
 
 # -- the speaker --------------------------------------------------------------------------------
+
+
+def _priority_to_severity(priority: int | None, default: Severity) -> Severity:
+    if priority is None or default != "info":
+        return default
+    if priority <= 1:
+        return "alarm"
+    if priority == 2:
+        return "attention"
+    return default
 
 
 class Speaker:
@@ -251,12 +367,15 @@ class Speaker:
 
     def __init__(
         self,
-        synthesizer: Synthesizer | None,
+        synthesizer: Synthesizer | StreamingSynthesizer | None = None,
         *,
-        tts_model: str,
-        voice: str,
+        tts_model: str = "gemini-3.8-flash-lite-tts",
+        voice: str = "Kore",
         mute: bool = False,
+        streaming_tts: StreamingSynthesizer | None = None,
+        first_chunk_timeout_s: float | None = None,
         player: Callable[[bytes], None] = play_wav,
+        raw_player: Callable[[Iterator[bytes]], Any] | None = None,
         system_voice: Callable[[str], None] | None = None,
         clock: Clock = time.monotonic_ns,
         max_waiting: int = MAX_WAITING,
@@ -265,22 +384,37 @@ class Speaker:
         on_spoken: Callable[[Spoken], None] | None = None,
         start: bool = True,
     ) -> None:
-        self._synth = synthesizer
+        resolved_streamer = streaming_tts
+        resolved_synth: Synthesizer | None = None
+        if synthesizer is not None:
+            if resolved_streamer is None and hasattr(synthesizer, "stream_pcm"):
+                resolved_streamer = cast(StreamingSynthesizer, synthesizer)
+            if hasattr(synthesizer, "synthesize"):
+                resolved_synth = cast(Synthesizer, synthesizer)
+        self._synth: Synthesizer | None = resolved_synth
+        self._streamer: StreamingSynthesizer | None = resolved_streamer
         self._tts_model = tts_model
         self._voice = voice
         self.mute = mute
         self._player = player
+        self._raw_player = raw_player
         self._system_voice = system_voice if system_voice is not None else default_system_voice()
         self._clock = clock
         self._max_waiting = max_waiting
         self._stale_ns = round(stale_after_s * 1e9)
         self._tts_deadline_s = tts_deadline_s
+        self._first_chunk_timeout_s = (
+            first_chunk_timeout_s
+            if first_chunk_timeout_s is not None
+            else DEFAULT_FIRST_CHUNK_TIMEOUT_S
+        )
         self._on_spoken = on_spoken
         self._cond = threading.Condition()
         self._queue: list[SpeechItem] = []
         self._next_token = 1
         self._closed = False
         self._cache: OrderedDict[str, bytes] = OrderedDict()
+        self._pcm_cache: OrderedDict[str, bytes] = OrderedDict()
         self._tts_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="copilot-tts")
         self._thread: threading.Thread | None = None
         warm = getattr(self._system_voice, "warm", None)
@@ -290,29 +424,111 @@ class Speaker:
             self._thread = threading.Thread(target=self._loop, name="copilot-speech", daemon=True)
             self._thread.start()
 
+    # -- startup pre-cache --------------------------------------------------------------------
+
+    def precache_cues(self, cues: Sequence[str] | None = None) -> int:
+        """Pre-warm persistent TLS connection and pre-cache fixed cues in memory."""
+        if self.mute or (self._streamer is None and self._synth is None):
+            return 0
+        target_cues = DEFAULT_FIXED_CUES if cues is None else cues
+        if not target_cues:
+            return 0
+
+        if self._streamer is not None:
+            warm_fn = getattr(self._streamer, "warm", None)
+            if callable(warm_fn):
+                with contextlib.suppress(Exception):
+                    warm_fn()
+
+        seen: set[str] = set()
+        cached_now = 0
+        for raw in target_cues:
+            line = raw.strip()
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            with self._cond:
+                if self._closed:
+                    break
+                already = line in self._pcm_cache or line in self._cache
+            if already:
+                continue
+            try:
+                if self._streamer is not None:
+                    pcm = b"".join(
+                        self._streamer.stream_pcm(
+                            line,
+                            voice=self._voice,
+                            first_chunk_timeout_s=self._first_chunk_timeout_s,
+                        )
+                    )
+                    if pcm:
+                        self._remember_pcm(line, pcm)
+                        cached_now += 1
+                elif self._synth is not None:
+                    wav = self._synth.synthesize(
+                        line, self._tts_model, self._voice, TTS_REQUEST_TIMEOUT_S
+                    )
+                    if wav:
+                        self._remember_wav(line, wav)
+                        cached_now += 1
+            except (GeminiError, TimeoutError, OSError, ValueError) as exc:
+                logger.warning("copilot cue pre-cache skipped %r: %s", line, exc)
+        return cached_now
+
+    def precache_cues_async(self, cues: Sequence[str] | None = None) -> threading.Thread | None:
+        """Warm the TLS socket and pre-cache fixed cues on a daemon thread (non-blocking)."""
+        if self.mute or (self._streamer is None and self._synth is None):
+            return None
+        with self._cond:
+            if self._closed:
+                return None
+
+        def _warm_worker() -> None:
+            with contextlib.suppress(Exception):
+                self.precache_cues(cues)
+
+        thread = threading.Thread(target=_warm_worker, name="copilot-tts-precache", daemon=True)
+        thread.start()
+        return thread
+
     # -- queue --------------------------------------------------------------------------------
 
-    def say(self, text: str, *, severity: Severity = "info", bay: int | None = None) -> int:
+    def say(
+        self,
+        text: str,
+        *,
+        severity: Severity = "info",
+        bay: int | None = None,
+        priority: int | None = None,
+    ) -> int:
         """Queue ``text``; returns a token for :meth:`replace`. Never blocks."""
+        eff_severity = _priority_to_severity(priority, severity)
+        muted_cb: Spoken | None = None
         with self._cond:
             token = self._next_token
             self._next_token += 1
-            if self.mute or self._closed or not text.strip():
+            stripped = text.strip()
+            if self._closed or not stripped:
                 return token
-            item = SpeechItem(token, text.strip(), severity, bay, self._clock())
-            if severity == "alarm":
-                at = next((i for i, q in enumerate(self._queue) if q.severity != "alarm"), None)
-                self._queue.insert(len(self._queue) if at is None else at, item)
+            if self.mute:
+                if self._on_spoken is not None:
+                    muted_cb = Spoken(token, stripped, "muted")
             else:
-                self._queue.append(item)
-            while len(self._queue) > self._max_waiting:
-                # the oldest non-alarm line goes (the new one, if it is the only one); with only
-                # alarms waiting, the oldest alarm goes
-                victim = next((q for q in self._queue if q.severity != "alarm"), self._queue[0])
-                self._queue.remove(victim)
-                logger.debug("copilot speech: queue full, dropped %r", victim.text)
-            self._cond.notify()
-            return token
+                item = SpeechItem(token, stripped, eff_severity, bay, self._clock())
+                if eff_severity == "alarm":
+                    at = next((i for i, q in enumerate(self._queue) if q.severity != "alarm"), None)
+                    self._queue.insert(len(self._queue) if at is None else at, item)
+                else:
+                    self._queue.append(item)
+                while len(self._queue) > self._max_waiting:
+                    victim = next((q for q in self._queue if q.severity != "alarm"), self._queue[0])
+                    self._queue.remove(victim)
+                    logger.debug("copilot speech: queue full, dropped %r", victim.text)
+                self._cond.notify()
+        if muted_cb is not None and self._on_spoken is not None:
+            self._on_spoken(muted_cb)
+        return token
 
     def replace(self, token: int, text: str, severity: Severity | None = None) -> bool:
         """Swap the text of a line that is still waiting. ``False`` once it is being spoken."""
@@ -361,7 +577,71 @@ class Speaker:
             self._on_spoken(result)
         return result
 
+    def _play_pcm_stream(self, chunks: Iterator[bytes]) -> tuple[bytes, str]:
+        if self._raw_player is not None:
+            res: object = self._raw_player(chunks)
+            head = cast(tuple[object, ...], res)[0] if isinstance(res, tuple) and res else None
+            if isinstance(head, bytes):
+                return head, "raw_custom"
+            return b"", "raw_custom"
+        return stream_raw_pcm(chunks, wav_player=self._player)
+
+    def _speak_streaming(self, item: SpeechItem) -> Spoken:
+        assert self._streamer is not None
+        with self._cond:
+            cached_pcm = self._pcm_cache.get(item.text)
+            if cached_pcm is not None:
+                self._pcm_cache.move_to_end(item.text)
+        if cached_pcm is not None:
+            started = self._clock()
+            start_ms = (started - item.queued_ns) / 1e6
+            try:
+                self._play_pcm_stream(iter([cached_pcm]))
+                speak_ms = (self._clock() - started) / 1e6
+                return Spoken(item.token, item.text, "tts", 0.0, "cached", start_ms, speak_ms)
+            except OSError as exc:
+                note = f"player failed: {exc}"
+                started = self._clock()
+                self._system_voice(item.text)
+                speak_ms = (self._clock() - started) / 1e6
+                return Spoken(item.token, item.text, "system", 0.0, note, start_ms, speak_ms)
+
+        t0 = self._clock()
+        first_chunk_ns: int | None = None
+
+        def _timed_chunks() -> Iterator[bytes]:
+            nonlocal first_chunk_ns
+            assert self._streamer is not None
+            for chunk in self._streamer.stream_pcm(
+                item.text,
+                voice=self._voice,
+                first_chunk_timeout_s=self._first_chunk_timeout_s,
+            ):
+                if chunk and first_chunk_ns is None:
+                    first_chunk_ns = self._clock()
+                yield chunk
+
+        try:
+            pcm_all, play_note = self._play_pcm_stream(_timed_chunks())
+            if pcm_all:
+                self._remember_pcm(item.text, pcm_all)
+            t_done = self._clock()
+            ttfa_ns = first_chunk_ns if first_chunk_ns is not None else t_done
+            tts_ms = (ttfa_ns - t0) / 1e6
+            start_ms = (ttfa_ns - item.queued_ns) / 1e6
+            speak_ms = (t_done - ttfa_ns) / 1e6
+            return Spoken(item.token, item.text, "tts", tts_ms, play_note, start_ms, speak_ms)
+        except (GeminiError, TimeoutError, OSError, ValueError) as exc:
+            note = f"streaming TTS fallback: {exc}"
+            started = self._clock()
+            start_ms = (started - item.queued_ns) / 1e6
+            self._system_voice(item.text)
+            speak_ms = (self._clock() - started) / 1e6
+            return Spoken(item.token, item.text, "system", None, note, start_ms, speak_ms)
+
     def _speak(self, item: SpeechItem) -> Spoken:
+        if self._streamer is not None:
+            return self._speak_streaming(item)
         wav, tts_ms, note = self._tts(item.text)
         started = self._clock()
         start_ms = (started - item.queued_ns) / 1e6
@@ -395,7 +675,7 @@ class Speaker:
         try:
             wav = future.result(timeout=self._tts_deadline_s)
         except FutureTimeout:
-            future.add_done_callback(lambda f: self._remember(text, f))  # keep it for next time
+            future.add_done_callback(lambda f: self._remember(text, f))
             return None, None, f"TTS slower than {self._tts_deadline_s:g} s"
         except (GeminiError, ValueError, OSError, EOFError) as exc:
             return None, None, f"TTS failed: {exc}"
@@ -413,12 +693,19 @@ class Speaker:
             while len(self._cache) > WAV_CACHE_SIZE:
                 self._cache.popitem(last=False)
 
+    def _remember_pcm(self, text: str, pcm: bytes) -> None:
+        with self._cond:
+            self._pcm_cache[text] = pcm
+            self._pcm_cache.move_to_end(text)
+            while len(self._pcm_cache) > WAV_CACHE_SIZE:
+                self._pcm_cache.popitem(last=False)
+
     def _loop(self) -> None:
         while True:
             try:
                 if self.process_next(block=True) is None:
-                    return  # closed
-            except Exception:  # never let one bad line kill the voice
+                    return
+            except Exception:
                 logger.exception("copilot speech failed")
 
     def close(self, timeout_s: float = 1.0) -> None:

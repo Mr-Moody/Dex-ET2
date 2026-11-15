@@ -217,6 +217,42 @@ def test_episode_sink_nonblocking_and_two_bay_stage_metadata(
     assert all(m["success"] and m["fault"] == "flap" for m in metas)
 
 
+def test_episode_sink_tags_a_queued_episode_into_its_meta(
+    unoq_client: UnoQClient, tmp_path: Path
+) -> None:
+    from teleop.atc.episodes import EpisodeSink, fault_lookup
+
+    controller, _ = _build_stage(unoq_client)
+    rec = MemoryRecorder(save_delay_s=0.3)
+    sink = EpisodeSink(
+        tmp_path / "tag",
+        controller.coordinator.model,
+        controller.coordinator.data,
+        fault_lookup(controller),
+        "glove",
+        renderer=ZeroRenderer(),
+        recorder=rec,
+    )
+    rig = controller.coordinator.rig(1)
+    wrist = rig.wrist_pose()
+
+    def record_one() -> str:
+        sink.on_episode_start(1, "operator", None, None)
+        sink.on_tick(1, rig, wrist, {})
+        sink.on_episode_end(1, True, None)
+        uid = sink.latest_episode_uid(1)
+        assert isinstance(uid, str)
+        return uid
+
+    record_one()  # occupies the writer
+    queued = record_one()
+    assert sink.tag_episode(queued, dataset_tag="flag")
+    assert sink.tag_episode("bay9-nope", dataset_tag="flag") is False
+    sink.close()
+    controller.close()
+    assert [m.get("dataset_tag") for _, _, m in rec.episodes] == [None, "flag"]
+
+
 # ------------------------------------------------------------------ LeRobot dataset & QC
 
 
@@ -319,6 +355,8 @@ def test_atc_qc_filters_trims_and_writes_clean_dataset(tmp_path: Path) -> None:
         (make_actions(5, 10, 5), make_meta(), ["too short"]),
         (make_actions(5, 30, 5), make_meta(max_tau_hand_inf=12.0), ["torque breach"]),
         (out_of_range, make_meta(), ["action out of range"]),
+        (make_actions(6, 30, 6), make_meta(dataset_tag="flag"), ["copilot flagged"]),
+        (make_actions(6, 30, 6), make_meta(dataset_tag="approve"), []),
     ]
     raw_root = tmp_path / "raw"
     rec = EpisodeRecorder("local/raw", raw_root, FPS, lerobot_features(hw), "panda_inspire")
@@ -342,7 +380,7 @@ def test_atc_qc_filters_trims_and_writes_clean_dataset(tmp_path: Path) -> None:
     clean_root = tmp_path / "clean"
     write_clean(raw_root, results, clean_root)
     rows = read_sidecar(clean_root)
-    assert list(rows) == [0] and rows[0]["fault"] == "pin" and rows[0]["source"] == "glove"
+    assert len(rows) == 2 and rows[0]["fault"] == "pin" and rows[0]["source"] == "glove"
     ds = open_dataset(clean_root)
     assert int(ds.meta.total_episodes) == 1 and len(ds) == 30
 

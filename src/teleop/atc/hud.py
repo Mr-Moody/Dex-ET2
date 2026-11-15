@@ -58,7 +58,7 @@ class RescueStatus:
 
 @dataclass(frozen=True, slots=True)
 class GateStatus:
-    """Latest UNO Q DMP fit and randomized sim gate result."""
+    """Latest UNO Q DMP fit and randomized sim + VLM grasp gate result."""
 
     fit_ms: float | None = None
     passed: int | None = None
@@ -67,6 +67,11 @@ class GateStatus:
     ok: bool | None = None
     conditions: str | None = None  # what the gate randomized, shown after the verdict
     worst_failure: str | None = None  # most extreme condition among failed rollouts
+    vlm_verdict: str | None = None
+    vlm_reason: str | None = None
+    vlm_latency_ms: float | None = None
+    vlm_model: str | None = None
+    vlm_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +120,11 @@ class HudView:
     powered_off: frozenset[int] = frozenset()  # bays (live or replayed) cut by the E-stop
     recovery: RecoveryStatus = field(default_factory=RecoveryStatus)
     recovery_bays: tuple[tuple[int, str], ...] = ()  # (bay, "dmp" | "act") while recovering
+    audit: dict[str, Any] | None = None
+
+
+def _ascii_clean(text: str) -> str:
+    return "".join(c if 32 <= ord(c) < 127 or c == "\n" else "?" for c in text)
 
 
 # --------------------------------------------------------------------------- pieces
@@ -182,15 +192,25 @@ def format_rescue(rescue: RescueStatus) -> str:
 
 def format_gate(gate: GateStatus) -> str:
     fit = f"{gate.fit_ms:.1f} ms" if gate.fit_ms is not None else "--"
+    vlm_suffix = ""
+    if gate.vlm_verdict is not None:
+        vlm_part = f"VLM: {_ascii_clean(gate.vlm_verdict).upper()}"
+        if gate.vlm_latency_ms is not None:
+            vlm_part += f" ({gate.vlm_latency_ms:.0f} ms)"
+        if gate.vlm_reason:
+            reason = _ascii_clean(gate.vlm_reason).replace("\n", " ").strip()
+            if reason:
+                vlm_part += f" [{reason[:48]}]"
+        vlm_suffix = f" | {vlm_part}"
     if gate.passed is None or gate.total is None:
-        return f"UNO Q DMP fit: {fit} | Sim Gate: --"
+        return f"UNO Q DMP fit: {fit} | Sim Gate: --{vlm_suffix}"
     verdict = "PASS" if gate.ok else "FAIL"
     elapsed = f" ({gate.elapsed_s:.2f} s)" if gate.elapsed_s is not None else ""
     if gate.conditions:
         label = f"Skill gate {gate.passed}/{gate.total} {verdict} ({gate.conditions})"
     else:
         label = f"Sim Gate: {gate.passed}/{gate.total} {verdict}"
-    return f"UNO Q DMP fit: {fit} | {label}{elapsed}"
+    return f"UNO Q DMP fit: {fit} | {label}{elapsed}{vlm_suffix}"
 
 
 def format_recovery(rec: RecoveryStatus) -> str:
@@ -212,6 +232,28 @@ def format_health(health: Sequence[Health]) -> str:
     return " | ".join(f"{h.name.upper()} {h.level.value}" for h in health)
 
 
+def format_audit(audit: dict[str, Any] | None) -> str:
+    """Short ASCII summary of the silent Tier 3 Argon audit for viewer overlays and logs."""
+    if not audit:
+        return ""
+    status = _ascii_clean(str(audit.get("status") or "")).lower()
+    bay = audit.get("bay")
+    prefix = f"AUDIT bay {bay}" if bay is not None else "AUDIT"
+    if status == "pending":
+        return f"{prefix}: Argon reviewing keyframes..."
+    if status == "complete":
+        verdict = _ascii_clean(str(audit.get("verdict") or "done")).upper()
+        tag = _ascii_clean(str(audit.get("dataset_tag") or "")).lower()
+        tag_part = f" [ACT: {tag}]" if tag else ""
+        note = _ascii_clean(str(audit.get("operator_note") or "")).replace("\n", " ").strip()
+        note_part = f" {note[:52]}" if note else ""
+        return f"{prefix}: {verdict}{tag_part}{note_part}"
+    if status in ("error", "skipped"):
+        err = _ascii_clean(str(audit.get("error") or status)).replace("\n", " ").strip()
+        return f"{prefix}: {status} ({err[:40]})"
+    return ""
+
+
 # --------------------------------------------------------------------------- whole HUD
 
 
@@ -228,6 +270,9 @@ def hud_lines(view: HudView, health: Sequence[Health] | None = None) -> list[str
         view.compliance,
         view.reasoning,
     ]
+    audit_line = format_audit(view.audit)
+    if audit_line:
+        lines.append(audit_line)
     if view.beat:
         lines.append(f"BEAT {view.beat}")
     if view.actions:
@@ -249,9 +294,15 @@ def hud_overlays(
     mj: Any = _mujoco
     font, grid = mj.mjtFont, mj.mjtGridPos
     labels, values = format_bay_table(view)
-    status = "\n".join(
-        [format_rescue(view.rescue), format_gate(view.gate), format_recovery(view.recovery)]
-    )
+    status_rows = [
+        format_rescue(view.rescue),
+        format_gate(view.gate),
+        format_recovery(view.recovery),
+    ]
+    audit_line = format_audit(view.audit)
+    if audit_line:
+        status_rows.append(audit_line)
+    status = "\n".join(status_rows)
     hook_rows = [view.compliance, view.reasoning]
     if health:
         hook_rows.append(format_health(health))
@@ -278,6 +329,7 @@ __all__ = [
     "RecoveryStatus",
     "RescueStatus",
     "confidence_bar",
+    "format_audit",
     "format_bay_row",
     "format_bay_table",
     "format_gate",

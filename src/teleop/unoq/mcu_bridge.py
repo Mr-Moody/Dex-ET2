@@ -318,7 +318,7 @@ def format_bay_state(bay_id: int, state: BayState) -> str:
 
 def console_state_to_dict(state: ConsoleInputState) -> dict[str, Any]:
     """JSON-safe form for the host <-> UNO Q ``console_state`` op (T-130 server)."""
-    return {
+    out: dict[str, Any] = {
         "selected_bay": state.selected_bay,
         "clutch": state.clutch,
         "estop": state.estop,
@@ -326,10 +326,14 @@ def console_state_to_dict(state: ConsoleInputState) -> dict[str, Any]:
         "timestamp_ns": state.timestamp_ns,
         "powered_off": sorted(state.powered_off),
     }
+    if state.selected_bay_timestamp_ns is not None:
+        out["selected_bay_timestamp_ns"] = state.selected_bay_timestamp_ns
+    return out
 
 
 def console_state_from_dict(raw: Mapping[str, Any]) -> ConsoleInputState:
     bay = raw.get("selected_bay")
+    bay_ts = raw.get("selected_bay_timestamp_ns")
     return ConsoleInputState(
         selected_bay=None if bay is None else int(bay),
         clutch=bool(raw.get("clutch", False)),
@@ -337,6 +341,7 @@ def console_state_from_dict(raw: Mapping[str, Any]) -> ConsoleInputState:
         fault_rig_latched=bool(raw.get("fault_rig_latched", False)),
         timestamp_ns=int(raw.get("timestamp_ns", 0)),
         powered_off=frozenset(int(b) for b in raw.get("powered_off") or ()),
+        selected_bay_timestamp_ns=None if bay_ts is None else int(bay_ts),
     )
 
 
@@ -399,7 +404,12 @@ class McuConsoleBridge:
             s = self._raw
             match event:
                 case BayButton(bay):
-                    self._raw = replace(s, selected_bay=bay, timestamp_ns=now)
+                    self._raw = replace(
+                        s,
+                        selected_bay=bay,
+                        timestamp_ns=now,
+                        selected_bay_timestamp_ns=now,
+                    )
                 case Clutch(pressed):
                     self._raw = replace(s, clutch=pressed, timestamp_ns=now)
                 case Estop(active):
@@ -440,6 +450,7 @@ class McuConsoleBridge:
                         estop,
                         off,
                     ):
+                        bay_ts = now if bay != s.selected_bay else s.selected_bay_timestamp_ns
                         self._raw = replace(
                             s,
                             selected_bay=bay,
@@ -447,6 +458,7 @@ class McuConsoleBridge:
                             estop=estop,
                             powered_off=off,
                             timestamp_ns=now,
+                            selected_bay_timestamp_ns=bay_ts,
                         )
                     return event
             self._events.append(event)

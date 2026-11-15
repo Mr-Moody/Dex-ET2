@@ -2,9 +2,13 @@
 
 A fleet supervisor for EV-battery disassembly. Four MuJoCo bays run Franka Panda arms with LEAP
 hands that unlatch a sprung slide-bolt latch. When a bay stalls, an operator rescues it with
-Rokoko gloves. An Arduino UNO Q (or a local mock) learns the rescue as a skill, a headless
-simulation gate checks it, and the fleet reuses it. The pipeline also has a compliance chain
-and a Gemini operator copilot (`docs/copilot.md`).
+Rokoko gloves. An Arduino UNO Q (or a local mock) learns the rescue as a skill, a dual
+validation gate (20 randomized headless simulation rollouts in parallel with a `gemini-4-hydrogen`
+multimodal grasp check) approves it before deployment, and the fleet reuses it. A three-tier
+Gemini copilot (`docs/copilot.md`) provides `<0.7 s` SSE-streamed voice cues
+(`gemini-3.8-flash-lite-tts`, voice `Kore`), inline grasp gating (`gemini-4-hydrogen`), and silent
+background engineering audits + ACT dataset tagging (`gemini-4-argon`), alongside a Solana
+compliance chain.
 
 See `PROJECT_BRIEF.md` for the pitch and
 `docs/superpowers/specs/2026-11-14-atc-fleet-rescue-design.md` for the design.
@@ -15,10 +19,17 @@ Everything runs locally on the laptop in one Python process. The only exception 
 optional real UNO Q board on the network. MuJoCo does all the physics and all the 3D rendering.
 The browser is only a display and a keyboard.
 
-**Control loop.** Glove input drives a 60 Hz MuJoCo loop. Compliance and reasoning run on
-background threads and never block it. The UNO Q calls (classify a stall, fit a skill) are short
-request/response calls. The 3-rollout validation gate runs inline after a rescue and takes about
-2 s.
+**Control loop.** Glove input drives a 60 Hz MuJoCo loop. Validation, compliance, voice synthesis,
+and deep auditing all run on background executors and never block the 60 Hz step. After a rescue
+clears the bolt (`>= 5.2 cm`), the UNO Q fits an RBF-DMP skill (`< 20 ms`) and the coordinator's
+background gate runs `SkillValidator` (20 randomized headless rollouts, `>= 18/20` required) **in
+parallel with** `GraspGate` (`gemini-4-hydrogen`, `thinkingLevel="LOW"`, 3 `<= 512 px` rescue
+keyframes + torque/bolt/HV clearance telemetry); both must approve before `unoq.register_skill`
+deploys the skill, while Hydrogen's `"say"` verdict streams immediately via SSE
+`gemini-3.8-flash-lite-tts` (`Kore`) and `gemini-4-argon` runs a silent fire-and-forget audit for
+the console `#audit-panel` and ACT episode curation (`meta/teleop_episodes.jsonl`). With
+`GEMINI_API_KEY` unset, `--no-gemini`, or `--headless`, gating falls back deterministically to
+local Gemma (`COPILOT_LOCAL_URL`) or physics-only (`SkillValidator`).
 
 ```mermaid
 flowchart TD
@@ -26,7 +37,9 @@ flowchart TD
     RET["Retargeting + relative clutch"]
     COORD["AtcCoordinator · 60 Hz<br/>stall detection · rescue queue · torque tube"]
     PHYS[("MuJoCo physics<br/>Bays 1–2: Panda + LEAP")]
-    GATE["SkillValidator<br/>3 headless rollouts"]
+    GATE["Parallel Dual Gate (background)<br/>SkillValidator (18/20 sim) + GraspGate (Gemini 4 Hydrogen)"]
+    TTS["Tier 1 SSE Voice<br/>gemini-3.8-flash-lite-tts (Kore) → paplay/espeak-ng"]
+    AUDIT["Tier 3 Silent Audit<br/>Gemini 4 Argon → Console #audit-panel + EpisodeSink tag"]
     UNOQ["UNO Q edge node or mock<br/>filter · classifier · DMP fit"]
     SOL["Compliance sink<br/>hash-chained log → Solana"]
     TRI["Triage reasoner<br/>offline, rule-based"]
@@ -35,6 +48,8 @@ flowchart TD
     RET --> COORD
     COORD <--> PHYS
     COORD --> GATE
+    GATE -->|"dynamic say + telemetry cues"| TTS
+    GATE -.->|"up to 6 frames (fire-and-forget, 0 TTS)"| AUDIT
     COORD <-->|"UDP / TCP"| UNOQ
     COORD -->|"events"| SOL
     COORD -->|"contexts"| TRI
@@ -87,9 +102,9 @@ flowchart TD
     CLUTCH --> CLEARED{"Bolt cleared on<br/>clutch release?"}
     CLEARED -->|"no: recording discarded"| CLUTCH
     CLEARED -->|yes| FIT["UNO Q fits RBF-DMP skill"]
-    FIT --> VAL{"3/3 headless<br/>rollouts pass?"}
-    VAL -->|yes| LIB["Skill deployed to fleet library"]
-    VAL -->|no| REJ["Skill rejected"]
+    FIT --> VAL{"Sim gate (18/20) AND<br/>GraspGate (Hydrogen)<br/>both approve?"}
+    VAL -->|yes| LIB["Skill deployed to fleet library<br/>+ SSE TTS verdict + silent Argon audit"]
+    VAL -->|no| REJ["Skill rejected (not registered)<br/>+ SSE TTS warning + silent Argon audit"]
     LIB --> DONE
     REJ --> DONE
     LIB -.->|"later stalls on this part,<br/>any bay, can now match"| CLS
@@ -120,15 +135,26 @@ Both unseen and refused stalls go to a human through the same queue. The differe
 4. **Rescue.** The queue hands the operator one bay at a time. The operator holds the clutch,
    and the gloves drive that bay's wrist and fingers while the rescue is recorded. If the bolt is
    not cleared on clutch release, the recording is discarded and the operator can try again.
-5. **Learn.** The UNO Q fits the recording as a dynamic movement primitive (a learned movement
-   skill) in under 20 ms. `SkillValidator` replays it in three perturbed headless simulations,
-   and it is added to the fleet library only if all three pass.
+5. **Learn and gate.** The UNO Q fits the recording as a dynamic movement primitive (a learned
+   movement skill) in under 20 ms. On background executors, `SkillValidator` runs 20 randomized
+   headless simulation rollouts (`>= 18/20` required) **in parallel with** Tier 2 `GraspGate`
+   (`gemini-4-hydrogen`, `thinkingLevel="LOW"`), which inspects 3 `<= 512 px` rescue keyframes
+   (`stall`, `mid-hold`, `bolt-clear`) and contact torque / bolt / HV battery terminal clearance
+   telemetry. Both Sim and Hydrogen must approve before `unoq.register_skill` adds the skill to
+   the fleet library, and Hydrogen's `"say"` verdict is spoken immediately over Tier 1
+   SSE-streamed `gemini-3.8-flash-lite-tts` (`Kore`, persistent IPv4 `keep-alive`, raw 24 kHz PCM
+   pipe with `espeak-ng` fallback). Offline (`GEMINI_API_KEY` unset, `--no-gemini`, or
+   `--headless`), gating falls back to local Gemma (`COPILOT_LOCAL_URL`) or deterministic
+   physics-only.
 6. **Reuse.** Bay 2, with a rotated and shifted latch, clears the same jam on its own with the
    skill warped into its frame. The pinned-bolt negative control is refused.
-7. **Record and explain.** Every step emits compliance events (a signed, hash-chained log,
-   optionally anchored on Solana). It also sends reasoning contexts to the triage reasoner, which writes
-   the operator guidance and audit rationale shown in the console. Neither one can block the
-   60 Hz loop.
+7. **Audit, curate and record.** Tier 3 `AuditReviewer` (`gemini-4-argon`, `thinkingLevel="LOW"`,
+   up to 6 rescue frames) runs silently in the background (**zero TTS calls**, never blocking the
+   gate or Bay 2) to populate the Fleet Ops Console `#audit-panel` second-opinion card and tag
+   `meta/teleop_episodes.jsonl` (`approve` / `flag`) so `teleop process` (`atc_qc.py`) drops
+   flagged rescues before ACT policy curation. Every step also emits signed, hash-chained
+   compliance events (optionally anchored on Solana) and offline triage reasoning without blocking
+   the 60 Hz loop.
 
 ### Display modes
 
@@ -152,6 +178,7 @@ Both unseen and refused stalls go to a human through the same queue. The differe
 | Skill learning | 1-Euro filter, Mahalanobis classifier, 30-kernel RBF dynamic movement primitives |
 | Compliance | SHA-256 hash-chained JSONL log, Ed25519 signatures, Solana Memo anchoring (`solders`) |
 | Ops console | Plain HTML/CSS/JS (no framework, no three.js, no CDN), 2D `<canvas>` sparklines, `websockets` server, Pillow JPEG encoding |
+| Gemini copilot & grasp gate | Tier 1 SSE TTS (`gemini-3.8-flash-lite-tts`, `Kore`, persistent IPv4 `HTTPSConnection`), Tier 2 inline grasp gate (`gemini-4-hydrogen`), Tier 3 silent audit & dataset tagger (`gemini-4-argon`), optional local Gemma (`gemma4:e4b`) |
 | Datasets (original pipeline) | LeRobot dataset format (`train` dependency group) |
 
 Code map:
@@ -161,6 +188,7 @@ Code map:
 | `src/teleop/atc/` | Coordinator, stage script and keys, text HUD, skill validator |
 | `src/teleop/sim/` | Scene and bay builders, latch, IK, torque estimator, fixed-rate loop |
 | `src/teleop/console/` | Snapshot, render worker, telemetry adapter, server, `web/` front end |
+| `src/teleop/copilot/` | Three-tier Gemini copilot: IPv4 SSE TTS stream, `GraspGate`, silent `AuditReviewer`, local Gemma client, console feed watcher |
 | `src/teleop/unoq/` | Edge service: filter, classifier, DMP, client/server, MCU bridge |
 | `src/teleop/compliance/` | Compliance sink protocol and the Solana implementation |
 | `src/teleop/reasoning/` | Reasoner protocol and the offline triage reasoner |
@@ -189,6 +217,7 @@ its keys are unset, so the demo runs with an empty `.env`.
 | `SOLANA_RPC_URL`, `SOLANA_KEYPAIR_PATH` | Compliance chain | Local hash-chained audit log |
 | `UNOQ_HOST`, `UNOQ_PORT`, `UNOQ_SERIAL_PORT` | Real UNO Q edge node | In-process loopback mock |
 | `HOTSPOT_PASSWORD` | Laptop hotspot for the gloves (Windows) | Hotspot light stays off; fatal only with an explicit `--hotspot` |
+| `GEMINI_API_KEY` (optional `COPILOT_LOCAL_URL`) | Three-tier Gemini voice, inline grasp gate & silent Argon audit (`docs/copilot.md`) | Local Gemma if `COPILOT_LOCAL_URL` is set, else deterministic physics-only gate + system/offline cues |
 
 ## Run the demo
 
@@ -241,8 +270,9 @@ scripted rescue instead and the console says "gloves offline: playing scripted r
 choice holds until you release the clutch.
 
 The `--script` run plays six stage beats: routine autonomy, a fault and contact stall, the
-operator rescue, the edge skill fit and 3-rollout sim gate, Bay 2 pose generalization, and the
-negative control (refused).
+operator rescue, the edge skill fit and dual validation gate (20-rollout randomized sim gate +
+Gemini Hydrogen grasp gate when enabled; deterministic physics-only in `--headless` /
+`--no-gemini`), Bay 2 pose generalization, and the negative control (refused).
 
 ### Keys
 
@@ -274,7 +304,7 @@ A typical manual run:
 
 1. Press `F` and wait for Bay 1 to stall and queue.
 2. Press `←` (Bay 1), then `SPACE`, to rescue it. Press `SPACE` again once the bolt is clear.
-3. Watch the skill fit, the 3/3 gate and Bay 2 clearing itself.
+3. Watch the skill fit, the parallel sim + Hydrogen grasp gate, the spoken verdict, and Bay 2 clearing itself (while Argon silently populates the console Audit card).
 4. Press `P` to see the refusal.
 
 ### Useful flags
@@ -285,6 +315,7 @@ A typical manual run:
 | `--no-browser` | Print the console URL instead of opening it |
 | `--console-port N`, `--console-fps N` | Console server port and feed frame rate |
 | `--no-audio` | No spoken or audio cues |
+| `--no-gemini` | Disable live Gemini API calls (uses `COPILOT_LOCAL_URL` if configured, else 100% deterministic physics-only gate) |
 | `--no-background` | Leave out background Bays 3 and 4 (lighter) |
 | `--source studio\|synthetic\|replay` | Glove input (default `studio`; `synthetic` needs no hardware) |
 | `--unoq-host IP` / `--serial-port PORT` | Optional: a UNO Q not at `unoq.local`, or its MCU console on a laptop serial port |
@@ -332,6 +363,7 @@ stall and a recovery already running finishes on its own backend. Start with
 
 | Command | What it does |
 |---|---|
+| `uv run python -m teleop.copilot {probe,watch,run}` | Standalone Gemini model probe, event watcher, and external console copilot (`docs/copilot.md`) |
 | `uv run python scripts/console_preview.py` | Ops console with fake telemetry, no MuJoCo |
 | `uv run teleop unoq --serve` | Run the UNO Q edge service on its own |
 | `uv run teleop sim` | Original two-hand lift-cube teleop scene |

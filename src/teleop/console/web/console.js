@@ -937,15 +937,39 @@ function updateGate(t) {
     el.textContent = text;
     return el;
   };
+  const buildVlmRow = (shownAbove = false) => {
+    if (!g || (!g.vlm_verdict && !g.vlm_reason)) return null;
+    const physicsOnly = [g.vlm_verdict, g.vlm_source, g.vlm_model].includes("physics_only");
+    const kind = physicsOnly ? "physics_only"
+      : g.vlm_verdict === "approve" || g.vlm_verdict === "reject" ? g.vlm_verdict : "pending";
+    const label = {
+      approve: "Grasp approved",
+      reject: "Grasp rejected",
+      physics_only: "Physics only, no VLM check",
+      pending: "Grasp check running",
+    }[kind];
+    const model = String(g.vlm_model || "gemini-4-hydrogen").replace(/^gemini-4-/, "");
+    const who = physicsOnly ? "VLM off" : g.vlm_source === "local" ? `Local ${model}` : `VLM ${model}`;
+    const secs = g.vlm_latency_ms != null ? ` · ${(g.vlm_latency_ms / 1000).toFixed(1)} s` : "";
+    const row = document.createElement("span");
+    row.className = "gate__vlm";
+    row.dataset.verdict = kind;
+    row.append(span("gate__vlm-who", who), span("gate__vlm-verdict", `${label}${secs}`));
+    if (g.vlm_reason && !shownAbove) row.append(span("gate__vlm-reason", g.vlm_reason));
+    return row;
+  };
   // Nothing to say until a skill has been fitted: the panel stays out of the rail.
   $("panel-gate").hidden = !g || ((g.ok === null || g.ok === undefined) && g.fit_ms == null);
   if (!g || g.ok === null || g.ok === undefined) {
     delete box.dataset.ok;
-    box.replaceChildren(
+    const children = [
       span("is-empty", g && g.fit_ms != null
         ? `Skill fitted in ${g.fit_ms.toFixed(0)} ms, checking it in simulation`
-        : "No skill learned yet")
-    );
+        : "No skill learned yet"),
+    ];
+    const vlmRow = buildVlmRow(false);
+    if (vlmRow) children.push(vlmRow);
+    box.replaceChildren(...children);
     return;
   }
   box.dataset.ok = String(!!g.ok);
@@ -960,6 +984,10 @@ function updateGate(t) {
     span("gate__line", timing)
   );
   if (g.conditions) box.append(span("gate__conds", g.conditions));
+  // The gate's second key: the fast VLM's physical grasp verdict, beside the sim rollouts.
+  const shownAbove = !g.ok && g.vlm_reason === g.worst_failure; // already on the timing line
+  const vlmRow = buildVlmRow(shownAbove);
+  if (vlmRow) box.append(vlmRow);
 }
 
 function updateLog(t) {

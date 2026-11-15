@@ -172,6 +172,15 @@ class ConsoleSource(Protocol):
     def close(self) -> None: ...
 
 
+def _selection_timestamp_ns(state: ConsoleInputState) -> int:
+    """Return the timestamp of ``state``'s last bay selection."""
+    return (
+        state.timestamp_ns
+        if state.selected_bay_timestamp_ns is None
+        else state.selected_bay_timestamp_ns
+    )
+
+
 def merge_console(
     states: Iterable[ConsoleInputState], powered_off: frozenset[int] | None = None
 ) -> ConsoleInputState:
@@ -184,7 +193,9 @@ def merge_console(
     if not items:
         return ConsoleInputState(powered_off=powered_off or frozenset())
     selected = [s for s in items if s.selected_bay is not None]
-    bay = max(selected, key=lambda s: s.timestamp_ns).selected_bay if selected else None
+    winner = max(selected, key=_selection_timestamp_ns) if selected else None
+    bay = winner.selected_bay if winner is not None else None
+    bay_ts = winner.selected_bay_timestamp_ns if winner is not None else None
     estop = any(s.estop for s in items)
     if powered_off is None:
         powered_off = frozenset[int]().union(*(s.powered_off for s in items))
@@ -195,6 +206,7 @@ def merge_console(
         fault_rig_latched=any(s.fault_rig_latched for s in items),
         timestamp_ns=max(s.timestamp_ns for s in items),
         powered_off=powered_off,
+        selected_bay_timestamp_ns=bay_ts,
     )
 
 
@@ -282,8 +294,21 @@ class UnoQConsolePoller:
         now = self._clock()
         with self._lock:
             prev = self._state
-            same = replace(s, timestamp_ns=prev.timestamp_ns) == prev
-            s = replace(s, timestamp_ns=prev.timestamp_ns if same else now)
+            bay_changed = s.selected_bay != prev.selected_bay
+            bay_ts = now if bay_changed else prev.selected_bay_timestamp_ns
+            same = (
+                replace(
+                    s,
+                    timestamp_ns=prev.timestamp_ns,
+                    selected_bay_timestamp_ns=prev.selected_bay_timestamp_ns,
+                )
+                == prev
+            )
+            s = replace(
+                s,
+                timestamp_ns=prev.timestamp_ns if same else now,
+                selected_bay_timestamp_ns=bay_ts,
+            )
             if s.fault_rig_latched and not prev.fault_rig_latched:
                 self._edge = True
             self._state = s
@@ -409,9 +434,16 @@ class SystemSpeaker:
 class AudioCues:
     """Maps compliance events to short spoken status prompts."""
 
-    def __init__(self, speaker: Speaker, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        speaker: Speaker,
+        enabled: bool = True,
+        *,
+        skip_validation_gate: bool = False,
+    ) -> None:
         self.speaker = speaker
         self.enabled = enabled
+        self.skip_validation_gate = skip_validation_gate
 
     @staticmethod
     def text_for(event: ComplianceEvent) -> str | None:
@@ -431,6 +463,10 @@ class AudioCues:
                 return None
 
     def on_event(self, event: ComplianceEvent) -> str | None:
+        if self.skip_validation_gate and event.kind == "VALIDATION_GATE":
+            vlm_source = event.metadata.get("vlm_source")
+            if vlm_source in ("gemini", "local"):
+                return None
         text = self.text_for(event)
         if text is not None and self.enabled:
             self.speaker.say(text)
@@ -731,6 +767,8 @@ class StageController:
         self.active_faults: dict[int, str] = {}  # bay -> "flap" | "pin" on its current cycle
         self.cleared_cycles: dict[int, int] = dict.fromkeys(self.active_bays, 0)
         self.gate = GateStatus()
+        # Latest Tier 3 copilot audit (``AuditReport.to_dict()``), set from the reviewer thread.
+        self.audit: dict[str, Any] | None = None
         self._keys: deque[int] = deque()
         self.actions: deque[ActionNote] = deque(maxlen=ACTION_LOG_LEN)
         self._action_seq = 0
@@ -1158,7 +1196,16 @@ class StageController:
         meta = event.metadata
         if event.kind == "RESCUE_LOGGED" and not meta.get("autonomous"):
             fit = meta.get("fit_ms")
-            self.gate = replace(self.gate, fit_ms=float(fit) if fit is not None else None)
+            gg: Any = self.coordinator.grasp_gate
+            gg_src = getattr(gg, "source", None) if gg is not None else None
+            gg_mod = getattr(gg, "model", None) if gg is not None else None
+            has_vlm = gg_src in ("gemini", "local")
+            self.gate = GateStatus(
+                fit_ms=float(fit) if fit is not None else None,
+                vlm_verdict="pending" if has_vlm else None,
+                vlm_model=str(gg_mod) if has_vlm and gg_mod else None,
+                vlm_source=str(gg_src) if has_vlm and gg_src else None,
+            )
         elif event.kind == "VALIDATION_GATE":
             self.gate = replace(
                 self.gate,
@@ -1170,9 +1217,28 @@ class StageController:
                 worst_failure=worst_failure(
                     self.coordinator.last_report, self.coordinator.validator.nominal_springref_deg
                 ),
+                vlm_verdict=_opt_str(meta.get("vlm_verdict")),
+                vlm_reason=_opt_str(meta.get("vlm_reason")),
+                vlm_latency_ms=_opt_float(meta.get("vlm_latency_ms")),
+                vlm_model=_opt_str(meta.get("vlm_model")),
+                vlm_source=_opt_str(meta.get("vlm_source")),
             )
         if self.audio is not None:
             self.audio.on_event(event)
+
+    def on_grasp_verdict(self, verdict: Any) -> None:
+        """Update VLM fields on ``self.gate`` as soon as Hydrogen/Gemma finishes (~3-5 s)."""
+        cur = self.gate
+        if cur.ok is not None:
+            return
+        self.gate = replace(
+            cur,
+            vlm_verdict=_opt_str(getattr(verdict, "verdict", None)),
+            vlm_reason=_opt_str(getattr(verdict, "reason", None)),
+            vlm_latency_ms=_opt_float(getattr(verdict, "latency_ms", None)),
+            vlm_model=_opt_str(getattr(verdict, "model", None)),
+            vlm_source=_opt_str(getattr(verdict, "source", None)),
+        )
 
     # ------------------------------------------------------------------ HUD
 
@@ -1189,6 +1255,7 @@ class StageController:
             selected_bay=self.console.selected_bay,
             rescue=rescue,
             gate=self.gate,
+            audit=self.audit,
             compliance=self.events.status_line(),
             reasoning=self.reasoning.status_line(),
             beat=self.beat,
@@ -1508,3 +1575,11 @@ __all__ = [
     "scripted_rescue",
     "worst_failure",
 ]
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _opt_float(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None

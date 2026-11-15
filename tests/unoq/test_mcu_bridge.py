@@ -96,6 +96,20 @@ def test_fault_rig_latches_once_per_cycle_until_reset() -> None:
     assert bridge.take_fault_rig_edge() is True
 
 
+def test_clutch_event_does_not_update_selected_bay_timestamp() -> None:
+    clock = _Clock()
+    bridge = McuConsoleBridge(SoftwareMcu(clock=clock), clock=clock)
+    bridge.handle_line("BTN:BAY:2")
+    bay_stamp = bridge.state().selected_bay_timestamp_ns
+    assert bay_stamp is not None
+    clock.advance(0.5)
+    bridge.handle_line("CLUTCH:1")
+    s = bridge.state()
+    assert s.clutch
+    assert s.timestamp_ns > bay_stamp
+    assert s.selected_bay_timestamp_ns == bay_stamp
+
+
 def test_estop_overrides_clutch_and_stale_heartbeat_fails_safe() -> None:
     clock = _Clock()
     mcu = SoftwareMcu(clock=clock)

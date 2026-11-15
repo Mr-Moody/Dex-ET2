@@ -13,7 +13,7 @@ import math
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from teleop.atc.hud import STATE_LABELS, ConveyorStatus, HudView
 from teleop.atc.types import BOLT_CLEARED_M, N_BAYS, BaySnapshot, BayState
@@ -44,10 +44,10 @@ def _scrub(obj: Any) -> Any:
     """Replace non-finite floats with ``None``: the browser's ``JSON.parse`` rejects NaN."""
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
-    if isinstance(obj, dict):
-        return {k: _scrub(v) for k, v in obj.items()}  # pyright: ignore[reportUnknownVariableType]
-    if isinstance(obj, list):
-        return [_scrub(v) for v in obj]  # pyright: ignore[reportUnknownVariableType]
+    if isinstance(obj, Mapping):
+        return {str(k): _scrub(v) for k, v in cast("Mapping[Any, Any]", obj).items()}
+    if isinstance(obj, list | tuple):
+        return [_scrub(v) for v in cast("Sequence[object]", obj)]
     return obj
 
 
@@ -71,7 +71,12 @@ class TelemetryAdapter:
         self._lines: dict[str, str] = {}
         self._feeds: tuple[FeedSpec, ...] | None = None
         self._action_seq = 0
+        self._latest_audit: dict[str, Any] | None = None
         self.layout_id = 0
+
+    def set_audit(self, audit_dict: Mapping[str, Any] | None) -> None:
+        """Store or clear the latest copilot engineering audit dictionary."""
+        self._latest_audit = _scrub(dict(audit_dict)) if audit_dict is not None else None
 
     # ------------------------------------------------------------------ events
 
@@ -258,8 +263,24 @@ class TelemetryAdapter:
         for c in view.conveyors:
             conveyors[c.bay_id] = c
         g = view.gate
-        gate = None
-        if any(v is not None for v in (g.fit_ms, g.passed, g.total, g.ok)):
+        vlm_verdict: Any = getattr(g, "vlm_verdict", None)
+        vlm_reason: Any = getattr(g, "vlm_reason", None)
+        vlm_latency_ms: Any = getattr(g, "vlm_latency_ms", None)
+        vlm_model: Any = getattr(g, "vlm_model", None)
+        gate: dict[str, Any] | None = None
+        if any(
+            v is not None
+            for v in (
+                g.fit_ms,
+                g.passed,
+                g.total,
+                g.ok,
+                vlm_verdict,
+                vlm_reason,
+                vlm_latency_ms,
+                vlm_model,
+            )
+        ):
             gate = {
                 "fit_ms": g.fit_ms,
                 "passed": g.passed,
@@ -269,6 +290,24 @@ class TelemetryAdapter:
                 "conditions": g.conditions,
                 "worst_failure": g.worst_failure,
             }
+            if any(v is not None for v in (vlm_verdict, vlm_reason, vlm_latency_ms, vlm_model)):
+                gate["vlm_verdict"] = vlm_verdict
+                gate["vlm_reason"] = vlm_reason
+                gate["vlm_latency_ms"] = vlm_latency_ms
+                gate["vlm_model"] = vlm_model
+                vlm_source: Any = getattr(g, "vlm_source", None)  # optional GateStatus field
+                if vlm_source is not None:
+                    gate["vlm_source"] = vlm_source
+        view_audit: Any = getattr(view, "audit", None)
+        raw_audit: Any = self._latest_audit
+        if view_audit is not None:
+            to_dict: Any = getattr(view_audit, "to_dict", None)
+            if callable(to_dict):
+                raw_audit = to_dict()
+            elif isinstance(view_audit, Mapping):
+                raw_audit = dict(cast("Mapping[str, Any]", view_audit))
+            else:
+                raw_audit = view_audit
         rec = view.recovery
         recovery = {
             "backend": rec.backend,
@@ -335,6 +374,7 @@ class TelemetryAdapter:
                 "recovery": recovery,
                 "rescue": rescue,
                 "gate": gate,
+                "audit": raw_audit,
                 "events": list(self._events),
                 "compliance": view.compliance,
                 "compliance_detail": view.compliance_detail,

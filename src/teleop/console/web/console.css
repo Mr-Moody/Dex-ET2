@@ -813,6 +813,70 @@ body[data-page="data"] .bar__views { visibility: hidden; }
 .gate__conds { grid-column: 1 / -1; }
 .gate .is-empty { color: var(--muted); grid-column: 1 / -1; }
 
+/* gate's second key: the fast VLM's grasp verdict, under the sim rollouts */
+.gate__vlm {
+  --vlm: var(--faint);
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.6rem;
+  margin-top: 0.45rem;
+  padding-left: 0.6rem;
+  border-left: 4px solid var(--vlm);
+}
+.gate__vlm[data-verdict="approve"] { --vlm: var(--nominal); }
+.gate__vlm[data-verdict="reject"] { --vlm: var(--stalled); }
+.gate__vlm[data-verdict="pending"] { --vlm: var(--validating); }
+.gate__vlm-who { color: var(--muted); font-size: var(--t-xs); font-weight: 600; }
+.gate__vlm-verdict { font-size: var(--t-s); font-weight: 600; }
+.gate__vlm-reason { flex-basis: 100%; color: var(--muted); font-size: var(--t-xs); }
+
+/* second-opinion card: the silent deep audit that tags the episode for the ACT dataset */
+.argon { --tone: var(--faint); border-left: 5px solid var(--tone); }
+.argon[data-tone="approve"] { --tone: var(--nominal); }
+.argon[data-tone="flag"] { --tone: var(--stalled); }
+.argon[data-tone="pending"] { --tone: var(--validating); }
+.argon[data-tone="error"] { --tone: var(--ood); }
+.argon .argon__title { align-items: center; }
+.argon__where { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.argon__chip {
+  margin-left: auto;
+  padding: 0 0.45rem;
+  border: 1px solid var(--tone);
+  border-radius: 3px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.argon__chip[data-status="pending"]::before { content: "… "; color: var(--validating); font-weight: 700; }
+.argon__close {
+  flex: none;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font-size: var(--t-m);
+  line-height: 1;
+  cursor: pointer;
+}
+.argon__close:hover { border-color: var(--hair); color: var(--text); }
+.argon__head { display: flex; align-items: baseline; gap: 0.6rem; }
+.argon__verdict { font-size: var(--t-m); font-weight: 600; }
+.argon__conf { margin-left: auto; font-size: var(--t-m); font-weight: 300; }
+.argon__conf:empty { display: none; }
+.argon[data-tone="pending"] .argon__verdict { animation: argon-wait 1.2s steps(2, jump-none) infinite; }
+@keyframes argon-wait { 50% { color: var(--muted); } }
+.argon__note { margin-top: 0.25rem; font-size: var(--t-s); }
+.argon__reasons { margin: 0.35rem 0 0; padding: 0; list-style: none; display: grid; gap: 3px; }
+.argon__reason { padding-left: 0.6rem; border-left: 2px solid var(--hair); font-size: var(--t-xs); color: var(--muted); }
+.argon__meta { margin-top: 0.4rem; color: var(--muted); font-size: var(--t-xs); }
+@media (prefers-reduced-motion: reduce) {
+  .argon[data-tone="pending"] .argon__verdict { animation: none; }
+}
+
 /* compliance audit trail: one entry per event, the hash is the link to the chain explorer */
 .audit__badge { margin-left: auto; font-weight: 600; white-space: nowrap; }
 .audit__badge:empty { display: none; }

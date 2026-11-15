@@ -1,6 +1,6 @@
 ---
 id: T-210
-title: Operator copilot foundation, Gemini REST client and model probe
+title: Operator copilot foundation, persistent IPv4 Gemini client and model probe
 status: done
 owner: null
 branch: null
@@ -9,6 +9,7 @@ plan: docs/superpowers/plans/2026-11-14-operator-copilot-plan.md#t-210-copilot-f
 claimed_at: null
 ---
 
-Config, stdlib Gemini client (JSON + TTS), and `python -m teleop.copilot probe` to confirm model IDs and latency on the real key.
+Config (`CopilotConfig`), stdlib Gemini REST + SSE transport (`gemini.py`, `tts_stream.py` persistent IPv4 `IPv4HTTPSConnection` with `AF_INET`, `TCP_NODELAY`, `SO_KEEPALIVE`, TLS SNI, and `Connection: keep-alive`), and `python -m teleop.copilot probe` to confirm model IDs (`gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.8-flash-lite-tts` voice `Kore`) and latency.
 
-See the plan section for the full checklist. Advisory only: the copilot never sends keys or controls a robot.
+Owned files: `src/teleop/copilot/{__init__,__main__,config,gemini,tts_stream}.py`, `docs/copilot.md`, `tests/copilot/test_gemini.py`.
+Safety boundary: active grasp gating (`GraspGate`) and console/dataset audit hooks are permitted, while `tests/copilot/test_gemini.py` enforces that the copilot never injects raw operator `"key"` / `.on_key` control messages or blocks the 60 Hz physics loop.

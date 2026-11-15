@@ -123,6 +123,37 @@ def _next_view_state(prev: ViewState, msg: Mapping[str, Any]) -> ViewState:
     return ViewState(mode=mode, pinned_bay=pinned, cameras=cameras, bay_order=order, zooms=zooms)
 
 
+class _CopilotTap:
+    """Forwards telemetry/frames to the server and taps copies for an in-process copilot."""
+
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        on_telemetry: Callable[[dict[str, Any]], None] | None = None,
+        on_frame: Callable[[int, int, bytes], None] | None = None,
+    ) -> None:
+        self._inner = inner
+        self._on_telemetry = on_telemetry
+        self._on_frame = on_frame
+
+    def publish_telemetry(self, msg: dict[str, Any]) -> None:
+        self._inner.publish_telemetry(msg)
+        if self._on_telemetry is not None:
+            try:
+                self._on_telemetry(msg)
+            except Exception:
+                logger.exception("console: copilot telemetry tap failed")
+
+    def publish_frame(self, slot: int, layout_id: int, jpeg: bytes) -> None:
+        self._inner.publish_frame(slot, layout_id, jpeg)
+        if self._on_frame is not None:
+            try:
+                self._on_frame(slot, layout_id, jpeg)
+            except Exception:
+                logger.exception("console: copilot frame tap failed")
+
+
 def run_console(
     controller: StageController,
     operator: Callable[[], OperatorInput | None],
@@ -135,6 +166,15 @@ def run_console(
     dummy: Any = None,
     calib: GloveCalibrator | None = None,
     recordings: RecordingDesk | None = None,
+    copilot_attach: Callable[
+        [ConsoleServer],
+        tuple[
+            Callable[[dict[str, Any]], None] | None,
+            Callable[[int, int, bytes], None] | None,
+            Callable[[], None] | None,
+        ],
+    ]
+    | None = None,
 ) -> LoopStats:
     co = controller.coordinator
     bays = bays_in_model(co.model)
@@ -185,7 +225,17 @@ def run_console(
     snapshots.put(SimSnapshot.capture(co.data, controller.hud_view(), co.time_s))
     background = load_cycle() if controller.background_bays else None
     adapter = TelemetryAdapter(bays, controller.background_bays)
-    sink = HealthPublisher(server, health) if health is not None else server
+    base_sink: Any = HealthPublisher(server, health) if health is not None else server
+    copilot_close: Callable[[], None] | None = None
+    if copilot_attach is not None:
+        on_tel, on_frm, copilot_close = copilot_attach(server)
+        sink: Any = (
+            _CopilotTap(base_sink, on_telemetry=on_tel, on_frame=on_frm)
+            if (on_tel is not None or on_frm is not None)
+            else base_sink
+        )
+    else:
+        sink = base_sink
     worker = RenderWorker(
         co.model,
         snapshots,
@@ -229,6 +279,8 @@ def run_console(
     finally:
         worker.stop()
         worker.join(timeout=5)
+        if copilot_close is not None:
+            copilot_close()
         server.stop()
     logger.info(
         "atc console: %d steps, %d loop overruns; %d frame sets at %.1f ms mean, %d render errors",

@@ -67,7 +67,7 @@
     if (!eps.length) return node("p", "eps__none", "No episodes yet. A rescue or autonomous recovery adds one.");
     const table = node("table", "eps");
     const head = table.createTHead().insertRow();
-    for (const h of ["#", "Time", "Bay", "Source", "Fault", "Length", "Result"]) {
+    for (const h of ["#", "Time", "Bay", "Source", "Fault", "Length", "Result", "ACT QC"]) {
       const th = document.createElement("th");
       th.scope = "col";
       th.textContent = h;
@@ -89,6 +89,18 @@
       const res = row.insertCell();
       res.className = e.success ? "ok" : "bad";
       res.textContent = e.success ? "Cleared" : `Aborted${e.reason ? ` (${e.reason})` : ""}`;
+      const qc = row.insertCell();
+      const tag = typeof e.dataset_tag === "string" ? e.dataset_tag.toLowerCase() : "";
+      if (tag === "approve") {
+        qc.className = "ok";
+        qc.textContent = "ACT: approve";
+      } else if (tag === "flag") {
+        qc.className = "bad";
+        qc.textContent = "ACT: flag";
+      } else {
+        qc.textContent = "-";
+      }
+      if (e.audit_note) qc.title = String(e.audit_note);
     }
     return table;
   }

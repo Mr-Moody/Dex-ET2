@@ -4,7 +4,8 @@
 > - Engineering Spec: `docs/superpowers/specs/2026-11-14-atc-fleet-rescue-design.md`
 > - Multi-Agent Implementation Plan: `docs/superpowers/plans/2026-11-14-atc-implementation-plan.md`
 > - Architecture Decision Record: `docs/adr/0002-atc-fleet-rescue-pivot.md`
-> - Active Task Checklist: `tasks/T-100-*.md` through `tasks/T-161-*.md` (`uv run task list --ready`)
+> - Three-Tier Gemini Copilot & Active Grasp Gate: `docs/copilot.md`, `docs/superpowers/plans/2026-11-14-operator-copilot-plan.md` (`tasks/T-210-*.md` through `tasks/T-215-*.md`)
+> - Active Task Checklist: `tasks/T-100-*.md` through `tasks/T-218-*.md` (`uv run task list --ready`)
 
 ---
 
@@ -14,7 +15,7 @@
 
 Disassembling EV battery modules and e-waste requires multi-fingered dexterity: depressing a sprung safety flap with a thumb while sliding a retention bolt with an index finger. Standard two-finger grippers fail, while autonomous dexterous hands stall whenever a retainer arrives bent or latched unexpectedly.
 
-**Solution:** Building on interactive fleet-learning paradigms (**HG-DAgger**, **Fleet-DAgger**), one technician at a central desk supervises **four simulated dexterous robot arms/hands** across disassembly bays (one active rescue at a time via a strict FIFO hold queue). Routine unlatching runs autonomously. When a robot unexpectedly stalls against a raised stopper flap, its confidence drops below threshold, it retracts to a safe hover pose, and queues for a 10-second human rescue via a **Rokoko Smartglove II**. The **Arduino UNO Q** encodes the stall signature and fits an object-centric **Dynamic Movement Primitive (DMP / Radial Basis Function model)** from that single rescue in milliseconds. After a fast headless simulation check on the host workstation, the skill is shared across the fleet—allowing other bays to recognize the same stall signature and clear the jam across pose variations ($\pm 30^\circ\text{–}40^\circ$ yaw, $\pm 10\text{–}12\text{ cm}$ shift) for that latch SKU, while refusing transfer to incompatible jams.
+**Solution:** Building on interactive fleet-learning paradigms (**HG-DAgger**, **Fleet-DAgger**), one technician at a central desk supervises **four simulated dexterous robot arms/hands** across disassembly bays (one active rescue at a time via a strict FIFO hold queue). Routine unlatching runs autonomously. When a robot unexpectedly stalls against a raised stopper flap, its confidence drops below threshold, it retracts to a safe hover pose, and queues for a 10-second human rescue via a **Rokoko Smartglove II**. The **Arduino UNO Q** encodes the stall signature and fits an object-centric **Dynamic Movement Primitive (DMP / Radial Basis Function model)** from that single rescue in milliseconds. After a parallel background validation gate on the host workstation—combining randomized headless MuJoCo rollouts (`SkillValidator`, $\ge 18/20$) with an inline multimodal physical grasp check (`GraspGate`, `gemini-4-hydrogen` on 3 rescue keyframes + contact torque/HV clearance telemetry, spoken immediately via $<0.7\text{ s}$ SSE-streamed `gemini-3.8-flash-lite-tts` while `gemini-4-argon` runs a silent deep audit for the console and ACT dataset curation)—the skill is shared across the fleet, allowing other bays to recognize the same stall signature and clear the jam across pose variations ($\pm 30^\circ\text{–}40^\circ$ yaw, $\pm 10\text{–}12\text{ cm}$ shift) for that latch SKU while refusing transfer to incompatible jams.
 
 ### 2. Physical Fault Twin and Simulated Mechanism (3-Box Sprung Slide-Bolt)
 
@@ -32,7 +33,7 @@ To prevent MuJoCo convex-hull mesh lockups and retargeting sensitivity, the MuJo
 
 - **Host Workstation (Laptop — Simulation & Differential IK):**
   - Captures Rokoko Studio UDP packets ($83.3\text{ Hz}$) and forwards joint/wrist streams to the UNO Q (or local mock service when unplugged).
-  - Runs 4-bay MuJoCo simulation (**Bays 1–2** active physics with **7-DoF Franka Emika Panda + 16-DoF LEAP Hand**; **Bays 3–4** lightweight kinematic background loops), damped-least-squares differential IK, `mj_inverse` external torque estimation, and **3 headless validation rollouts** (~$0.3\text{ s}$ total on laptop CPU).
+  - Runs 4-bay MuJoCo simulation (**Bays 1–2** active physics with **7-DoF Franka Emika Panda + 16-DoF LEAP/Inspire Hand**; **Bays 3–4** lightweight kinematic background loops), damped-least-squares differential IK, `mj_inverse` external torque estimation, and the parallel **Dual Validation Gate**: **20 randomized headless validation rollouts** ($\ge 18/20$, `SkillValidator`) alongside the **Tier 2 Inline Fast Grasp Gate** (`gemini-4-hydrogen`, `thinkingLevel="LOW"`, 3 `<= 512 px` rescue keyframes + telemetry, with deterministic offline/local Gemma fallback).
 - **Arduino UNO Q Linux MPU (QRB2210 — Edge Filtering & Skill Learning):**
   - Communicates with the Host Laptop over UDP/TCP (USB-C network gadget or Wi-Fi), with an automatic localhost Python fallback node when hardware is unplugged.
   - Runs a low-lag adaptive **One-Euro Filter ($1\text{€}$)** on incoming Rokoko joint/wrist streams.
@@ -58,8 +59,8 @@ To prevent MuJoCo convex-hull mesh lockups and retargeting sensitivity, the MuJo
   Skills are indexed by `(Part_SKU_ID, Stall_Signature_ID)`. Autonomous replay is wrapped in an additive torque guard plus a hard torque ceiling (avoiding percentage-of-zero false triggers in free space):
   $$\|\tau_{\text{ext}}(s) - \bar{\tau}_{\text{demo}}(s)\|_\infty \le \tau_{\text{margin}} \quad \text{and} \quad \|\tau_{\text{ext}}(s)\|_\infty < \tau_{\text{hard\_max}}$$
   If a bay hits an incompatible jam (e.g., bolt pinned solid at $x = 0\text{ cm}$, producing an out-of-distribution stall signature $z$), the UNO Q classifier rejects skill transfer and escalates directly to the human.
-- **Pre-Deployment Simulation Gate (Risk-Reduction Check):**
-  Before fleet broadcast, the host runs **3 fast headless MuJoCo rollouts** across $\pm 30^\circ$ yaw and $\pm 10\text{ cm}$ shifts (~$0.3\text{ s}$) verifying latch clearance without exceeding $\tau_{\text{hard\_max}}$ or IK joint limits.
+- **Pre-Deployment Dual Validation Gate (Sim Rollouts + Active Gemini Grasp Gate):**
+  Before `unoq.register_skill(skill)` deploys a rescued DMP to the Fleet Library, `AtcCoordinator`'s background gate runs **20 randomized headless MuJoCo rollouts** ($\ge 18/20$ passes required across randomized latch pose, sensor error, flap stiffness/angle, and friction without exceeding $\tau_{\text{hard\_max}}$ or arm torque margins) **in parallel with** **Tier 2 `GraspGate` (`gemini-4-hydrogen`, `thinkingLevel="LOW"`)** on 3 `<= 512 px` JPEG rescue keyframes (`stall`, `mid-hold`, `bolt-clear`) plus contact torque, bolt travel, and HV battery terminal clearance telemetry. **Both** checks must approve to deploy the skill (falling back deterministically to local Gemma via `COPILOT_LOCAL_URL` or physics-only when `GEMINI_API_KEY` is unset, `--no-gemini`, or `--headless`).
 
 ### 5. Minimum Viable Demonstration (MVD) and Build Priority
 
@@ -68,12 +69,12 @@ To prevent MuJoCo convex-hull mesh lockups and retargeting sensitivity, the MuJo
   2. UNO Q closed-form DMP fit + $SE(3)$ wrist-warped autonomous replay clearing the sprung flap in rotated Bay 2 ($35^\circ$ yaw, $12\text{ cm}$ shift) with zero switch input (`T-130`, `T-140`).
 - **P1 Build Priority (Add once P0 is locked):**
   1. Edge-triggered physical fault rig wiring + explicit $C(t)$ stall detector & live UI plot + UNO Q 8×13 LED 4-bay status grid (`T-131`, `T-150`).
-  2. 3-rollout laptop validation gate + Negative Control jam (pinned bolt at $x = 0$ rejected by UNO Q stall-signature classifier) + kinematic background Bays 3–4 + short pre-recorded audio status prompts (`T-140`, `T-150`).
+  2. Dual laptop validation gate (20-rollout randomized `SkillValidator` + parallel `gemini-4-hydrogen` `GraspGate`) + Tier 1 SSE-streamed `gemini-3.8-flash-lite-tts` (`Kore`) voice cues + Tier 3 silent `gemini-4-argon` console audit & episode tagging + Negative Control jam (pinned bolt at $x = 0$ rejected by UNO Q stall-signature classifier) + kinematic background Bays 3–4 (`T-140`, `T-150`, `T-210`–`T-215`).
 - **Live Stage Script (2.5 Minutes):**
   1. *Routine Autonomy:* Bays cycle unjammed bolts with 1 finger ($C(t) > 0.85$, UNO Q LEDs pulsing green).
   2. *Physical Fault & Contact Stall:* Judge flips up the physical orange Stopper Flap on the table rig, arming Bay 1's virtual flap spring. On the next cycle, Bay 1's finger collides with the raised flap, $C(t)$ drops below $0.3$, the arm retracts $3\text{ cm}$, and Bay 1 flashes red on the UNO Q grid.
   3. *10-Second Rescue:* Operator presses Bay 1, holds the clutch, holds the virtual sprung flap flat with the thumb while sliding the bolt open with the index finger, and releases the clutch.
-  4. *Edge Fit & Sanity Check:* UNO Q fits the RBF-DMP weights and logs the stall signature ($< 50\text{ ms}$) while the laptop completes 3 pose-perturbed check rollouts (~$0.4\text{ s}$).
+  4. *Edge Fit & Dual Gate:* UNO Q fits the RBF-DMP weights and logs the stall signature ($< 50\text{ ms}$) while the laptop runs 20 randomized headless rollouts in parallel with `gemini-4-hydrogen` physical grasp verification on 3 rescue keyframes, immediately streaming Hydrogen's spoken `"say"` verdict over SSE `gemini-3.8-flash-lite-tts` (`Kore`) and launching a silent `gemini-4-argon` engineering audit in the background.
   5. *Bounded Pose Generalization:* Bay 2 hits the same sprung flap rotated $35^\circ$ and shifted $12\text{ cm}$, recognizes `Stall_Signature_1` on initial contact, retracts $1\text{ cm}$, warps the learned 2-finger DMP to the rotated latch frame, and clears it autonomously.
   6. *Negative Control (15 s):* A pinned-bolt fault ($x = 0\text{ cm}$) triggers an unseen stall signature; the UNO Q refuses unsafe skill reuse and cleanly pages the operator.
 
@@ -87,9 +88,11 @@ To keep the real-time $60\text{ Hz}$ control loop completely non-blocking and al
    - **Interface:** `ComplianceSink` (`src/teleop/compliance/`) receiving structured, SHA-256-digested `ComplianceEvent` records asynchronously for `STALL_ALERT`, `RESCUE_LOGGED`, `VALIDATION_GATE`, and `OOD_REFUSAL`.
    - **Status:** `T-100` provides `SolanaCompliancePlaceholder` (no-op / local JSONL log); a teammate owns `T-160` to wire on-chain Solana compliance and alert anchoring.
 
-2. **Fleet Reasoner:**
-   - **Interface:** `FleetReasoner` (`src/teleop/reasoning/`) invoked asynchronously off the real-time loop on stall events, validation gates, and OOD refusals to produce triage headlines, operator rescue hints, and compliance rationales.
-   - **Status:** `TriageReasoner` gives deterministic offline text. The LLM layer is the Gemini operator copilot (`T-210`+, `docs/copilot.md`).
+2. **Fleet Reasoner & Three-Tier Gemini Copilot (`T-210`–`T-215`, `docs/copilot.md`):**
+   - **Offline Triage (`src/teleop/reasoning/`):** `TriageReasoner` provides deterministic zero-network headlines and compliance rationales off the 60 Hz loop.
+   - **Tier 1 — Instant Voice (`< 0.7 s` target, zero VLM wait):** Persistent IPv4 SSE streaming to `gemini-3.8-flash-lite-tts` (`Kore` voice), piping raw 24 kHz 16-bit mono PCM into `paplay --raw` / `aplay` with startup cue pre-caching and `~1.8 s` first-chunk fallback to `espeak-ng` / system voice.
+   - **Tier 2 — Inline Fast Grasp Gate (`~3.3–5.5 s`, `gemini-4-hydrogen`):** Runs in parallel with `SkillValidator` on 3 `<= 512 px` rescue keyframes (`stall`, `mid-hold`, `bolt-clear`) + contact/HV clearance telemetry (`thinkingLevel="LOW"`), co-gating `unoq.register_skill(skill)` and immediately speaking `"say"` via Tier 1 SSE TTS.
+   - **Tier 3 — Silent Deep Audit (`~8–15 s`, `gemini-4-argon`):** Fire-and-forget background review (`thinkingLevel="LOW"`, up to 6 frames, **zero TTS calls**, never blocking the gate or Bay 2) populating the Fleet Ops Console `#audit-panel` card and tagging `meta/teleop_episodes.jsonl` (`approve` / `flag`) for `T-191`/`T-193` ACT dataset curation (`atc_qc.py`).
 
 ---
 
@@ -104,10 +107,12 @@ For the experts in the audience. One line each:
 - **Tactile localization:** a bolt encoder plus the compliant wrist spring detect first contact
   with the latch and correct the pose by touch (about 1 mm). Replay uses a touch offset
   calibrated from the demonstration.
-- **Randomized gate:** a learned skill must pass at least 18 of 20 rollouts with randomized
-  latch pose, estimate error, flap stiffness and rest angle (the jam is varied through the
-  rest angle and stiffness) and friction (plus or minus 6% at `realism: 0.25`, 25% at 1), before
-  it is shared with the fleet.
+- **Randomized sim + VLM grasp gate:** a learned skill must pass at least 18 of 20 headless
+  rollouts with randomized latch pose, estimate error, flap stiffness and rest angle (the jam is
+  varied through the rest angle and stiffness) and friction (plus or minus 6% at `realism: 0.25`,
+  25% at 1)—**and**, when Gemini (or local Gemma) is enabled, receive `"approve"` from `GraspGate`
+  (`gemini-4-hydrogen`) on the 3 rescue keyframes and contact telemetry—before it is shared with
+  the fleet (`--headless` and `--no-gemini` run the deterministic physics-only gate).
 
 Honesty note: the scripted show runs at the fixed `STAGE_SEED` 7. At the default
 `realism: 0.25` every seed 0-7 passed the full show on Windows and Linux; at 0.5, 13 of 16 runs

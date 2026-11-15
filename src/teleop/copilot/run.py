@@ -1,14 +1,14 @@
 """``uv run python -m teleop.copilot run``: live spoken call-outs for the fleet ops console.
 
 Wires the console feed, frame store and event detector (``T-211``) to the call-out service and
-the speaker, and prints and logs every call-out to ``runs/copilot/<date>.jsonl``. Start the demo
-first (``uv run teleop atc --source synthetic``), then run this in a second terminal.
+the speaker, and prints and logs every call-out to ``runs/copilot/<date>.jsonl``. Note that
+``uv run teleop atc`` now embeds live Copilot call-outs in-process by default; use this standalone
+runner when attaching to a ``--no-gemini`` or remote console.
 
-Call-outs are spoken with the system voice straight away. ``--gemini-tts`` tries Gemini TTS first
-(the system voice takes over after 1.5 s); live it was slower than that on every line, so it is
-off by default. Without ``GEMINI_API_KEY`` it still runs, with template call-outs only. Call-outs
-also appear in the console page's Copilot panel (``--no-panel`` turns that off). Advisory only:
-the only thing it posts to the console is those display messages, never a key or a control.
+Call-outs stream over ``GeminiStreamingTTS`` SSE (``Kore`` voice) by default when
+``GEMINI_API_KEY`` is set, falling back to ``espeak-ng`` / the OS system voice within ~1.8 s or
+when ``--no-gemini-tts`` is passed. Advisory only: the only thing it posts to the console is
+``{"type": "copilot", ...}`` display messages, never a key or a control.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from teleop.copilot.gemini import GeminiClient
 from teleop.copilot.local import LocalModelClient
 from teleop.copilot.publish import DisplayOutbox
 from teleop.copilot.speech import Speaker
+from teleop.copilot.tts_stream import GeminiStreamingTTS
 
 DEFAULT_LOG_DIR = Path("runs") / "copilot"
 
@@ -87,8 +88,9 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
     parser.add_argument("--mute", action="store_true", help="print and log, but do not speak")
     parser.add_argument(
         "--gemini-tts",
-        action="store_true",
-        help="speak with Gemini TTS (system voice after 1.5 s); default: system voice at once",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="stream speech with Gemini SSE TTS (default: on when GEMINI_API_KEY is set)",
     )
     parser.add_argument(
         "--no-panel", action="store_true", help="do not show call-outs in the console page"
@@ -130,16 +132,25 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
         )
     outputs = CopilotOutputs(stdout, Path(args.log_dir))
     outbox = None if args.no_panel else DisplayOutbox()
+    use_gemini_tts = (
+        bool(cfg.gemini_api_key)
+        if args.gemini_tts is None
+        else (args.gemini_tts and bool(cfg.gemini_api_key))
+    )
+    streamer: GeminiStreamingTTS | None = None
+    if use_gemini_tts and cfg.gemini_api_key:
+        streamer = GeminiStreamingTTS(cfg.gemini_api_key, model=cfg.tts_model, voice=cfg.voice)
     speaker = Speaker(
-        client if args.gemini_tts else None,
+        streamer,
         tts_model=cfg.tts_model,
         voice=cfg.voice,
         mute=cfg.mute,
         on_spoken=outputs.spoken,
     )
+    speaker.precache_cues_async()
     outputs.note(
         f"copilot watching {url}: call-outs {_callout_label(cfg, client, local_client)}, "
-        f"speech {_speech_label(cfg, client is not None and args.gemini_tts)}, "
+        f"speech {_speech_label(cfg, streamer is not None)}, "
         f"panel {'off' if outbox is None else 'on'}, "
         f"images {'off' if cfg.no_images else 'on'}, log {outputs.log_path()} (Ctrl+C to stop)"
     )
@@ -148,6 +159,8 @@ def run_main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> in
             asyncio.run(run(cfg, outputs, client, speaker, local_client, outbox))
     finally:
         speaker.close()
+        if streamer is not None:
+            streamer.close()
     return 0
 
 
