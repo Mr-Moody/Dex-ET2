@@ -106,6 +106,20 @@ def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
     return proc.stdout.strip()
 
 
+def _branch_base() -> str:
+    """Where this branch leaves ``origin/main`` (or ``main``): only commits above it are ours.
+
+    A fixed historic commit would also pull in already-merged ``main`` history (other teams'
+    commits and their trailers), which this branch cannot change.
+    """
+    for ref in ("origin/main", "main"):
+        try:
+            return _git("merge-base", "HEAD", ref)
+        except subprocess.CalledProcessError:
+            continue
+    return "8898b76"
+
+
 def _resolve_atc_parser() -> argparse.ArgumentParser:
     factory = getattr(atc_cmd, "build_parser", None) or getattr(atc_cmd, "_parser", None)
     assert callable(factory), "Expected `build_parser` or `_parser` in teleop.commands.atc"
@@ -206,7 +220,7 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
     """Tier 2 boundary & negative tests for F1 (forbidden files, trailers, scopes, secrets)."""
 
     def test_f1_t2_zero_modifications_to_t194_t195_and_locked_files_since_base(self) -> None:
-        committed_changed = set(_git("diff", "--name-only", "8898b76..HEAD").splitlines())
+        committed_changed = set(_git("diff", "--name-only", f"{_branch_base()}..HEAD").splitlines())
         working_changed = set(_git("diff", "--name-only", "HEAD").splitlines())
         staged_changed = set(_git("diff", "--cached", "--name-only").splitlines())
         all_changed = committed_changed | working_changed | staged_changed
@@ -217,7 +231,9 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
 
     def test_f1_t2_commits_above_base_use_allowed_conventional_scopes_only(self) -> None:
         subjects = [
-            line for line in _git("log", "--format=%s", "8898b76..HEAD").splitlines() if line
+            line
+            for line in _git("log", "--format=%s", f"{_branch_base()}..HEAD").splitlines()
+            if line
         ]
         for subj in subjects:
             m = CONVENTIONAL_COMMIT_RE.match(subj)
@@ -231,7 +247,7 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
             )
 
     def test_f1_t2_commits_above_base_contain_zero_ai_attribution_trailers(self) -> None:
-        full_log = _git("log", "--format=%B", "8898b76..HEAD")
+        full_log = _git("log", "--format=%B", f"{_branch_base()}..HEAD")
         assert not re.search(r"Co-Authored-By:", full_log, re.IGNORECASE), (
             "Commits must NOT include Co-Authored-By trailers"
         )
@@ -247,7 +263,8 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
             for line in _git(
                 "status", "--porcelain", "--untracked-files=no", cwd=main_root
             ).splitlines()
-            if line.strip()
+            # ``uv run task claim`` records claims in the main checkout's tasks/ by design.
+            if line.strip() and not line.split()[-1].startswith("tasks/")
         ]
         assert tracked_mods == [], (
             f"Main checkout tracked files must stay untouched: {tracked_mods}"
@@ -423,8 +440,15 @@ class TestFeature3CopilotAstGuardTier1:
             "_copilot_test_gemini_guard", test_gemini_path
         )
         assert spec is not None and spec.loader is not None
+        import sys
+
         tg = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tg)
+        # @dataclass resolves its module through sys.modules, so register it while it loads.
+        sys.modules[spec.name] = tg
+        try:
+            spec.loader.exec_module(tg)
+        finally:
+            sys.modules.pop(spec.name, None)
 
         guard_fns = [
             getattr(tg, name)

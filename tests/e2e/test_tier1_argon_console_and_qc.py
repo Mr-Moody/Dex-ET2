@@ -43,7 +43,7 @@ from teleop.console.server import WEB_DIR, ConsoleServer
 from teleop.console.telemetry import TelemetryAdapter
 from teleop.copilot.config import CopilotConfig
 from teleop.copilot.gemini import GeminiClient
-from teleop.policy.schema import CAMERAS, FPS, IMAGE_HW, lerobot_features
+from teleop.policy.schema import CAMERAS, FPS, HAND_ACTUATORS, IMAGE_HW, lerobot_features
 from teleop.process.atc_qc import DEFAULT_SOURCES, DROP_REASONS, AtcQCThresholds, run_atc_qc
 from teleop.process.qc import read_sidecar, write_clean
 from teleop.record.recorder import EpisodeRecorder
@@ -237,10 +237,9 @@ def _drive_synthetic_episode(
     base_pose = bay_rig.wrist_pose()
     assert base_pose.position is not None
     x0, y0, z0 = base_pose.position
-    fingers = {
-        k: 0.25
-        for k in ("thumb_proximal_yaw", "thumb_proximal_pitch", "index", "middle", "ring", "pinky")
-    }
+    # Real Inspire actuator names (HAND_ACTUATORS), all inside their ctrlrange, so the CLI's
+    # "action out of range" rule passes and only the copilot tag decides keep/drop.
+    fingers = dict.fromkeys(HAND_ACTUATORS, 0.25)
 
     sink.on_episode_start(bay_id, source, "Jam_Sig_1", None)  # type: ignore[arg-type]
     for step in range(ticks):
