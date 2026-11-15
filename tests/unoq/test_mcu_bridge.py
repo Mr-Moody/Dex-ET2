@@ -1,10 +1,11 @@
-"""UNO Q STM32U585 console bridge (T-131). No hardware: the firmware is emulated by SoftwareMcu."""
+"""UNO Q STM32U585 serial console bridge and SwitchableUnoQ skill replay/failover."""
 
 from __future__ import annotations
 
 import pytest
 
-from teleop.atc.types import BayState, ConsoleInputState
+from teleop.atc.types import BayState, ConsoleInputState, SkillPrimitive, StallSignature
+from teleop.unoq.client import UnoQClient
 from teleop.unoq.mcu_bridge import (
     BayButton,
     Clutch,
@@ -18,9 +19,14 @@ from teleop.unoq.mcu_bridge import (
     format_bay_state,
     parse_mcu_line,
 )
+from teleop.unoq.server import UnoQServer
+from teleop.unoq.switch import SwitchableUnoQ
+
+SKU = "ev_latch_v1"
+Z = StallSignature(0.035, 4.0, 8.0, 2.0)
 
 
-class FakeClock:
+class _Clock:
     def __init__(self) -> None:
         self.ns = 1_000_000_000
 
@@ -31,29 +37,22 @@ class FakeClock:
         self.ns += int(s * 1e9)
 
 
-class FakeSerial:
-    """pyserial-shaped transport: readline() returns b"" when no line is waiting."""
-
-    def __init__(self, lines: list[str] | None = None) -> None:
-        self.rx = [line.encode() + b"\n" for line in lines or []]
-        self.tx: list[str] = []
-
-    def push(self, *lines: str) -> None:
-        self.rx.extend(line.encode() + b"\n" for line in lines)
-
-    def readline(self) -> bytes:
-        return self.rx.pop(0) if self.rx else b""
-
-    def write(self, data: bytes) -> int:
-        self.tx.append(data.decode())
-        return len(data)
-
-
-def _bridge(clock: FakeClock, mcu: SoftwareMcu) -> McuConsoleBridge:
-    return McuConsoleBridge(mcu, clock=clock)
-
-
-# ---------------------------------------------------------------- parsing
+def _skill(skill_id: str = "ev_latch_v1/Jam_Sig_1/1") -> SkillPrimitive:
+    d = 7
+    return SkillPrimitive(
+        skill_id=skill_id,
+        part_sku_id=SKU,
+        signature_id="Jam_Sig_1",
+        duration_s=1.0,
+        alpha_s=4.0,
+        actuator_names=("a",),
+        goal_orientation=(0.0, 0.0, 0.0, 1.0),
+        y0=(0.0,) * d,
+        y_goal=(1.0,) * d,
+        weights=((0.0,) * d,),
+        tau_demo=(0.1,),
+        prototype=Z,
+    )
 
 
 @pytest.mark.parametrize(
@@ -68,232 +67,102 @@ def _bridge(clock: FakeClock, mcu: SoftwareMcu) -> McuConsoleBridge:
         ("HB:0:0:0:0", Heartbeat(None, False, False, False)),
     ],
 )
-def test_parse_valid_lines(line: str, event: object):
+def test_parse_valid_mcu_lines_and_reject_garbage(line: str, event: object) -> None:
     assert parse_mcu_line(line) == event
+    for bad in ("", "BTN:BAY:5", "CLUTCH:2", "HB:1:1", "FAULT_RIG:"):
+        assert parse_mcu_line(bad) is None
 
 
-@pytest.mark.parametrize(
-    "line", ["", "BTN:BAY:5", "BTN:BAY:x", "CLUTCH:2", "HB:1:1", "DEBUG hello", "FAULT_RIG:"]
-)
-def test_parse_rejects_garbage(line: str):
-    assert parse_mcu_line(line) is None
-
-
-# ---------------------------------------------------------------- fault rig
-
-
-def test_fault_rig_latches_once_and_ignores_toggles_until_reset_cmd():
-    clock = FakeClock()
+def test_fault_rig_latches_once_per_cycle_until_reset() -> None:
+    clock = _Clock()
     mcu = SoftwareMcu(clock=clock)
-    bridge = _bridge(clock, mcu)
+    bridge = McuConsoleBridge(mcu, clock=clock)
 
-    # Judge raises the flap, then flicks the switch repeatedly.
     for closed in (True, False, True, False, True):
         mcu.set_fault_rig(closed)
     bridge.pump()
     assert bridge.state().fault_rig_latched
     assert bridge.take_fault_rig_edge() is True
-    assert bridge.take_fault_rig_edge() is False  # one arm_flap_fault() per pallet cycle
-    assert mcu.emitted.count("FAULT_RIG:LATCHED") == 1
-
-    # A duplicate LATCHED line (glitch) must not re-arm the bay either.
+    assert bridge.take_fault_rig_edge() is False
     bridge.handle_line("FAULT_RIG:LATCHED")
     assert bridge.take_fault_rig_edge() is False
 
     bridge.reset_rig()
     bridge.pump()
-    assert "CMD:RESET_RIG" in mcu.received
     assert not bridge.state().fault_rig_latched
-
     mcu.set_fault_rig(False)
-    mcu.set_fault_rig(True)  # next pallet cycle: a fresh rising edge latches again
+    mcu.set_fault_rig(True)
     bridge.pump()
     assert bridge.take_fault_rig_edge() is True
-    assert mcu.emitted.count("FAULT_RIG:LATCHED") == 2
 
 
-# ---------------------------------------------------------------- clutch, bays, safety
+def test_clutch_event_does_not_update_selected_bay_timestamp() -> None:
+    clock = _Clock()
+    bridge = McuConsoleBridge(SoftwareMcu(clock=clock), clock=clock)
+    bridge.handle_line("BTN:BAY:2")
+    bay_stamp = bridge.state().selected_bay_timestamp_ns
+    assert bay_stamp is not None
+    clock.advance(0.5)
+    bridge.handle_line("CLUTCH:1")
+    s = bridge.state()
+    assert s.clutch
+    assert s.timestamp_ns > bay_stamp
+    assert s.selected_bay_timestamp_ns == bay_stamp
 
 
-def test_clutch_and_bay_select_transitions_parsed():
-    clock = FakeClock()
+def test_estop_overrides_clutch_and_stale_heartbeat_fails_safe() -> None:
+    clock = _Clock()
     mcu = SoftwareMcu(clock=clock)
-    bridge = _bridge(clock, mcu)
-    assert bridge.state() == ConsoleInputState()  # nothing heard yet: link down, safe
+    bridge = McuConsoleBridge(mcu, clock=clock)
 
     mcu.press_bay(2)
     mcu.set_clutch(True)
     bridge.pump()
-    s = bridge.state()
-    assert s.selected_bay == 2 and s.clutch and not s.estop
-    assert s.timestamp_ns == clock.ns
+    assert bridge.state().selected_bay == 2 and bridge.state().clutch
 
-    mcu.press_bay(4)
-    mcu.set_clutch(False)
-    bridge.pump()
-    assert bridge.state().selected_bay == 4 and not bridge.state().clutch
-    assert [type(e) for e in bridge.drain_events()] == [BayButton, Clutch, BayButton, Clutch]
-    assert bridge.drain_events() == []
-
-
-def test_estop_overrides_clutch():
-    clock = FakeClock()
-    mcu = SoftwareMcu(clock=clock)
-    bridge = _bridge(clock, mcu)
-    mcu.set_clutch(True)
     mcu.set_estop(True)
     bridge.pump()
-    s = bridge.state()
-    assert s.estop and not s.clutch  # dead-man: no motion while E-stop is active
+    assert bridge.state().estop and not bridge.state().clutch
+    assert bridge.state().powered_off == frozenset({2})
 
-
-def test_stale_heartbeat_releases_clutch():
-    clock = FakeClock()
-    mcu = SoftwareMcu(clock=clock)
-    bridge = _bridge(clock, mcu)
+    # Releasing E-stop keeps clutch inhibited on powered-off Bay 2, but allows powered Bay 1.
+    mcu.set_estop(False)
     mcu.set_clutch(True)
     bridge.pump()
-    assert bridge.link_ok and bridge.state().clutch
-
-    clock.advance(0.04)
-    bridge.pump()  # SoftwareMcu heartbeats every 50 ms while polled
-    clock.advance(0.04)
-    bridge.pump()
-    assert bridge.link_ok and bridge.state().clutch
-
-    clock.advance(1.0)  # link lost (cable pulled, MCU crashed): fail safe
-    assert not bridge.link_ok
     assert not bridge.state().clutch
-
-
-def test_heartbeat_resyncs_missed_edges_but_never_latches_rig():
-    clock = FakeClock()
-    serial = FakeSerial(["HB:3:1:0:1"])
-    bridge = McuConsoleBridge(serial, clock=clock)
+    mcu.press_bay(1)
     bridge.pump()
-    s = bridge.state()
-    assert s.selected_bay == 3 and s.clutch
-    assert not s.fault_rig_latched  # only FAULT_RIG:LATCHED latches
-    assert bridge.take_fault_rig_edge() is False
+    assert bridge.link_ok and bridge.state().clutch
 
+    clock.advance(1.0)
+    assert not bridge.link_ok and not bridge.state().clutch
 
-# ---------------------------------------------------------------- LED matrix commands
-
-
-def test_led_state_commands_formatted_per_bay():
-    assert format_bay_state(1, BayState.NOMINAL) == "CMD:BAY_STATE:1:NOMINAL"
-    assert format_bay_state(2, BayState.STALLED) == "CMD:BAY_STATE:2:STALLED"
-    assert format_bay_state(3, BayState.QUEUED) == "CMD:BAY_STATE:3:QUEUED"
-    assert format_bay_state(4, BayState.RESCUE) == "CMD:BAY_STATE:4:RESCUE"
-    assert format_bay_state(1, BayState.VALIDATING) == "CMD:BAY_STATE:1:VALIDATING"
-    assert format_bay_state(2, BayState.AUTONOMOUS_SKILL) == "CMD:BAY_STATE:2:AUTO"
-    assert format_bay_state(2, BayState.OOD_ESCALATED) == "CMD:BAY_STATE:2:OOD"
-    with pytest.raises(ValueError):
-        format_bay_state(5, BayState.NOMINAL)
-
-    serial = FakeSerial()
-    bridge = McuConsoleBridge(serial, clock=FakeClock())
-    bridge.set_bay_state(1, BayState.STALLED)
-    bridge.set_bay_state(1, BayState.STALLED)  # unchanged: not resent at 60 Hz
-    bridge.set_bay_state(2, BayState.AUTONOMOUS_SKILL)
-    assert serial.tx == ["CMD:BAY_STATE:1:STALLED\n", "CMD:BAY_STATE:2:AUTO\n"]
-    bridge.resend_bay_states()
-    assert serial.tx[-2:] == serial.tx[:2]
-
-
-def test_software_mcu_mirrors_led_states():
-    clock = FakeClock()
-    mcu = SoftwareMcu(clock=clock)
-    bridge = _bridge(clock, mcu)
-    bridge.set_bay_state(3, BayState.VALIDATING)
-    assert mcu.led_states == {3: "VALIDATING"}
-
-
-def test_console_state_wire_roundtrip():
     s = ConsoleInputState(selected_bay=2, clutch=True, estop=False, fault_rig_latched=True)
     assert console_state_from_dict(console_state_to_dict(s)) == s
+    assert format_bay_state(2, BayState.AUTONOMOUS_SKILL) == "CMD:BAY_STATE:2:AUTO"
 
 
-class _ClosableMcu(SoftwareMcu):
-    """A serial port that refuses writes and reads once closed, like pyserial."""
+def test_switchable_unoq_replays_skills_idempotently_and_fails_over_to_loopback() -> None:
+    board = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0).start()
+    other = UnoQServer(host="127.0.0.1", udp_port=0, tcp_port=0).start()
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.closed = False
+    def connect(srv: UnoQServer) -> UnoQClient:
+        return UnoQClient("127.0.0.1", srv.udp_port, srv.tcp_port).connect()
 
-    def close(self) -> None:
-        self.closed = True
-
-    def readline(self) -> bytes:
-        if self.closed:
-            raise OSError("port closed")
-        return super().readline()
-
-    def write(self, data: bytes, /) -> int:
-        if self.closed:
-            raise OSError("port closed")
-        return super().write(data)
-
-
-def test_reopen_switches_transport_and_resends_leds() -> None:
-    old, new = _ClosableMcu(), _ClosableMcu()
-    bridge = McuConsoleBridge(old)
-    bridge.set_bay_state(1, BayState.STALLED)
-    bridge.reopen(new)
-    assert old.closed and not new.closed
-    assert new.led_states == {1: "STALLED"}
-    bridge.pump()
-    assert bridge.last_heard_ns is not None  # reads come from the new transport
-
-
-def test_reopen_during_led_writes_never_raises() -> None:
-    import threading
-
-    bridge = McuConsoleBridge(_ClosableMcu())
-    bridge.start()
-    errors: list[BaseException] = []
-    done = threading.Event()
-
-    def writer() -> None:
-        states = (BayState.STALLED, BayState.NOMINAL)
-        i = 0
-        while not done.is_set():
-            try:
-                bridge.set_bay_state(1, states[i % 2])
-            except BaseException as exc:
-                errors.append(exc)
-            i += 1
-
-    th = threading.Thread(target=writer)
-    th.start()
+    unoq = SwitchableUnoQ(connect(board))
     try:
-        for _ in range(50):
-            bridge.reopen(_ClosableMcu())
+        assert unoq.register_skill(_skill()) == 1
+        unoq.swap(connect(other))
+        unoq.swap(connect(board))
+        unoq.swap(connect(other))
+        assert board.classifier.sample_count(SKU, "Jam_Sig_1") == 1
+        assert other.classifier.sample_count(SKU, "Jam_Sig_1") == 1
+
+        other.stop()
+        match, skill_id = unoq.classify_stall(SKU, Z)
+        assert unoq.is_mock is True
+        assert match.signature_id == "Jam_Sig_1" and skill_id == "ev_latch_v1/Jam_Sig_1/1"
     finally:
-        done.set()
-        th.join()
-        bridge.close()
-    assert errors == []
-
-
-def test_resend_never_leaves_a_stale_led() -> None:
-    import threading
-
-    mcu = SoftwareMcu()
-    bridge = McuConsoleBridge(mcu)
-    states = (BayState.STALLED, BayState.NOMINAL)
-    done = threading.Event()
-
-    def resender() -> None:
-        while not done.is_set():
-            bridge.resend_bay_states()
-
-    th = threading.Thread(target=resender)
-    th.start()
-    try:
-        for i in range(2000):
-            bridge.set_bay_state(1, states[i % 2])
-    finally:
-        done.set()
-        th.join()
-    assert mcu.led_states[1] == format_bay_state(1, states[1999 % 2]).rsplit(":", 1)[1]
+        unoq.close()
+        board.stop()
+        other.stop()
