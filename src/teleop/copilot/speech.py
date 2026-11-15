@@ -448,6 +448,8 @@ class Speaker:
                 continue
             seen.add(line)
             with self._cond:
+                if self._closed:
+                    break
                 already = line in self._pcm_cache or line in self._cache
             if already:
                 continue
@@ -473,6 +475,22 @@ class Speaker:
             except (GeminiError, TimeoutError, OSError, ValueError) as exc:
                 logger.warning("copilot cue pre-cache skipped %r: %s", line, exc)
         return cached_now
+
+    def precache_cues_async(self, cues: Sequence[str] | None = None) -> threading.Thread | None:
+        """Warm the TLS socket and pre-cache fixed cues on a daemon thread (non-blocking)."""
+        if self.mute or (self._streamer is None and self._synth is None):
+            return None
+        with self._cond:
+            if self._closed:
+                return None
+
+        def _warm_worker() -> None:
+            with contextlib.suppress(Exception):
+                self.precache_cues(cues)
+
+        thread = threading.Thread(target=_warm_worker, name="copilot-tts-precache", daemon=True)
+        thread.start()
+        return thread
 
     # -- queue --------------------------------------------------------------------------------
 

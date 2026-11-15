@@ -434,9 +434,16 @@ class SystemSpeaker:
 class AudioCues:
     """Maps compliance events to short spoken status prompts."""
 
-    def __init__(self, speaker: Speaker, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        speaker: Speaker,
+        enabled: bool = True,
+        *,
+        skip_validation_gate: bool = False,
+    ) -> None:
         self.speaker = speaker
         self.enabled = enabled
+        self.skip_validation_gate = skip_validation_gate
 
     @staticmethod
     def text_for(event: ComplianceEvent) -> str | None:
@@ -456,6 +463,10 @@ class AudioCues:
                 return None
 
     def on_event(self, event: ComplianceEvent) -> str | None:
+        if self.skip_validation_gate and event.kind == "VALIDATION_GATE":
+            vlm_source = event.metadata.get("vlm_source")
+            if vlm_source in ("gemini", "local"):
+                return None
         text = self.text_for(event)
         if text is not None and self.enabled:
             self.speaker.say(text)
@@ -1185,7 +1196,16 @@ class StageController:
         meta = event.metadata
         if event.kind == "RESCUE_LOGGED" and not meta.get("autonomous"):
             fit = meta.get("fit_ms")
-            self.gate = replace(self.gate, fit_ms=float(fit) if fit is not None else None)
+            gg: Any = self.coordinator.grasp_gate
+            gg_src = getattr(gg, "source", None) if gg is not None else None
+            gg_mod = getattr(gg, "model", None) if gg is not None else None
+            has_vlm = gg_src in ("gemini", "local")
+            self.gate = GateStatus(
+                fit_ms=float(fit) if fit is not None else None,
+                vlm_verdict="pending" if has_vlm else None,
+                vlm_model=str(gg_mod) if has_vlm and gg_mod else None,
+                vlm_source=str(gg_src) if has_vlm and gg_src else None,
+            )
         elif event.kind == "VALIDATION_GATE":
             self.gate = replace(
                 self.gate,
@@ -1201,9 +1221,24 @@ class StageController:
                 vlm_reason=_opt_str(meta.get("vlm_reason")),
                 vlm_latency_ms=_opt_float(meta.get("vlm_latency_ms")),
                 vlm_model=_opt_str(meta.get("vlm_model")),
+                vlm_source=_opt_str(meta.get("vlm_source")),
             )
         if self.audio is not None:
             self.audio.on_event(event)
+
+    def on_grasp_verdict(self, verdict: Any) -> None:
+        """Update VLM fields on ``self.gate`` as soon as Hydrogen/Gemma finishes (~3-5 s)."""
+        cur = self.gate
+        if cur.ok is not None:
+            return
+        self.gate = replace(
+            cur,
+            vlm_verdict=_opt_str(getattr(verdict, "verdict", None)),
+            vlm_reason=_opt_str(getattr(verdict, "reason", None)),
+            vlm_latency_ms=_opt_float(getattr(verdict, "latency_ms", None)),
+            vlm_model=_opt_str(getattr(verdict, "model", None)),
+            vlm_source=_opt_str(getattr(verdict, "source", None)),
+        )
 
     # ------------------------------------------------------------------ HUD
 

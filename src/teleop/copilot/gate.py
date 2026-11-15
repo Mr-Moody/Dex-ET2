@@ -23,7 +23,7 @@ import io
 import logging
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -231,12 +231,14 @@ class GraspGate:
         cfg: CopilotConfig | None = None,
         speaker: SpeakerLike | None = None,
         audit_reviewer: AuditSubmitter | None = None,
+        on_verdict: Callable[[GraspGateVerdict, int], None] | None = None,
         timeout_s: float = GATE_TIMEOUT_S,
     ) -> None:
         self.cfg = cfg or CopilotConfig()
         self.client = client
         self.speaker = speaker
         self.audit_reviewer = audit_reviewer
+        self.on_verdict = on_verdict
         self.timeout_s = timeout_s
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="grasp-gate"
@@ -257,6 +259,80 @@ class GraspGate:
         return self.cfg.fast_model if self.client is not None else "physics_only"
 
     # -- async (coordinator) ----------------------------------------------------------------
+
+    def warmup(self, model: Any) -> Future[None] | None:
+        """Warm the private MuJoCo renderer on the gate worker before the first rescue."""
+        if (
+            model is None
+            or self.cfg.no_images
+            or (self.client is None and self.audit_reviewer is None)
+        ):
+            return None
+        with self._lock:
+            executor = self._executor
+            if executor is None:
+                return None
+            return executor.submit(self._warmup_renderer, model)
+
+    def _warmup_renderer(self, model: Any) -> None:
+        try:
+            if self._renderer is None or self._renderer.model is not model:
+                if self._renderer is not None:
+                    self._renderer.close()
+                self._renderer = SnapshotRenderer(model)
+        except Exception:
+            logger.debug("grasp gate: renderer warmup skipped", exc_info=True)
+
+    def submit_audit_only(
+        self,
+        *,
+        bay_id: int,
+        skill_id: str,
+        snapshots: Sequence[PoseSnapshot],
+        model: Any = None,
+        timeline: Mapping[str, Any] | None = None,
+        episode_uid: str | None = None,
+    ) -> Future[str | None] | None:
+        """Render ``snapshots`` on the gate worker and forward silently to Tier 3 Argon."""
+        if self.audit_reviewer is None:
+            return None
+        with self._lock:
+            executor = self._executor
+            if executor is None:
+                return None
+            return executor.submit(
+                self._run_audit_only,
+                bay_id,
+                skill_id,
+                tuple(snapshots),
+                model,
+                dict(timeline or {}),
+                episode_uid,
+            )
+
+    def _run_audit_only(
+        self,
+        bay_id: int,
+        skill_id: str,
+        snapshots: tuple[PoseSnapshot, ...],
+        model: Any,
+        timeline: dict[str, Any],
+        episode_uid: str | None,
+    ) -> str | None:
+        if self.audit_reviewer is None:
+            return None
+        try:
+            frames = self._render_for_audit(snapshots, bay_id, model)
+            return self.audit_reviewer.submit(
+                bay=bay_id,
+                skill_id=skill_id,
+                episode_uid=episode_uid,
+                frames=frames,
+                timeline=timeline,
+            )
+        except Exception:
+            logger.exception("grasp gate: standalone audit submission failed")
+            return None
 
     def submit(
         self,
@@ -286,9 +362,14 @@ class GraspGate:
     ) -> GraspGateVerdict:
         keyframes = self._render(snapshots, summary.bay_id, model)
         verdict = self.evaluate(keyframes, summary)
+        if self.on_verdict is not None:
+            try:
+                self.on_verdict(verdict, summary.bay_id)
+            except Exception:
+                logger.exception("grasp gate: on_verdict callback failed")
         if self.audit_reviewer is not None:
             try:
-                audit_frames = self._render(audit_snapshots, summary.bay_id, model)
+                audit_frames = self._render_for_audit(audit_snapshots, summary.bay_id, model)
                 self.audit_reviewer.submit(
                     bay=summary.bay_id,
                     skill_id=summary.skill_id,
@@ -300,11 +381,23 @@ class GraspGate:
                 logger.exception("grasp gate: audit submission failed")
         return verdict
 
+    def _render_for_audit(
+        self, snapshots: tuple[PoseSnapshot, ...], bay_id: int, model: Any
+    ) -> list[KeyframeJpeg]:
+        if model is None or not snapshots or self.cfg.no_images or self.audit_reviewer is None:
+            return []
+        return self._render_with_renderer(snapshots, bay_id, model)
+
     def _render(
         self, snapshots: tuple[PoseSnapshot, ...], bay_id: int, model: Any
     ) -> list[KeyframeJpeg]:
         if model is None or not snapshots or self.cfg.no_images or self.client is None:
             return []
+        return self._render_with_renderer(snapshots, bay_id, model)
+
+    def _render_with_renderer(
+        self, snapshots: tuple[PoseSnapshot, ...], bay_id: int, model: Any
+    ) -> list[KeyframeJpeg]:
         try:
             if self._renderer is None or self._renderer.model is not model:
                 if self._renderer is not None:
@@ -456,6 +549,7 @@ def build_grasp_gate(
     use_gemini: bool = True,
     speaker: SpeakerLike | None = None,
     audit_reviewer: AuditSubmitter | None = None,
+    on_verdict: Callable[[GraspGateVerdict, int], None] | None = None,
 ) -> GraspGate:
     """Gemini when a key is set (and allowed), else local Gemma when configured, else physics."""
     client: ModelClient | None = None
@@ -463,4 +557,10 @@ def build_grasp_gate(
         client = GeminiClient(cfg.gemini_api_key, no_images=cfg.no_images)
     else:
         client = LocalModelClient.from_config(cfg)
-    return GraspGate(client, cfg=cfg, speaker=speaker, audit_reviewer=audit_reviewer)
+    return GraspGate(
+        client,
+        cfg=cfg,
+        speaker=speaker,
+        audit_reviewer=audit_reviewer,
+        on_verdict=on_verdict,
+    )

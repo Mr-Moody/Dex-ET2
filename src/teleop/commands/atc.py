@@ -524,7 +524,7 @@ def _run_booth(
         cast("UnoQClient", unoq),  # same request surface; the coordinator only forwards calls
         sink,
         reasoner,
-        audio=AudioCues(SystemSpeaker() if speak else NullSpeaker(), enabled=speak),
+        audio=AudioCues(NullSpeaker(), enabled=False),
         hardware=hardware,
         cycle_dwell_s=cfg.cycle_dwell_s,
         auto_jam_every=0 if (cfg.script or cfg.generate is not None) else cfg.jam_every,
@@ -539,6 +539,7 @@ def _run_booth(
     stack.callback(_close_act, controller)
     _setup_recovery(cfg, controller, hooks.get("--act-checkpoint"))
     sink_handle: Any = None
+    tag_router = _EpisodeTagRouter()
     operator_box: list[Any] = []  # filled once the operator is built (after the sink)
     if "--record-episodes" in hooks:
         scripted = cfg.generate is not None or cfg.source == "synthetic"
@@ -550,10 +551,12 @@ def _run_booth(
         except (RuntimeError, OSError) as exc:
             print(f"teleop atc: {exc}")
             return 1
+        tag_router.add(sink_handle)
         controller.coordinator.set_observer(sink_handle)
         stack.callback(_close_episodes, controller, sink_handle)
+    copilot_attach: Any = None
     if not cfg.headless:  # headless runs (CI, --generate) stay physics-only and deterministic
-        _setup_copilot(cfg, controller, stack, sink_handle)
+        copilot_attach = _setup_copilot(cfg, controller, stack, tag_router, speak=speak)
     if "--generate" in hooks:
         assert cfg.generate is not None
         n = int(hooks["--generate"](controller, sink_handle, cfg.generate, resolve_seed(cfg)))
@@ -592,7 +595,58 @@ def _run_booth(
         health.start()
         stack.callback(health.stop)
     operator_box.append(glove)
-    return _run(cfg, controller, glove, health)
+    return _run(
+        cfg,
+        controller,
+        glove,
+        health,
+        tag_router=tag_router,
+        copilot_attach=copilot_attach,
+    )
+
+
+class _EpisodeTagRouter:
+    """Routes Tier 3 Argon ``tag_episode`` calls to CLI and/or UI ``RecordingDesk``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sinks: list[Any] = []
+
+    def add(self, sink: Any) -> None:
+        if sink is None:
+            return
+        with self._lock:
+            if sink not in self._sinks:
+                self._sinks.append(sink)
+
+    def tag_episode(
+        self, uid: str, *, dataset_tag: str, audit: Mapping[str, Any] | None = None
+    ) -> bool:
+        with self._lock:
+            sinks = list(self._sinks)
+        matched = False
+        for sink in sinks:
+            tagger = getattr(sink, "tag_episode", None)
+            if callable(tagger):
+                try:
+                    if bool(tagger(uid, dataset_tag=dataset_tag, audit=audit)):
+                        matched = True
+                except Exception:
+                    logger.exception("atc: episode tag router failed")
+        return matched
+
+
+class _StageSpeakerAdapter:
+    """Adapts ``copilot.speech.Speaker`` to ``stage.Speaker`` without double-closing."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def say(self, text: str) -> None:
+        self._inner.say(text)
+
+    def close(self) -> None:
+        pass  # ExitStack closes the shared copilot Speaker once
 
 
 def _setup_copilot(
@@ -600,36 +654,187 @@ def _setup_copilot(
     controller: StageController,
     stack: contextlib.ExitStack,
     episode_sink: Any = None,
-) -> None:
-    """Attach the Tier 2 grasp gate: Gemini, else local Gemma, else nothing (physics only).
+    *,
+    speak: bool = False,
+) -> Any:
+    """Attach unified Tier 1 voice + callouts, Tier 2 grasp gate, and silent Tier 3 Argon audit.
 
     Advisory side effects only: the gate can withhold a skill from the Fleet Library and speaks
     its verdict; it never sends console keys or commands a robot. With Gemini, the gate also
-    hands each judged rescue to the silent Tier 3 audit, whose report feeds the console card
-    (``controller.audit``) and tags the recorded episode for ``teleop process``.
+    hands each judged rescue (and OOD refusal) to the silent Tier 3 audit, whose report feeds the
+    console card (``controller.audit``) and tags recorded episodes for ``teleop process``.
     """
     from teleop.copilot.config import CopilotConfig
     from teleop.copilot.gate import build_grasp_gate
 
     try:
-        ccfg = CopilotConfig.from_env(mute=not cfg.audio)
+        ccfg = CopilotConfig.from_env(mute=not speak)
     except ValueError as exc:
-        logger.warning("atc: copilot config invalid (%s); grasp gate off", exc)
-        return
+        logger.warning("atc: copilot config invalid (%s); falling back to offline audio", exc)
+        if speak:
+            controller.audio = AudioCues(SystemSpeaker(), enabled=True)
+        return None
     use_gemini = cfg.gemini and ccfg.has_key
-    if not use_gemini and not ccfg.local_url:
-        logger.info("atc: grasp gate physics only (no GEMINI_API_KEY / COPILOT_LOCAL_URL)")
-        return
-    speaker = _copilot_speaker(ccfg) if use_gemini and cfg.audio else None
+    speaker, streamer = _copilot_speaker(ccfg, use_gemini=use_gemini) if speak else (None, None)
+    if streamer is not None:
+        stack.callback(streamer.close)
     if speaker is not None:
         stack.callback(speaker.close)
+        speaker.precache_cues_async()
+
+    has_vlm = use_gemini or bool(ccfg.local_url)
+    use_console_callouts = cfg.display == "console"
+    if speaker is not None and not use_console_callouts:
+        # In --display viewer mode, wire unified Copilot Speaker into StageController.audio
+        # while suppressing generic VALIDATION_GATE speech when GraspGate speaks verdict.say.
+        controller.audio = AudioCues(
+            _StageSpeakerAdapter(speaker),
+            enabled=True,
+            skip_validation_gate=has_vlm,
+        )
+
+    copilot_attach: Any = None
+    if use_console_callouts:
+        copilot_attach = _build_console_copilot_attach(
+            ccfg,
+            use_gemini=use_gemini,
+            speaker=speaker,
+            gate_speaks=has_vlm,
+        )
+
+    if not has_vlm:
+        logger.info("atc: grasp gate physics only (no GEMINI_API_KEY / COPILOT_LOCAL_URL)")
+        return copilot_attach
+
     reviewer = _audit_reviewer(ccfg, controller, episode_sink) if use_gemini else None
     if reviewer is not None:
         stack.callback(reviewer.close)  # after the gate (LIFO): the gate submits to it
-    gate = build_grasp_gate(ccfg, use_gemini=use_gemini, speaker=speaker, audit_reviewer=reviewer)
+
+    def _on_gate_verdict(verdict: Any, bay_id: int) -> None:
+        controller.on_grasp_verdict(verdict)
+        if copilot_attach is not None:
+            publish_verdict = getattr(copilot_attach, "publish_verdict", None)
+            if callable(publish_verdict):
+                publish_verdict(verdict, bay_id)
+
+    gate = build_grasp_gate(
+        ccfg,
+        use_gemini=use_gemini,
+        speaker=speaker,
+        audit_reviewer=reviewer,
+        on_verdict=_on_gate_verdict,
+    )
     stack.callback(gate.close)
+    gate.warmup(controller.coordinator.model)
     controller.coordinator.grasp_gate = gate
+    controller.coordinator.nonblocking_gate = not cfg.script and not cfg.headless
     logger.info("atc: grasp gate %s (%s)", gate.source, gate.model)
+    return copilot_attach
+
+
+def _build_console_copilot_attach(
+    ccfg: Any,
+    *,
+    use_gemini: bool,
+    speaker: Any,
+    gate_speaks: bool,
+) -> Any:
+    """Build an in-process callout bridge for ``run_console`` (populates ``#panel-copilot``)."""
+    import time
+
+    from teleop.copilot.callouts import Callout, CalloutService
+    from teleop.copilot.events import EventDetector, EventKind
+    from teleop.copilot.feed import CameraFrame, parse_feeds
+    from teleop.copilot.frames import FrameStore
+    from teleop.copilot.gemini import GeminiClient
+    from teleop.copilot.local import LocalModelClient
+    from teleop.copilot.publish import callout_message
+
+    server_box: list[Any] = []
+
+    def attach(server: Any) -> tuple[Any, Any, Any]:
+        server_box.append(server)
+        store = FrameStore()
+        detector = EventDetector()
+        feeds_lock = threading.Lock()
+        feeds_state: list[tuple[int, dict[int, Any]]] = [(-1, {})]
+
+        client = (
+            GeminiClient(ccfg.gemini_api_key, no_images=ccfg.no_images)
+            if use_gemini and ccfg.gemini_api_key
+            else None
+        )
+        local_client = LocalModelClient.from_config(ccfg)
+
+        def show(callout: Callout) -> None:
+            server.publish_copilot(callout_message(callout))
+
+        service = CalloutService(
+            client,
+            model=ccfg.fast_model,
+            local_client=local_client,
+            local_model=ccfg.local_model,
+            thinking_level=ccfg.fast_thinking,
+            sink=show,
+            speaker=speaker,
+            frame_for=store.latest,
+            no_images=ccfg.no_images,
+        )
+
+        def on_telemetry(msg: dict[str, Any]) -> None:
+            lid = msg.get("layout_id")
+            if isinstance(lid, int) and not isinstance(lid, bool):
+                with feeds_lock:
+                    feeds_state[0] = (lid % 256, parse_feeds(msg))
+            store.on_telemetry(msg)
+            for event in detector.feed(msg):
+                if gate_speaks and event.kind is EventKind.GATE_RESULT:
+                    # GraspGate already spoke & posted the verdict; avoid duplicate TTS.
+                    continue
+                service.handle(event)
+
+        def on_frame(slot: int, layout_id: int, jpeg: bytes) -> None:
+            with feeds_lock:
+                cur_lid, fmap = feeds_state[0]
+            if layout_id % 256 != cur_lid:
+                return
+            info = fmap.get(slot)
+            if info is None:
+                return
+            store.add(
+                CameraFrame(
+                    bay=info.bay,
+                    camera=info.camera,
+                    role=info.role,
+                    jpeg=jpeg,
+                    t_ns=time.monotonic_ns(),
+                )
+            )
+
+        return on_telemetry, on_frame, service.close
+
+    def publish_verdict(verdict: Any, bay_id: int) -> None:
+        if not server_box:
+            return
+        say = getattr(verdict, "say", "") or ""
+        reason = getattr(verdict, "reason", "") or ""
+        source = getattr(verdict, "source", "") or ""
+        if not say.strip() or source in ("physics_only", "error"):
+            return
+        approved = bool(getattr(verdict, "approved", True))
+        server_box[0].publish_copilot(
+            {
+                "type": "copilot",
+                "bay": int(bay_id),
+                "severity": "info" if approved else "alarm",
+                "say": str(say).strip(),
+                "detail": str(reason).strip(),
+                "source": "local" if source == "local" else "model",
+            }
+        )
+
+    attach.publish_verdict = publish_verdict  # type: ignore[attr-defined]
+    return attach
 
 
 def _audit_reviewer(ccfg: Any, controller: StageController, episode_sink: Any) -> Any:
@@ -644,13 +849,18 @@ def _audit_reviewer(ccfg: Any, controller: StageController, episode_sink: Any) -
     return AuditReviewer(client, cfg=ccfg, on_update=on_update, episode_sink=episode_sink)
 
 
-def _copilot_speaker(ccfg: Any) -> Any:
-    """The Tier 1 voice: Gemini TTS streamed over SSE, system voice as the fallback."""
+def _copilot_speaker(ccfg: Any, *, use_gemini: bool = True) -> tuple[Any, Any]:
+    """Unified voice: Gemini SSE TTS when enabled, fast ``espeak-ng`` system fallback otherwise."""
     from teleop.copilot.speech import Speaker
     from teleop.copilot.tts_stream import GeminiStreamingTTS
 
-    streamer = GeminiStreamingTTS(ccfg.gemini_api_key, model=ccfg.tts_model, voice=ccfg.voice)
-    return Speaker(streamer, tts_model=ccfg.tts_model, voice=ccfg.voice, mute=ccfg.mute)
+    streamer = (
+        GeminiStreamingTTS(ccfg.gemini_api_key, model=ccfg.tts_model, voice=ccfg.voice)
+        if use_gemini and ccfg.gemini_api_key
+        else None
+    )
+    speaker = Speaker(streamer, tts_model=ccfg.tts_model, voice=ccfg.voice, mute=ccfg.mute)
+    return speaker, streamer
 
 
 def rescue_label(operator_box: list[Any]) -> Callable[[], str]:
@@ -721,6 +931,9 @@ def _run(
     controller: StageController,
     glove: GloveOperator | ScriptedGlove | SelectingGlove | None,
     health: HealthMonitor | None = None,
+    *,
+    tag_router: _EpisodeTagRouter | None = None,
+    copilot_attach: Any = None,
 ) -> int:
     import subprocess
     import sys
@@ -793,6 +1006,8 @@ def _run(
                 from teleop.console.run import ConsolePortInUse, run_console
 
                 recordings = _recording_desk(cfg, controller, glove)
+                if tag_router is not None:
+                    tag_router.add(recordings)
                 recordings.start()
                 try:
                     run_console(
@@ -806,6 +1021,7 @@ def _run(
                         dummy=dummy,
                         calib=_console_calibrator(cfg, glove),
                         recordings=recordings,
+                        copilot_attach=copilot_attach,
                     )
                 except ConsolePortInUse as exc:
                     print(f"teleop atc: console port {exc.port} in use (try --console-port)")

@@ -16,14 +16,37 @@ class FakeSink:
         self.folder = folder
         self.closed = False
         self.written = 0
+        self._uids: dict[str, int] = {}
 
-    def add(self, **meta: Any) -> None:
+    def add(self, uid: str | None = None, **meta: Any) -> None:
         """Write one sidecar line, as ``EpisodeRecorder.end_episode`` would."""
         path = self.folder / SIDECAR
         path.parent.mkdir(parents=True, exist_ok=True)
+        idx = self.written
+        if uid is not None:
+            self._uids[uid] = idx
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"episode_index": self.written, **meta}) + "\n")
+            f.write(json.dumps({"episode_index": idx, **meta}) + "\n")
         self.written += 1
+
+    def tag_episode(
+        self, uid: str, *, dataset_tag: str, audit: dict[str, Any] | None = None
+    ) -> bool:
+        if uid not in self._uids:
+            return False
+        idx = self._uids[uid]
+        path = self.folder / SIDECAR
+        lines = path.read_text(encoding="utf-8").splitlines()
+        out: list[str] = []
+        for raw in lines:
+            row = json.loads(raw)
+            if row.get("episode_index") == idx:
+                row["dataset_tag"] = dataset_tag
+                if audit is not None:
+                    row["audit"] = dict(audit)
+            out.append(json.dumps(row))
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        return True
 
     def close(self) -> None:
         self.closed = True
@@ -159,3 +182,33 @@ def test_scan_lists_newest_first_and_skips_junk(tmp_path: Path) -> None:
     assert [e["bay"] for e in rows[0]["episodes"]] == [2]  # half-written line skipped
     assert rows[0]["started_at"] == "2026-11-15T09:00:00"
     assert scan(tmp_path / "missing") == []
+
+
+def test_tag_episode_routes_across_active_saving_and_saved_sinks(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.desk.start_recording()
+    h.desk.pump()
+    h.sinks[0].add(uid="ep-active", bay=1, source="glove", success=True)
+    h.sinks[0].add(uid="ep-after-stop", bay=2, source="glove", success=True)
+    assert h.desk.tag_episode(
+        "ep-active",
+        dataset_tag="approve",
+        audit={"operator_note": "Clean hook and clearance."},
+    )
+    rows = h.desk.status()["recordings"]
+    assert rows[0]["episodes"][0]["dataset_tag"] == "approve"
+    assert rows[0]["episodes"][0]["audit_note"] == "Clean hook and clearance."
+
+    # Stop and finalise, then verify a late Argon audit (~8 s later) still tags the saved sink
+    h.desk.stop_recording()
+    h.desk.pump()
+    _wait(lambda: h.sinks[0].closed and h.desk.status()["saving"] == 0)
+    assert h.desk.tag_episode(
+        "ep-after-stop",
+        dataset_tag="flag",
+        audit={"operator_note": "Wrist approached HV busbar."},
+    )
+    saved_eps = h.desk.status()["recordings"][0]["episodes"]
+    assert saved_eps[1]["dataset_tag"] == "flag"
+    assert saved_eps[1]["audit_note"] == "Wrist approached HV busbar."
+    assert not h.desk.tag_episode("unknown-uid", dataset_tag="approve")

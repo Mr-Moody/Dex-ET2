@@ -470,6 +470,7 @@ class _Gate:
     future: Future[ValidationReport]
     deadline: float
     grasp: Future[GraspGateVerdict] | None = None  # Tier 2 grasp gate, in parallel
+    max_wait_s: float = 8.0  # interactive grace window past deadline before joining
 
 
 @dataclass
@@ -580,6 +581,7 @@ class AtcCoordinator:
         self._act = act
         self._observer = observer
         self.grasp_gate = grasp_gate
+        self.nonblocking_gate: bool = False
         self.last_grasp_verdict: GraspGateVerdict | None = None
         self.backend_note = ""
         self._bays = {b: _Bay(b, BayRig(model, data, b)) for b in bays}
@@ -1086,6 +1088,9 @@ class AtcCoordinator:
             self._submit_gate(bay, traj, bay.signature)
             bay.grasp = None
         else:
+            if self.grasp_gate is not None and bay.grasp is not None:
+                self._submit_discarded_audit(bay, bay.grasp)
+            bay.grasp = None
             logger.info("bay %d: rescue discarded (bolt not cleared), staying in hover", bay.bay_id)
 
     def _control_auto(self, bay: _Bay) -> None:
@@ -1397,6 +1402,11 @@ class AtcCoordinator:
 
     def _escalate(self, bay: _Bay, refused: bool, reason: str) -> None:
         """Retract 3 cm to zero-velocity hover, join the FIFO queue, alert compliance + reasoner."""
+        stall_snap = (
+            self._pose_snapshot(bay, "ood-refusal")
+            if refused and self.grasp_gate is not None
+            else None
+        )
         self._retract_to_hover(bay)
         bay.refused = refused
         bay.state = BayState.QUEUED
@@ -1407,21 +1417,19 @@ class AtcCoordinator:
         summary = f"bay {bay.bay_id} stall ({reason}): " + (
             "OOD signature refused, escalated to operator" if refused else "unseen signature"
         )
-        self._emit(
-            kind,
-            bay,
-            summary,
-            {
-                "reason": reason,
-                "z": list(sig.as_vector()) if sig else [],
-                "distance": None
-                if match is None or not math.isfinite(match.distance)
-                else match.distance,
-                "is_ood": True if match is None else match.is_ood,
-                "queue": list(self._queue),
-            },
-        )
+        meta: dict[str, Any] = {
+            "reason": reason,
+            "z": list(sig.as_vector()) if sig else [],
+            "distance": None
+            if match is None or not math.isfinite(match.distance)
+            else match.distance,
+            "is_ood": True if match is None else match.is_ood,
+            "queue": list(self._queue),
+        }
+        self._emit(kind, bay, summary, meta)
         self._submit_reasoning(kind, bay)
+        if stall_snap is not None:
+            self._submit_ood_audit(bay, stall_snap, meta)
 
     def _abort_autonomous(self, bay: _Bay, reason: str) -> None:
         rec = bay.auto
@@ -1551,16 +1559,23 @@ class AtcCoordinator:
             executor.shutdown(wait=True, cancel_futures=True)
 
     def _apply_gates(self) -> None:
-        """Apply every gate whose sim-time deadline has been reached, waiting for the worker."""
+        """Apply every gate whose sim-time deadline has been reached.
+
+        By default (seeded headless / golden runs / fast synthetic tests), joins deterministically
+        at ``gate.deadline``. In live 60 Hz interactive sessions (``nonblocking_gate=True``), polls
+        ``done()`` past ``gate.deadline`` up to ``gate.max_wait_s`` so a slow network call never
+        freezes physics or camera rendering.
+        """
         for bay in self._bays.values():
             gate = bay.gate
-            if (
-                gate is not None
-                and bay.state == BayState.VALIDATING
-                and (self.time_s >= gate.deadline)
-            ):
-                bay.gate = None
-                self._apply_gate(bay, gate)
+            if gate is None or bay.state != BayState.VALIDATING or self.time_s < gate.deadline:
+                continue
+            if self.nonblocking_gate and self.grasp_gate is not None and gate.grasp is not None:
+                both_done = gate.future.done() and gate.grasp.done()
+                if not both_done and self.time_s < gate.deadline + gate.max_wait_s:
+                    continue
+            bay.gate = None
+            self._apply_gate(bay, gate)
 
     def _submit_gate(self, bay: _Bay, traj: RescueTrajectory, sig: StallSignature) -> None:
         sku = self.config.part_sku_id
@@ -1671,6 +1686,63 @@ class AtcCoordinator:
         except Exception:
             logger.exception("bay %d: grasp gate submit failed", bay.bay_id)
             return None
+
+    def _submit_ood_audit(
+        self, bay: _Bay, stall_snap: PoseSnapshot, meta: Mapping[str, Any]
+    ) -> None:
+        submit_fn = getattr(self.grasp_gate, "submit_audit_only", None)
+        if not callable(submit_fn):
+            return
+        try:
+            submit_fn(
+                bay_id=bay.bay_id,
+                skill_id="ood_refused",
+                snapshots=(stall_snap,),
+                model=self.model,
+                timeline={
+                    "event": "OOD_REFUSAL",
+                    "bay_id": bay.bay_id,
+                    "sku": self.config.part_sku_id,
+                    "bolt_x_m": stall_snap.bolt_x_m,
+                    "tau_hand_nm": stall_snap.tau_hand_nm,
+                    **dict(meta),
+                },
+                episode_uid=None,
+            )
+        except Exception:
+            logger.exception("bay %d: OOD audit submit failed", bay.bay_id)
+
+    def _submit_discarded_audit(self, bay: _Bay, cap: _GraspCapture) -> None:
+        submit_fn = getattr(self.grasp_gate, "submit_audit_only", None)
+        if not callable(submit_fn):
+            return
+        end_snap = self._pose_snapshot(bay, "aborted-release")
+        uid_fn = getattr(self._observer, "latest_episode_uid", None)
+        episode_uid: str | None = None
+        if callable(uid_fn):
+            with contextlib.suppress(Exception):
+                uid = uid_fn(bay.bay_id)
+                episode_uid = uid if isinstance(uid, str) else None
+        try:
+            submit_fn(
+                bay_id=bay.bay_id,
+                skill_id="aborted_rescue",
+                snapshots=_select_tier3_snapshots(cap.samples, end_snap),
+                model=self.model,
+                timeline={
+                    "event": "RESCUE_ABORTED",
+                    "bay_id": bay.bay_id,
+                    "sku": self.config.part_sku_id,
+                    "refused": bay.refused,
+                    "bolt_start_m": cap.bolt_start_m,
+                    "bolt_final_m": end_snap.bolt_x_m,
+                    "peak_tau_hand_nm": cap.tau_peak,
+                    "peak_arm_ratio": cap.arm_peak,
+                },
+                episode_uid=episode_uid,
+            )
+        except Exception:
+            logger.exception("bay %d: aborted rescue audit submit failed", bay.bay_id)
 
     def _apply_gate(self, bay: _Bay, gate: _Gate) -> None:
         skill = gate.skill

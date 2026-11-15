@@ -251,6 +251,20 @@ class ConsoleServer:
             self._latest_text = text
         self._fanout(lambda c: c.put_text(text))
 
+    def publish_copilot(self, msg: Mapping[str, Any]) -> None:
+        """Validate, stamp, keep and broadcast one copilot display message from any thread."""
+        note = _clean_copilot(dict(msg))
+        if note is None:
+            logger.debug("console: ignoring malformed in-process copilot message")
+            return
+        with self._lock:
+            self._copilot_seq += 1
+            note["seq"] = self._copilot_seq
+            note["wall"] = datetime.now().strftime("%H:%M:%S")
+            text = json.dumps(note, separators=(",", ":"))
+            self._copilot.append(text)
+        self._fanout(lambda c: c.put_copilot(text))
+
     def publish_frame(self, slot: int, layout_id: int, jpeg: bytes) -> None:
         payload = bytes((slot & 0xFF, layout_id % 256)) + jpeg
         with self._lock:

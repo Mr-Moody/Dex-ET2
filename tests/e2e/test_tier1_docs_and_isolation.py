@@ -288,6 +288,10 @@ class TestFeature1WorktreeAndRepoIsolationTier2:
     def test_f1_t2_main_checkout_has_no_modified_tracked_files_from_our_work(self) -> None:
         common_dir = Path(_git("rev-parse", "--path-format=absolute", "--git-common-dir"))
         main_root = common_dir.parent.resolve()
+        if main_root != REPO_ROOT.resolve():
+            main_branch = _git("branch", "--show-current", cwd=main_root)
+            if main_branch != "main":
+                pytest.skip(f"Sibling checkout {main_root} is on branch {main_branch!r}, not main")
         tracked_mods = [
             line
             for line in _git(
