@@ -2,6 +2,7 @@
 
     teleop atc [--source studio|synthetic|replay] [--unoq-host HOST] [--headless --steps N]
                [--script] [--seed N] [--hotspot | --no-hotspot] [--config configs/atc.yaml]
+               [--demo-rescue [--demo-shake X]]
 
 The default (``uv run teleop atc``) is the booth: it keeps the hotspot up, listens for the Studio
 gloves, uses the UNO Q board (or a local loopback node, hot-swapped either way) and shows a live
@@ -15,6 +16,8 @@ console page or the viewer): ``1..4`` select
 a bay, ``SPACE`` toggles the clutch, ``F``/``G``/``P`` arm the Bay 1 flap, Bay 2 flap and Bay 2
 pinned-bolt faults, ``R`` resets (see ``teleop.atc.stage``). ``--script`` plays the six-beat
 stage script with a scripted glove; headless it exits 0 only if every beat passed.
+``--demo-rescue`` plays one hard-coded take: Bay 1 jams, then a shaky "human" glove presses the
+flap down and clears the bolt (``--demo-shake`` scales the hand shake, 0 for none).
 
 Recovery after a matched stall: ``--recovery-backend dmp`` (default, the learned DMP skills),
 ``hybrid`` (a gated ACT checkpoint from ``--act-checkpoint``, DMP behind it) or ``act``; ``M``
@@ -45,6 +48,7 @@ import yaml
 
 from teleop.app import make_source
 from teleop.atc.coordinator import DEFAULT_REALISM, OperatorInput
+from teleop.atc.demo_rescue import DemoRescueDirector, Shake
 from teleop.atc.glove_filter import GloveInputFilter
 from teleop.atc.glove_select import SelectingGlove
 from teleop.atc.hud import hud_lines, hud_overlays
@@ -107,6 +111,8 @@ class AtcConfig:
     jam_every: int = 0  # every Nth pallet arrives with a raised flap (0: only on a jam press)
     audio: bool = True
     script: bool = False
+    demo_rescue: bool = False  # hard-coded jam + human-like operator rescue on Bay 1
+    demo_shake: float = 1.0  # hand-shake scale for --demo-rescue (0: steady)
     hud_log_period_s: float = 5.0
     headless: bool = False
     steps: int | None = None
@@ -160,7 +166,7 @@ def resolve_seed(cfg: AtcConfig) -> int:
     """Run seed: an explicit one always wins; else the scripted show uses ``STAGE_SEED``."""
     if cfg.seed is not None:
         return cfg.seed
-    return STAGE_SEED if cfg.script else 0
+    return STAGE_SEED if (cfg.script or cfg.demo_rescue) else 0
 
 
 def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
@@ -306,6 +312,15 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--headless", action="store_true", default=None)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--script", action="store_true", default=None, help="play the 6-beat script")
+    ap.add_argument(
+        "--demo-rescue",
+        action="store_true",
+        default=None,
+        help="jam Bay 1, then rescue it with a scripted shaky human glove",
+    )
+    ap.add_argument(
+        "--demo-shake", type=float, default=None, help="--demo-rescue hand-shake scale (0: none)"
+    )
     ap.add_argument("--no-audio", dest="audio", action="store_false", default=None)
     ap.add_argument("--no-background", dest="background_bays", action="store_false", default=None)
     ap.add_argument("--display", choices=DISPLAYS, default=None, help="console (default) or viewer")
@@ -432,6 +447,9 @@ def main(argv: list[str]) -> int:
         from dotenv import load_dotenv
 
         load_dotenv(env_file)
+    if cfg.demo_rescue and (cfg.script or cfg.generate is not None):
+        print("teleop atc: --demo-rescue cannot be combined with --script or --generate")
+        return 2
     if cfg.generate is not None and (not cfg.headless or cfg.record_episodes is None):
         print("teleop atc: --generate needs --headless and --record-episodes")
         return 2
@@ -527,7 +545,9 @@ def _run_booth(
         audio=AudioCues(NullSpeaker(), enabled=False),
         hardware=hardware,
         cycle_dwell_s=cfg.cycle_dwell_s,
-        auto_jam_every=0 if (cfg.script or cfg.generate is not None) else cfg.jam_every,
+        auto_jam_every=0
+        if (cfg.script or cfg.demo_rescue or cfg.generate is not None)
+        else cfg.jam_every,
         include_background_bays=cfg.background_bays,
         seed=resolve_seed(cfg),
         realism=cfg.realism,
@@ -884,7 +904,7 @@ def _build_glove(
     cfg: AtcConfig, controller: StageController
 ) -> tuple[GloveOperator | ScriptedGlove | None, StudioSource | None]:
     """The operator input (None under ``--script``) and its Studio listener, if any."""
-    if cfg.script:
+    if cfg.script or cfg.demo_rescue:
         return None, None
     if cfg.source == "synthetic":
         # Without real gloves, a scripted rescue plays while the clutch is held.
@@ -938,7 +958,13 @@ def _run(
     import subprocess
     import sys
 
-    director = StageDirector(controller) if cfg.script else None
+    director: StageDirector | DemoRescueDirector | None = None
+    if cfg.script:
+        director = StageDirector(controller)
+    elif cfg.demo_rescue:
+        director = DemoRescueDirector(
+            controller, shake=Shake().scaled(max(cfg.demo_shake, 0.0)), seed=resolve_seed(cfg)
+        )
     dummy_proc: subprocess.Popen[bytes] | None = None
     dummy: Any = None
     # TODO(rokoko-gloves-swap): Temporary dummy UDP streamer + UI override while physical
@@ -1038,6 +1064,11 @@ def _run(
 
     if director is None:
         return 0
+    if isinstance(director, DemoRescueDirector):
+        took = f"{director.rescue_s:.1f} s" if director.rescue_s is not None else "--"
+        gate = "deployed" if director.deployed else "not deployed"
+        print(f"demo rescue: {'ok' if director.ok else 'FAILED'} (rescue {took}, skill {gate})")
+        return 0 if director.ok else 1
     for r in director.results:
         took = f"{r.end_s - r.start_s:5.1f} s" if r.end_s is not None else "   --  "
         print(f"beat {r.name:<30} {'ok' if r.ok else 'FAILED':<6} {took}", flush=True)
