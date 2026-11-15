@@ -92,9 +92,19 @@
         <ol class="queue" id="queue"></ol>
       </section>
 
-      <section class="panel panel--copilot" id="panel-copilot" hidden>
-        <h2>Copilot <span class="panel__note">advisory only</span></h2>
-        <ol class="cop" id="copilot-list" aria-live="polite" tabindex="0" aria-label="Copilot call-outs"></ol>
+      <!-- Everything the Gemini copilot says, in one section: each part folds away on its own,
+           and the section hides while none of them has anything to show (console.js). -->
+      <section class="panel copilot" id="copilot-section" aria-labelledby="copilot-title" hidden>
+        <h2 id="copilot-title">Copilot <span class="panel__note">advisory only</span></h2>
+        <details class="copilot__fold" id="panel-copilot" data-fold="callouts" open hidden>
+          <summary>Call-outs <span class="panel__note" id="copilot-count"></span></summary>
+          <ol class="cop" id="copilot-list" aria-live="polite" tabindex="0" aria-label="Copilot call-outs"></ol>
+        </details>
+        <details class="copilot__fold" id="copilot-audit-fold" data-fold="audit" open hidden>
+          <summary>Second opinion <span class="panel__note">silent audit</span></summary>
+          <!-- Silent deep audit of the latest rescue episode; audit.js builds and fills it -->
+          <section class="argon" id="audit-panel" aria-label="Second-opinion audit" aria-live="polite" hidden></section>
+        </details>
       </section>
 
       <section class="panel">
@@ -106,9 +116,6 @@
         <h2>Skill gate</h2>
         <div class="gate" id="gate"></div>
       </section>
-
-      <!-- Silent deep audit of the latest rescue episode; audit.js builds and fills it -->
-      <section class="panel argon" id="audit-panel" aria-label="Second-opinion audit" aria-live="polite" hidden></section>
 
       <section class="panel calib" id="panel-calib" data-state="off" aria-labelledby="calib-title">
         <h2 id="calib-title">Glove calibration <span class="panel__note calib__meta" id="calib-meta" aria-live="polite">Unavailable</span></h2>
