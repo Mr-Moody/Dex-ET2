@@ -1349,6 +1349,7 @@ function updateCopilot() {
   if (key === ui.copilotKey) return;
   ui.copilotKey = key;
   $("panel-copilot").hidden = !rows.length;
+  $("copilot-count").textContent = rows.length ? String(rows.length) : "";
   const list = $("copilot-list");
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -1923,6 +1924,44 @@ window.addEventListener(
 
 window.addEventListener("resize", () => ui.telemetry && updateSparks(ui.telemetry));
 
+// The Copilot section groups the call-outs and the second-opinion card. Each part folds on its
+// own (the choice is remembered per browser), a part with nothing to show leaves the section,
+// and the section itself hides until some part has content. The call-out fold's visibility is
+// set by updateCopilot; the card's by audit.js, which only toggles #audit-panel itself.
+function initCopilotSection() {
+  const section = $("copilot-section");
+  const callouts = $("panel-copilot");
+  const auditFold = $("copilot-audit-fold");
+  const card = $("audit-panel");
+  if (!section || !callouts || !auditFold || !card) return;
+  const sync = () => {
+    if (auditFold.hidden !== card.hidden) auditFold.hidden = card.hidden;
+    const empty = callouts.hidden && auditFold.hidden;
+    if (section.hidden !== empty) section.hidden = empty;
+  };
+  const observer = new MutationObserver(sync);
+  observer.observe(callouts, { attributes: true, attributeFilter: ["hidden"] });
+  observer.observe(card, { attributes: true, attributeFilter: ["hidden"] });
+  for (const fold of section.querySelectorAll("details[data-fold]")) {
+    const key = `console.copilot.fold.${fold.dataset.fold}`;
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved !== null) fold.open = saved === "open";
+    } catch (_) {
+      // storage blocked (private window): folds start open
+    }
+    fold.addEventListener("toggle", () => {
+      try {
+        localStorage.setItem(key, fold.open ? "open" : "closed");
+      } catch (_) {
+        // not remembered; the fold still works
+      }
+    });
+  }
+  sync();
+}
+
+initCopilotSection();
 initViewBar();
 initDummyControls();
 initCalibControls();
