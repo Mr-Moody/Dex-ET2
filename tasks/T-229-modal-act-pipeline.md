@@ -1,12 +1,12 @@
 ---
 id: T-229
 title: Run scripted episode generation and ACT training on Modal
-status: todo
-owner: null
-branch: null
+status: claimed
+owner: modal-act-pipeline
+branch: feat/modal-act-pipeline
 depends_on: []
 plan: null
-claimed_at: null
+claimed_at: '2026-11-15T01:13:24+00:00'
 ---
 
 A Modal alternative to the Verda runbook: generate scripted rescue episodes on CPU containers,
