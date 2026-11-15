@@ -217,6 +217,7 @@ def test_episode_sink_nonblocking_and_two_bay_stage_metadata(
     assert all(m["success"] and m["fault"] == "flap" for m in metas)
 
 
+@needs_models
 def test_episode_sink_tags_a_queued_episode_into_its_meta(
     unoq_client: UnoQClient, tmp_path: Path
 ) -> None:
