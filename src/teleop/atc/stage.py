@@ -10,7 +10,8 @@ audio cues.
 Keys (GLFW codes from the passive viewer, mirrors the hardware console):
 
 =========  ===============================================================================
-``1..4``   select a bay (the operator takes the queued bay that holds the rescue slot)
+arrows     select a bay: LEFT 1, RIGHT 2, UP 3, DOWN 4 (``1..4`` still work); the operator
+           takes the queued bay that holds the rescue slot
 ``SPACE``  toggle the software dead-man clutch
 ``F``      Judge Fault Rig: arm Bay 1's sprung flap for its next cycle (beat 2)
 ``G``      arm Bay 2's sprung flap (35 deg / 12 cm latch) for its next cycle (beat 5)
@@ -41,6 +42,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from teleop.atc.act_recovery import ActRecoveryFactory
 from teleop.atc.coordinator import (
     DEFAULT_REALISM,
     ROUTINE,
@@ -48,7 +50,14 @@ from teleop.atc.coordinator import (
     CoordinatorConfig,
     OperatorInput,
 )
-from teleop.atc.hud import ActionNote, GateStatus, HudView, RescueStatus
+from teleop.atc.hud import (
+    ActionNote,
+    ConveyorStatus,
+    GateStatus,
+    HudView,
+    RecoveryStatus,
+    RescueStatus,
+)
 from teleop.atc.recovery import next_backend
 from teleop.atc.types import BOLT_CLEARED_M, BaySnapshot, BayState, ConsoleInputState
 from teleop.atc.validator import GATE_PASS_MIN, ValidationReport
@@ -58,11 +67,13 @@ from teleop.sim.bays import ACTIVE_BAYS, BACKGROUND_BAYS
 from teleop.types import Pose
 from teleop.unoq.client import UnoQClient
 from teleop.unoq.dmp import quat_to_mat
-from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu
+from teleop.unoq.mcu_bridge import McuConsoleBridge, SoftwareMcu, StickDirection, neighbour_bay
 
 logger = logging.getLogger(__name__)
 
 CONTROL_DT = 1.0 / 60.0
+POLL_LINK_TIMEOUT_S = 0.5  # network poller dead-man: about ten 50 ms polls
+POWER_ECHO_TIMEOUT_NS = 1_000_000_000  # a console must echo a pushed power mask within this
 
 
 # --------------------------------------------------------------------------- keys
@@ -73,6 +84,10 @@ class StageAction(StrEnum):
     SELECT_BAY_2 = "select_bay_2"
     SELECT_BAY_3 = "select_bay_3"
     SELECT_BAY_4 = "select_bay_4"
+    MOVE_LEFT = "move_left"
+    MOVE_RIGHT = "move_right"
+    MOVE_UP = "move_up"
+    MOVE_DOWN = "move_down"
     CLUTCH = "clutch"
     ESTOP = "estop"
     ARM_BAY1_FLAP = "arm_bay1_flap"
@@ -83,7 +98,22 @@ class StageAction(StrEnum):
 
 
 KEY_SPACE = 32
+# GLFW arrow key codes. The arrows move the selection one camera panel, like the console
+# joystick (Bay 1 | Bay 2 over Bay 3 | Bay 4); the digits 1-4 select a bay directly.
+KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP = 262, 263, 264, 265
+BAY_KEYS: dict[int, int] = {b: ord(str(b)) for b in range(1, 5)}
+_KEY_NAMES = {
+    KEY_SPACE: "SPACE",
+    KEY_LEFT: "LEFT",
+    KEY_RIGHT: "RIGHT",
+    KEY_UP: "UP",
+    KEY_DOWN: "DOWN",
+}
 KEYMAP: dict[int, StageAction] = {
+    KEY_LEFT: StageAction.MOVE_LEFT,
+    KEY_RIGHT: StageAction.MOVE_RIGHT,
+    KEY_UP: StageAction.MOVE_UP,
+    KEY_DOWN: StageAction.MOVE_DOWN,
     ord("1"): StageAction.SELECT_BAY_1,
     ord("2"): StageAction.SELECT_BAY_2,
     ord("3"): StageAction.SELECT_BAY_3,
@@ -97,13 +127,13 @@ KEYMAP: dict[int, StageAction] = {
     ord("M"): StageAction.CYCLE_BACKEND,
 }
 ACTION_LOG_LEN = 20
-CONTROL_KEYS_HINT = "Use 1-4, SPACE, E, F, G, P, R or M"
+CONTROL_KEYS_HINT = "Use the arrow keys, 1-4, SPACE, E, F, G, P, R or M"
 
 
 def key_name(code: int) -> str:
-    """Readable name for a GLFW key code: ``SPACE``, ``F``, ``1``."""
-    if code == KEY_SPACE:
-        return "SPACE"
+    """Readable name for a GLFW key code: ``SPACE``, ``LEFT``, ``F``, ``1``."""
+    if code in _KEY_NAMES:
+        return _KEY_NAMES[code]
     if 32 < code < 127:
         return chr(code)
     return f"key {code}"
@@ -114,6 +144,18 @@ _SELECT = {
     StageAction.SELECT_BAY_2: 2,
     StageAction.SELECT_BAY_3: 3,
     StageAction.SELECT_BAY_4: 4,
+}
+_MOVE = {
+    StageAction.MOVE_LEFT: StickDirection.LEFT,
+    StageAction.MOVE_RIGHT: StickDirection.RIGHT,
+    StageAction.MOVE_UP: StickDirection.UP,
+    StageAction.MOVE_DOWN: StickDirection.DOWN,
+}
+_EDGE = {
+    StickDirection.LEFT: "left column",
+    StickDirection.RIGHT: "right column",
+    StickDirection.UP: "top row",
+    StickDirection.DOWN: "bottom row",
 }
 
 
@@ -130,18 +172,22 @@ class ConsoleSource(Protocol):
     def close(self) -> None: ...
 
 
-def merge_console(states: Iterable[ConsoleInputState]) -> ConsoleInputState:
+def merge_console(
+    states: Iterable[ConsoleInputState], powered_off: frozenset[int] | None = None
+) -> ConsoleInputState:
     """Combine consoles: latest bay selection wins, any clutch holds, any E-stop releases.
 
-    A bay is powered off when any console has cut it, and the clutch never drives a cut bay.
+    A bay is powered off when any console has cut it (or per ``powered_off`` when the caller
+    tracks the power mask itself), and the clutch never drives a cut bay.
     """
     items = list(states)
     if not items:
-        return ConsoleInputState()
+        return ConsoleInputState(powered_off=powered_off or frozenset())
     selected = [s for s in items if s.selected_bay is not None]
     bay = max(selected, key=lambda s: s.timestamp_ns).selected_bay if selected else None
     estop = any(s.estop for s in items)
-    powered_off = frozenset[int]().union(*(s.powered_off for s in items))
+    if powered_off is None:
+        powered_off = frozenset[int]().union(*(s.powered_off for s in items))
     return ConsoleInputState(
         selected_bay=bay,
         clutch=any(s.clutch for s in items) and not estop and bay not in powered_off,
@@ -152,21 +198,38 @@ def merge_console(states: Iterable[ConsoleInputState]) -> ConsoleInputState:
     )
 
 
+@dataclass(slots=True)
+class _PowerSeen:
+    """The power mask one console last reported, and a mask pushed to it awaiting its echo."""
+
+    console: ConsoleSource
+    reported: frozenset[int]
+    expected: frozenset[int] | None = None
+    deadline_ns: int = 0
+
+
 class UnoQConsolePoller:
     """Console state from a remote UNO Q (``OP_CONSOLE_STATE``), polled on its own thread.
 
     Uses its own client connection so polling never interleaves with the coordinator's
     classify/fit requests. The clutch is dropped when no poll has succeeded for
-    ``timeout_s`` (same dead-man rule as the serial bridge). Bay states for the board LEDs are
-    queued by :meth:`set_bay_state` (only on change) and sent from the polling thread, so the
-    control loop never waits on the network.
+    ``timeout_s`` (the dead-man rule; the board itself already releases it 0.25 s after the
+    MCU goes quiet, so this only covers the Wi-Fi link, where one TCP retransmit or a power-save
+    beacon gap easily exceeds 0.25 s). Bay states for the board LEDs and the power mask are
+    queued by :meth:`set_bay_state` / :meth:`set_power_mask` (only on change) and sent from the
+    polling thread after each poll, so neither the control loop nor the button poll waits on
+    them.
+
+    The board stamps its state with its own monotonic clock, which says nothing on the laptop:
+    a change is restamped with this poller's clock so :func:`merge_console` can compare the
+    joystick's selection with the keyboard's.
     """
 
     def __init__(
         self,
         client: UnoQClient,
         period_s: float = 0.05,
-        timeout_s: float = 0.25,
+        timeout_s: float = POLL_LINK_TIMEOUT_S,
         clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self._client = client
@@ -180,6 +243,7 @@ class UnoQConsolePoller:
         self._edge = False
         self._bay_states: dict[int, BayState] = {}  # last state requested per bay
         self._pending: dict[int, BayState] = {}  # changed, not yet sent
+        self._power: frozenset[int] | None = None  # power mask to send, None: nothing new
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="unoq-console", daemon=True)
         self._thread.start()
@@ -189,25 +253,42 @@ class UnoQConsolePoller:
             self.poll_once()
 
     def poll_once(self) -> None:
-        """Send queued bay states, then poll the console once (the thread's body)."""
+        """Poll the console once, then send queued writes (the thread's body).
+
+        Polling first keeps the button state fresh: each queued write is a round trip to the
+        board and on to the MCU, and several at once would otherwise stall the dead-man check.
+        """
+        self._poll()
         with self._lock:
             pending, self._pending = self._pending, {}
+            power, self._power = self._power, None
+        if power is not None:
+            try:
+                self._client.set_power_mask(power)
+            except Exception as exc:
+                logger.debug("unoq power mask dropped: %s", exc)
         for bay_id, bay_state in pending.items():
             try:
                 self._client.set_bay_state(bay_id, bay_state)
             except Exception as exc:
                 logger.debug("unoq bay state %d dropped: %s", bay_id, exc)
+
+    def _poll(self) -> None:
         try:
             s, age = self._client.console_status()
         except Exception as exc:
             logger.debug("unoq console poll failed: %s", exc)
             return
+        now = self._clock()
         with self._lock:
-            if s.fault_rig_latched and not self._state.fault_rig_latched:
+            prev = self._state
+            same = replace(s, timestamp_ns=prev.timestamp_ns) == prev
+            s = replace(s, timestamp_ns=prev.timestamp_ns if same else now)
+            if s.fault_rig_latched and not prev.fault_rig_latched:
                 self._edge = True
             self._state = s
             self._heartbeat_age_ms = age
-            self._last_ok_ns = self._clock()
+            self._last_ok_ns = now
 
     @property
     def heartbeat_age_ms(self) -> int | None:
@@ -238,6 +319,11 @@ class UnoQConsolePoller:
                 return
             self._bay_states[bay_id] = state
             self._pending[bay_id] = state
+
+    def set_power_mask(self, off: frozenset[int]) -> None:
+        """Queue the bays to cut on the board (sent once, after the next poll)."""
+        with self._lock:
+            self._power = frozenset(off)
 
     def reset_rig(self) -> None:
         pass
@@ -624,6 +710,7 @@ class StageController:
         cycle_dwell_s: float = 1.0,
         background_bays: tuple[int, ...] = (),
         unoq_label: str = "",
+        auto_jam_every: int = 0,
     ) -> None:
         self.coordinator = coordinator
         self.active_bays = tuple(s.bay_id for s in coordinator.snapshots()) or ACTIVE_BAYS
@@ -632,6 +719,8 @@ class StageController:
         self.audio = audio
         self.cycle_dwell_s = cycle_dwell_s
         self.background_bays = background_bays
+        self.auto_jam_every = auto_jam_every  # every Nth pallet arrives with a raised flap
+        self._pallets: dict[int, int] = {}
         self.unoq_label = unoq_label
         self.mcu = SoftwareMcu()
         self.keyboard = McuConsoleBridge(self.mcu)
@@ -649,6 +738,9 @@ class StageController:
         self._rig_spent = False
         self._rescue_bay: int | None = None
         self._rescue_t0 = 0.0
+        self.powered_off: frozenset[int] = frozenset()  # one power mask for every console
+        self._power_seen: dict[int, _PowerSeen] = {}  # id(console) -> what it last reported
+        self._hw_seen: dict[int, tuple[ConsoleSource, ConsoleInputState]] = {}
 
     @classmethod
     def build(
@@ -662,6 +754,7 @@ class StageController:
         cycle_dwell_s: float = 1.0,
         include_background_bays: bool = False,
         unoq_label: str = "",
+        auto_jam_every: int = 0,
         seed: int = 0,
         realism: float = DEFAULT_REALISM,
         gate_pass_min: int = GATE_PASS_MIN,
@@ -687,6 +780,7 @@ class StageController:
             cycle_dwell_s=cycle_dwell_s,
             background_bays=BACKGROUND_BAYS if include_background_bays else (),
             unoq_label=unoq_label,
+            auto_jam_every=auto_jam_every,
         )
 
     @property
@@ -752,13 +846,28 @@ class StageController:
                 return bay
         return None
 
+    def _shown_bay(self) -> int | None:
+        """The selected bay the displays show (any console's latest selection)."""
+        return self.console.selected_bay
+
+    def _unselectable(self, bay: int) -> str | None:
+        if bay in self.active_bays:
+            return None
+        if bay in self.background_bays:
+            return f"Bay {bay} replays a recorded cycle and cannot be selected"
+        return f"Bay {bay} is not running in this simulation"
+
     def _precheck(self, action: StageAction) -> str | None:
         """Why ``action`` would do nothing right now, or ``None`` if it applies."""
-        if action in _SELECT and _SELECT[action] not in self.active_bays:
-            bay = _SELECT[action]
-            if bay in self.background_bays:
-                return f"Bay {bay} replays a recorded cycle and cannot be selected"
-            return f"Bay {bay} is not running in this simulation"
+        if action in _SELECT:
+            return self._unselectable(_SELECT[action])
+        if action in _MOVE:
+            shown = self._shown_bay()
+            direction = _MOVE[action]
+            target = neighbour_bay(shown, direction)
+            if shown is not None and target == shown:
+                return f"Bay {shown} is already in the {_EDGE[direction]}"
+            return self._unselectable(target)
         if action is StageAction.ARM_BAY1_FLAP:
             if 1 not in self.active_bays:
                 return "Bay 1 is not running in this simulation"
@@ -775,40 +884,14 @@ class StageController:
 
     def _outcome(self, action: StageAction) -> tuple[str, str]:
         """What ``action`` just did, as ``(text, level)`` for the operator displays."""
-        rescue = self.rescue_bay()
         if action in _SELECT:
-            bay = _SELECT[action]
-            if rescue == bay:
-                return f"Bay {bay} selected. Engage the clutch (SPACE) to drive it", "ok"
-            if rescue is not None:
-                return f"Bay {bay} selected, but Bay {rescue} is the one waiting for rescue", "warn"
-            return f"Bay {bay} selected", "ok"
+            return self._select_text(_SELECT[action], "the clutch (SPACE)")
+        if action in _MOVE and self.mcu.selected_bay is not None:
+            return self._select_text(self.mcu.selected_bay, "the clutch (SPACE)")
         if action is StageAction.CLUTCH:
-            selected = self.mcu.selected_bay
-            if self.mcu.clutch:
-                if rescue is None:
-                    return "Clutch engaged, but no bay is waiting for rescue", "warn"
-                if selected != rescue:
-                    shown = f"Bay {selected}" if selected is not None else "no bay"
-                    return (
-                        f"Clutch engaged, but {shown} is selected. Press {rescue} to drive "
-                        f"Bay {rescue}",
-                        "warn",
-                    )
-                return f"Clutch engaged: your gloves now drive Bay {rescue}", "ok"
-            if rescue is not None and selected == rescue:
-                return f"Clutch released on Bay {rescue}: checking whether the bolt cleared", "info"
-            return "Clutch released", "info"
+            return self._clutch_text(self.mcu.clutch, self.mcu.selected_bay)
         if action is StageAction.ESTOP:
-            off = self.mcu.powered_off
-            selected = self.mcu.selected_bay
-            if selected is None:
-                if off:
-                    return "E-stop: power cut to every robot", "warn"
-                return "E-stop: power restored to every robot", "ok"
-            if selected in off:
-                return f"E-stop: Bay {selected} robot powered off. Press E again to restore", "warn"
-            return f"E-stop released: Bay {selected} robot powered on", "ok"
+            return self._estop_text(self.mcu.selected_bay, frozenset(self.mcu.powered_off), "E")
         if action is StageAction.ARM_BAY1_FLAP:
             return "Bay 1 flap jam armed: Bay 1 stalls on its next cycle", "ok"
         if action is StageAction.ARM_BAY2_FLAP:
@@ -823,9 +906,54 @@ class StageController:
             return f"Recovery backend: {backend} (from the next stall)", "ok"
         return "Reset: faults cleared and all bays restarted", "ok"
 
+    def _select_text(self, bay: int, clutch: str) -> tuple[str, str]:
+        rescue = self.rescue_bay()
+        if rescue == bay:
+            return f"Bay {bay} selected. Engage {clutch} to drive it", "ok"
+        if rescue is not None:
+            return f"Bay {bay} selected, but Bay {rescue} is the one waiting for rescue", "warn"
+        return f"Bay {bay} selected", "ok"
+
+    def _clutch_text(self, engaged: bool, selected: int | None) -> tuple[str, str]:
+        rescue = self.rescue_bay()
+        if engaged:
+            if rescue is None:
+                return "Clutch engaged, but no bay is waiting for rescue", "warn"
+            if selected != rescue:
+                shown = f"Bay {selected}" if selected is not None else "no bay"
+                return (
+                    f"Clutch engaged, but {shown} is selected. "
+                    f"Press {key_name(BAY_KEYS[rescue])} to drive Bay {rescue}",
+                    "warn",
+                )
+            return f"Clutch engaged: your gloves now drive Bay {rescue}", "ok"
+        if rescue is not None and selected == rescue:
+            return f"Clutch released on Bay {rescue}: checking whether the bolt cleared", "info"
+        return "Clutch released", "info"
+
+    @staticmethod
+    def _estop_text(selected: int | None, off: frozenset[int], again: str) -> tuple[str, str]:
+        if selected is None:
+            if off:
+                return "E-stop: power cut to every robot", "warn"
+            return "E-stop: power restored to every robot", "ok"
+        if selected in off:
+            return (
+                f"E-stop: Bay {selected} robot powered off. Press {again} again to restore",
+                "warn",
+            )
+        return f"E-stop released: Bay {selected} robot powered on", "ok"
+
     def apply(self, action: StageAction) -> None:
+        if action in (StageAction.CLUTCH, StageAction.ESTOP) or action in _MOVE:
+            # Act on (or move from) the bay the displays show, even if the joystick selected it.
+            shown = self._shown_bay()
+            if shown is not None and shown != self.mcu.selected_bay:
+                self.mcu.press_bay(shown)
         if action in _SELECT:
             self.mcu.press_bay(_SELECT[action])
+        elif action in _MOVE:
+            self.mcu.push_stick(_MOVE[action])
         elif action is StageAction.CLUTCH:
             self.mcu.toggle_clutch()
         elif action is StageAction.ESTOP:
@@ -871,11 +999,106 @@ class StageController:
         for console in consoles:
             if console.take_fault_rig_edge():
                 self.arm(1, flap_jammed=True)
-        self.console = merge_console(c.state() for c in consoles)
+        states = [c.state() for c in consoles]
+        self._sync_power(consoles, states)
+        self.console = merge_console(states, self.powered_off)
+        self._note_hardware(consoles, states)
         self._cycle_pallets()
         snaps = self.coordinator.tick(self.console, operator)
         self._after_tick(snaps, consoles)
         return snaps
+
+    def _conveyors_view(self) -> tuple[ConveyorStatus, ...]:
+        """Belt states, with an armed flap jam already showing on the pack waiting to arrive."""
+        out: list[ConveyorStatus] = []
+        for st in self.coordinator.conveyors():
+            jam = self.armed.get(st.bay_id, (False, False))[0]
+            if jam and not st.incoming_jam and st.mode != "feeding":
+                st = replace(st, incoming_jam=True)
+            out.append(st)
+        return tuple(out)
+
+    def _sync_power(
+        self, consoles: Sequence[ConsoleSource], states: Sequence[ConsoleInputState]
+    ) -> None:
+        """Keep one power mask for every console: the latest E-stop press on any of them wins.
+
+        Each console latches its own mask (the board on the MCU, the keyboard in its
+        SoftwareMcu) and toggles the selected bay against it. A plain union would let a bay cut
+        on one console never be restored from the other, so each console's changes are applied
+        to :attr:`powered_off`, which is then pushed back to every console (board LEDs too).
+        While a push is in flight its echo is ignored, so it never reads as a press.
+        """
+        now = time.monotonic_ns()
+        live: dict[int, _PowerSeen] = {}
+        for console, state in zip(consoles, states, strict=True):
+            seen = self._power_seen.get(id(console))
+            mask = state.powered_off
+            if seen is None or seen.console is not console:  # newly installed: its cuts join
+                seen = _PowerSeen(console, mask)
+                self.powered_off |= mask
+            if seen.expected is None:
+                flipped = mask ^ seen.reported
+                seen.reported = mask
+            elif mask == seen.expected:  # the echo of our push
+                flipped = frozenset[int]()
+                seen.reported, seen.expected = mask, None
+            else:
+                # Bays the push is still changing are ambiguous until the echo; a change on
+                # any other bay is a press on that console.
+                in_flight = seen.reported ^ seen.expected
+                flipped = (mask ^ seen.expected) - in_flight
+                if now >= seen.deadline_ns:  # no echo (e.g. an older board service): resync
+                    seen.reported, seen.expected = mask, None
+                else:
+                    seen.reported = (seen.reported - flipped) | (mask & flipped)
+                    seen.expected = (seen.expected - flipped) | (mask & flipped)
+            if flipped:
+                self.powered_off = (self.powered_off - flipped) | (mask & flipped)
+                if console is not self.keyboard:
+                    bay = next(iter(flipped)) if len(flipped) == 1 else None
+                    self._note("E-stop button", *self._estop_text(bay, self.powered_off, "it"))
+            live[id(console)] = seen
+        self._power_seen = live
+        for seen in live.values():
+            target = seen.reported if seen.expected is None else seen.expected
+            if target == self.powered_off:
+                continue
+            push = getattr(seen.console, "set_power_mask", None)
+            if not callable(push):
+                continue
+            try:
+                push(self.powered_off)
+            except Exception:
+                logger.exception("console power mask push failed")
+                continue
+            if seen.console is self.keyboard:
+                # SoftwareMcu applies it at once and the echo is pumped before the next read,
+                # so an E key press in between still counts as a press.
+                seen.reported = self.powered_off
+            else:
+                seen.expected, seen.deadline_ns = self.powered_off, now + POWER_ECHO_TIMEOUT_NS
+
+    def _note_hardware(
+        self, consoles: Sequence[ConsoleSource], states: Sequence[ConsoleInputState]
+    ) -> None:
+        """Action-log lines for physical joystick and clutch changes (keys log their own)."""
+        live: dict[int, tuple[ConsoleSource, ConsoleInputState]] = {}
+        for console, state in zip(consoles, states, strict=True):
+            if console is self.keyboard:
+                continue
+            prev = self._hw_seen.get(id(console))
+            live[id(console)] = (console, state)
+            if prev is None or prev[0] is not console:
+                continue
+            old = prev[1]
+            if state.selected_bay is not None and state.selected_bay != old.selected_bay:
+                self._note("Joystick", *self._select_text(state.selected_bay, "the clutch"))
+            if state.clutch != old.clutch:
+                self._note(
+                    "Clutch button", *self._clutch_text(state.clutch, self.console.selected_bay)
+                )
+        self._hw_seen = live
 
     def _cycle_pallets(self) -> None:
         """Start the next pallet cycle on a bay whose cycle finished ``cycle_dwell_s`` ago."""
@@ -899,6 +1122,11 @@ class StageController:
                 continue
             del self._done_since[bay]
             jam, pin = self.armed.pop(bay, (False, False))
+            n = self._pallets.get(bay, 0)
+            self._pallets[bay] = n + 1
+            if self.auto_jam_every > 0 and not (jam or pin):
+                # Some pallets arrive with the flap already up. Bays are staggered.
+                jam = (n + bay - 1) % self.auto_jam_every == self.auto_jam_every - 1
             if bay == 1 and self._rig_spent and not jam:
                 for console in self.consoles:  # the faulted cycle is over: re-arm the rig
                     console.reset_rig()
@@ -967,10 +1195,37 @@ class StageController:
             unoq=self.unoq_label,
             actions=tuple(self.actions),
             faults=self._faults_view(),
-            conveyors=co.conveyors(),
+            conveyors=self._conveyors_view(),
             compliance_detail=self.events.status_detail(),
             compliance_history=tuple(self.events.status_history()),
             powered_off=self.console.powered_off,
+            recovery=self._recovery_status(),
+            recovery_bays=tuple(
+                (bay, kind) for bay in sorted(self.active_bays) if (kind := co.recovery_name(bay))
+            ),
+        )
+
+    def _recovery_status(self) -> RecoveryStatus:
+        co = self.coordinator
+        act = co.act
+        healthy = False
+        p95: float | None = None
+        faults: tuple[str, ...] = ()
+        if act is not None:
+            try:
+                healthy = bool(act.healthy())
+                if isinstance(act, ActRecoveryFactory):
+                    p95 = act.worker.p95_ms()
+                    faults = act.manifest.passed_faults()
+            except Exception:
+                logger.exception("atc: ACT status unavailable")
+        return RecoveryStatus(
+            backend=co.recovery_backend.value,
+            note=co.backend_note,
+            act_loaded=act is not None,
+            act_healthy=healthy,
+            p95_ms=p95,
+            faults=faults,
         )
 
     def _faults_view(self) -> tuple[tuple[int, str, str], ...]:
@@ -1188,7 +1443,7 @@ class StageDirector:
             self._end(beat, True)
 
             beat = self._begin(2)  # operator selects Bay 1, holds the clutch, rescues
-            self._press("1")
+            self._press(BAY_KEYS[1])
             self._press(KEY_SPACE)
             for sample in scripted_rescue(co, 1):
                 yield sample
@@ -1232,6 +1487,7 @@ class StageDirector:
 
 
 __all__ = [
+    "BAY_KEYS",
     "BEATS",
     "KEYMAP",
     "STAGE_SEED",

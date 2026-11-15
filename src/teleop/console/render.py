@@ -157,6 +157,19 @@ def _bay_conveyor_rig(
     return cleats, bodies, beacons
 
 
+JAM_FLAP_DEG = 35.0  # a raised (jammed) safety flap on a pack riding the belt
+
+
+def _belt_flap_bodies(model: Any) -> dict[int, int]:
+    """Bay -> the arriving pack's flap body (the pack that reaches the bay next)."""
+    out: dict[int, int] = {}
+    for k in CONVEYOR_BAYS:
+        bid = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, f"conveyor_bay{k}_in_flap_skin"))
+        if bid >= 0:
+            out[k] = bid
+    return out
+
+
 class FeedRenderer:
     """Renders feeds to JPEG. Construct and use on one thread (it owns GL contexts)."""
 
@@ -178,6 +191,7 @@ class FeedRenderer:
             i for ids in self._bay_shadow_lights.values() for i in ids
         )
         self._bay_cleats, self._bay_moving_bodies, self._bay_beacons = _bay_conveyor_rig(self.model)
+        self._belt_flaps = _belt_flap_bodies(self.model)
         self._base_active = np.array(self.model.light_active, dtype=np.uint8).copy()
         self._base_zfar = float(self.model.vis.map.zfar)
         self._extent = max(float(self.model.stat.extent), 1e-3)
@@ -336,6 +350,10 @@ class FeedRenderer:
                 self.model.geom_pos[gid, 1] = base_y + shift
             for bid, base_y in self._bay_moving_bodies[bay]:
                 self.model.body_pos[bid, 1] = base_y + st.pack_dy_m
+            flap = self._belt_flaps.get(bay)
+            if flap is not None:
+                half = 0.5 * math.radians(JAM_FLAP_DEG if st.incoming_jam else 0.0)
+                self.model.body_quat[flap] = (math.cos(half), 0.0, math.sin(half), 0.0)
             beacon = self._bay_beacons.get(bay)
             if beacon is not None:
                 rgba = (
@@ -415,6 +433,8 @@ class RenderWorker(threading.Thread):
         telemetry_hz: float = 10.0,
         renderer_factory: RendererFactory | None = None,
         dummy_status: Callable[[], Mapping[str, Any]] | None = None,
+        calib_status: Callable[[], Mapping[str, Any]] | None = None,
+        recordings_status: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__(name="console-render", daemon=True)
         self.renderer_factory: RendererFactory = renderer_factory or FeedRenderer
@@ -433,6 +453,8 @@ class RenderWorker(threading.Thread):
         self._view_lock = threading.Lock()
         self._view_state: ViewState | None = None
         self._dummy_status = dummy_status
+        self._calib_status = calib_status
+        self._recordings_status = recordings_status
 
     def set_view_state(self, state: ViewState | None) -> None:
         with self._view_lock:
@@ -456,6 +478,10 @@ class RenderWorker(threading.Thread):
             self._bg_conf,
             view_state=vstate,
             dummy_status=dstat,
+            calib_status=self._calib_status() if self._calib_status is not None else None,
+            recordings_status=(
+                self._recordings_status() if self._recordings_status is not None else None
+            ),
             background_conveyors=self._bg_conveyors,
         )
         self.server.publish_telemetry(msg)

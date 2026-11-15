@@ -138,6 +138,7 @@ class TelemetryAdapter:
         faults: Mapping[int, dict[str, str]],
         conveyors: Mapping[int, ConveyorStatus],
         powered_off: frozenset[int] = frozenset(),
+        recovering: Mapping[int, str] | None = None,
     ) -> dict[str, Any]:
         hist = self._history[k]
         conv = conveyors.get(k)
@@ -170,6 +171,7 @@ class TelemetryAdapter:
                 "pose_sigma_yaw_deg": _finite_or_none(s.pose_sigma_yaw_deg),
                 "touch_correction_mm": _finite_or_none(s.touch_correction_mm),
                 "powered": s.powered and k not in powered_off,
+                "recovery": (recovering or {}).get(k),
             }
         if k in self.background:
             raw = float(background_confidence.get(k, 1.0))
@@ -192,6 +194,7 @@ class TelemetryAdapter:
                 "pose_sigma_yaw_deg": None,
                 "touch_correction_mm": None,
                 "powered": k not in powered_off,
+                "recovery": None,
             }
         return {
             "id": k,
@@ -210,6 +213,7 @@ class TelemetryAdapter:
             "pose_sigma_yaw_deg": None,
             "touch_correction_mm": None,
             "powered": k not in powered_off,
+            "recovery": None,
         }
 
     def build(
@@ -221,6 +225,8 @@ class TelemetryAdapter:
         *,
         view_state: Any = None,
         dummy_status: Mapping[str, Any] | None = None,
+        calib_status: Mapping[str, Any] | None = None,
+        recordings_status: Mapping[str, Any] | None = None,
         background_conveyors: Mapping[int, ConveyorStatus] | None = None,
     ) -> dict[str, Any]:
         """One telemetry message. Call at the telemetry rate: each call adds a history sample."""
@@ -263,6 +269,18 @@ class TelemetryAdapter:
                 "conditions": g.conditions,
                 "worst_failure": g.worst_failure,
             }
+        rec = view.recovery
+        recovery = {
+            "backend": rec.backend,
+            "note": rec.note,
+            "act": {
+                "loaded": rec.act_loaded,
+                "healthy": rec.act_healthy,
+                "p95_ms": rec.p95_ms,
+                "faults": list(rec.faults),
+            },
+        }
+        recovering = dict(view.recovery_bays)
         r = view.rescue
         rescue = (
             None
@@ -288,13 +306,21 @@ class TelemetryAdapter:
                 "mode": mode,
                 "view": view_state.to_dict() if hasattr(view_state, "to_dict") else None,
                 "dummy": dict(dummy_status) if dummy_status is not None else None,
+                "calib": dict(calib_status) if calib_status is not None else None,
+                "recordings": dict(recordings_status) if recordings_status is not None else None,
                 "feeds": [
                     {"slot": f.slot, "camera": f.camera, "bay": f.bay, "role": f.role}
                     for f in feeds_t
                 ],
                 "bays": [
                     self._bay_entry(
-                        k, snaps, background_confidence, faults, conveyors, view.powered_off
+                        k,
+                        snaps,
+                        background_confidence,
+                        faults,
+                        conveyors,
+                        view.powered_off,
+                        recovering,
                     )
                     for k in range(1, N_BAYS + 1)
                 ],
@@ -306,6 +332,7 @@ class TelemetryAdapter:
                 "queue": list(view.queue),
                 "selected_bay": view.selected_bay,
                 "powered_off": sorted(view.powered_off),
+                "recovery": recovery,
                 "rescue": rescue,
                 "gate": gate,
                 "events": list(self._events),

@@ -108,9 +108,10 @@ def test_key_messages_reach_callback(server: ConsoleServer, keys: list[int]) -> 
         ws.send(json.dumps({"type": "key", "code": "49"}))
         ws.send(json.dumps({"type": "other", "code": 50}))
         ws.send(json.dumps({"type": "key", "code": 49}))
-        _wait(lambda: keys == [49])
+        ws.send(json.dumps({"type": "key", "code": 263}))  # GLFW Left arrow moves one panel left
+        _wait(lambda: keys == [49, 263])
         time.sleep(0.1)
-    assert keys == [49]
+    assert keys == [49, 263]
 
 
 def test_publish_without_clients_is_noop(server: ConsoleServer) -> None:
@@ -223,3 +224,84 @@ def test_client_view_and_dummy_messages_reach_callback(web_dir: Path) -> None:
         assert got[1]["type"] == "dummy" and got[1]["mode"] == "auto"
     finally:
         srv.stop()
+
+
+# -- copilot display messages (T-215) -------------------------------------------------------------
+
+
+def _note(**kw: object) -> str:
+    return json.dumps({"type": "copilot", "bay": 1, "say": "Bay 1 stalled", **kw})
+
+
+def _recv_json(ws: ClientConnection) -> dict[str, object]:
+    msg = ws.recv(timeout=5)
+    assert isinstance(msg, str)
+    return json.loads(msg)
+
+
+def test_copilot_message_is_stamped_and_rebroadcast_to_others_only(
+    server: ConsoleServer, keys: list[int]
+) -> None:
+    with _ws(server) as copilot, _ws(server) as page:
+        _wait(lambda: server.client_count == 2)
+        copilot.send(_note(severity="alarm", detail="flap jam", verdict="flag", source="model"))
+        got = _recv_json(page)
+        assert got["type"] == "copilot" and got["seq"] == 1
+        assert got["bay"] == 1 and got["severity"] == "alarm" and got["say"] == "Bay 1 stalled"
+        assert got["detail"] == "flap jam" and got["verdict"] == "flag"
+        assert got["source"] == "model" and isinstance(got["wall"], str)
+        # the sender does not get its own message back
+        server.publish_telemetry({"type": "telemetry", "n": 1})
+        assert _recv_json(copilot) == {"type": "telemetry", "n": 1}
+    assert keys == []  # a copilot message is display only: it never reaches the key handler
+
+
+def test_copilot_messages_are_replayed_to_a_new_client_and_capped(server: ConsoleServer) -> None:
+    with _ws(server) as copilot:
+        for i in range(25):
+            copilot.send(_note(say=f"line {i}"))
+        _wait(lambda: server._copilot_seq == 25)  # pyright: ignore[reportPrivateUsage]
+    with _ws(server) as page:
+        got = [_recv_json(page) for _ in range(20)]
+    assert [m["say"] for m in got] == [f"line {i}" for i in range(5, 25)]
+    assert [m["seq"] for m in got] == list(range(6, 26))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"say": ""},
+        {"say": 5},
+        {"bay": 0},
+        {"bay": 5},
+        {"bay": "1"},
+        {"bay": True},
+        {"severity": "panic"},
+        {"severity": ["info"]},
+    ],
+)
+def test_malformed_copilot_messages_are_dropped(web_dir: Path, bad: dict[str, object]) -> None:
+    srv = ConsoleServer(web_dir=web_dir, port=0)
+    srv._on_message(json.dumps({"type": "copilot", "bay": 1, "say": "ok"} | bad))  # pyright: ignore[reportPrivateUsage]
+    assert srv._copilot_seq == 0 and not srv._copilot  # pyright: ignore[reportPrivateUsage]
+
+
+def test_copilot_fields_are_whitelisted_and_bounded(web_dir: Path) -> None:
+    srv = ConsoleServer(web_dir=web_dir, port=0)
+    srv._on_message(  # pyright: ignore[reportPrivateUsage]
+        _note(
+            say="x" * 1000,
+            detail="y" * 5000,
+            verdict="maybe",
+            code=65,
+            extra="<script>",
+            bay=None,
+        )
+    )
+    (text,) = srv._copilot  # pyright: ignore[reportPrivateUsage]
+    note = json.loads(text)
+    assert len(note["say"]) == 240 and len(note["detail"]) == 600
+    assert note["verdict"] is None and note["bay"] is None
+    assert set(note) == {
+        "type", "bay", "severity", "say", "detail", "source", "verdict", "seq", "wall"
+    }  # fmt: skip

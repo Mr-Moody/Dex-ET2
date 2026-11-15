@@ -25,6 +25,7 @@ OP_REGISTER_SKILL = "register_skill"
 OP_CONSOLE_STATE = "console_state"
 OP_SET_BAY_STATE = "set_bay_state"
 OP_JOYSTICK = "joystick"  # action: status | calibrate | abort | set (map) | raw (on)
+OP_SET_POWER_MASK = "set_power_mask"  # powered_off: bays the E-stop cut
 
 UDP_OPS = frozenset({OP_FILTER_STEP, OP_PING})
 TCP_OPS = frozenset(
@@ -36,6 +37,7 @@ TCP_OPS = frozenset(
         OP_CONSOLE_STATE,
         OP_SET_BAY_STATE,
         OP_JOYSTICK,
+        OP_SET_POWER_MASK,
     }
 )
 

@@ -47,6 +47,78 @@ def test_js_maps_keys_to_glfw_codes() -> None:
     # digits 48-57, letters upper-case 65-90, space 32; no auto-repeat
     assert "event.repeat" in js
     assert "toUpperCase" in js and "32" in js
+    # arrows move between panels and must not scroll the page or steal arrows from sliders/inputs
+    assert "ArrowLeft" in js and "k in ARROW_CODES) event.preventDefault()" in js
+    assert "ownsArrowKeys(event.target)" in js and '"INPUT"' in js
+
+
+def _marked(js: str, name: str) -> str:
+    m = re.search(rf"// <{name}>(.*?)// </{name}>", js, re.DOTALL)
+    assert m, f"console.js must keep the {name} block between <{name}> markers"
+    return m.group(1)
+
+
+_BAY_KEYS_HARNESS = """
+const BAYS = [1, 2, 3, 4];
+%s
+const arrows = Object.fromEntries(Object.entries(ARROW_CODES));
+const bays = Object.fromEntries(BAYS.map((b) => [b, bayKey(b).code]));
+console.log(JSON.stringify({ arrows, bays }));
+"""
+
+
+def test_arrow_keys_match_the_stage_keymap() -> None:
+    from teleop.atc.stage import BAY_KEYS, KEYMAP, StageAction
+
+    got = _node_json(_BAY_KEYS_HARNESS % _marked(_read("console.js"), "bay-keys"))
+    assert isinstance(got, dict)
+    # GLFW codes the stage maps to panel moves; bays are selected with their digit keys
+    assert got["arrows"] == {"ArrowLeft": 263, "ArrowRight": 262, "ArrowUp": 265, "ArrowDown": 264}
+    for key, code in got["arrows"].items():
+        assert KEYMAP[code] is StageAction(f"move_{key.removeprefix('Arrow').lower()}")
+    assert {int(b): c for b, c in got["bays"].items()} == BAY_KEYS
+    for bay, code in BAY_KEYS.items():
+        assert KEYMAP[code] is StageAction(f"select_bay_{bay}")
+
+
+# Fake elements whose closest() matches selectors from the element's own ancestor chain.
+_DBLCLICK_HARNESS = """
+class Element {
+  constructor(...chain) { this.chain = chain; }
+  closest(sel) {
+    const parts = sel.split(",").map((p) => p.trim());
+    return this.chain.some((c) => parts.includes(c)) ? this : null;
+  }
+}
+%s
+const pic = new Element(".feed__pic");
+const cases = {
+  picture: pic,
+  image: new Element(".feed__pic"),
+  zoomButton: new Element("button", ".feed__tools", ".feed__pic"),
+  toolsGap: new Element(".feed__tools", ".feed__pic"),
+  zoomBadge: new Element("button", ".feed__top"),
+  name: new Element(".feed__top"),
+  bottomLabel: new Element(".feed__bottom > *", ".feed__pic"),
+  signalLost: new Element(".feed__lost", ".feed__pic"),
+  powerCut: new Element(".feed__power", ".feed__pic"),
+  notElement: {},
+};
+console.log(JSON.stringify(Object.fromEntries(
+  Object.entries(cases).map(([k, el]) => [k, onBarePicture(el)]))));
+"""
+
+
+def test_only_the_bare_picture_pins_on_double_click() -> None:
+    got = _node_json(_DBLCLICK_HARNESS % _marked(_read("console.js"), "feed-dblclick"))
+    assert isinstance(got, dict)
+    assert {k for k, v in got.items() if v} == {"picture", "image"}
+
+
+def test_feed_overlays_do_not_select_text_and_buttons_are_named() -> None:
+    css, js = _read("console.css"), _read("console.js")
+    assert "user-select: none" in css and "touch-action: manipulation" in css
+    assert 'btn.setAttribute("aria-label", tip)' in js
 
 
 @pytest.fixture
@@ -248,3 +320,56 @@ def test_health_strip_updates_pills_in_place() -> None:
         "okDetail": False,
         "after": 1,
     }
+
+
+def test_glove_calibration_panel() -> None:
+    html, js = _read("index.html"), _read("console.js")
+    for token in ('id="panel-calib"', 'id="calib-go"', 'id="calib-flat"', 'id="calib-fist"'):
+        assert token in html, token
+    assert html.count('class="calib__icon"') == 2  # inline stroke SVGs, no emoji or icon CDN
+    for token in ('type: "calib"', '"start"', '"cancel"', "t.calib"):
+        assert token in js, token
+    assert (
+        "/* ---------------------------------------------------------------- glove calibration */"
+        in _read("console.css")
+    )
+
+
+def test_data_page_assets() -> None:
+    html, js = _read("index.html"), _read("data.js")
+    assert 'src="data.js"' in html
+    for token in ('id="open-data"', 'id="page-data"', 'id="data-rec"', 'id="data-list"'):
+        assert token in html, token
+    for token in ('type: "record"', '"start"', '"stop"', '"delete"', '"telemetry"', "#data"):
+        assert token in js, token
+    assert not re.search(r"https?://", js)
+    assert "data page */" in _read("console.css")
+
+
+_COPILOT_HARNESS = """
+%s
+const m = (seq, bay, extra = {}) => ({ seq, bay, say: `s${seq}`, severity: "info", ...extra });
+let h = [];
+for (let i = 1; i <= 25; i++) h = copilotAdd(h, m(i, 1));
+const mixed = [m(1, 1), m(2, 2), m(3, 1, { verdict: "flag" }), m(4, 1), m(5, null), m(6, 2)];
+console.log(JSON.stringify({
+  kept: h.map((x) => x.seq),
+  rows: copilotRows(mixed).map((x) => x.seq),
+  empty: copilotRows([]),
+}));
+"""
+
+
+def test_copilot_panel_assets_and_row_selection() -> None:
+    html, js, css = _read("index.html"), _read("console.js"), _read("console.css")
+    assert 'id="panel-copilot"' in html and 'id="copilot-list"' in html
+    assert 'msg.type === "copilot"' in js and "updateCopilot()" in js
+    assert ".cop " in css and ".cop__verdict" in css
+    # server text is shown as text, never parsed as markup
+    block = js[js.index("function updateCopilot") : js.index("function syncViewBar")]
+    assert "innerHTML" not in block
+    got = _node_json(_COPILOT_HARNESS % _marked(js, "copilot"))
+    assert isinstance(got, dict)
+    assert got["kept"] == list(range(6, 26))  # the last 20
+    # newest first; per bay one call-out and one review (seq 3 is Bay 1's review)
+    assert got["rows"] == [6, 5, 4, 3] and got["empty"] == []

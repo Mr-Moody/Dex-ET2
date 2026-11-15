@@ -16,7 +16,7 @@ each board.
 
 | Qty | Kit module | ID | Role |
 |---|---|---|---|
-| 1 | Joystick module (XY-axis) | KY-023 | Bay select: push up 1, right 2, down 3, left 4 (recalibratable) |
+| 1 | Joystick module (XY-axis) | KY-023 | Moves between the camera panels: left, right, up, down (recalibratable) |
 | 2 | Button module | KY-004 | Hold-to-control clutch, per-robot E-stop |
 | 4 | 5mm 2-colour LED (red + green) | KY-011 | Bay status: green nominal, red stalled or queued, both = amber |
 | 1 | Passive piezo-buzzer module | KY-006 | Stall and queue alert tones |
@@ -34,8 +34,8 @@ All MCU header pins are 3.3 V logic (STM32U585).
 
 | UNO Q pin | Module | Module pin | Firmware meaning |
 |---|---|---|---|
-| A0 | Joystick KY-023 | VRx | left / right → `BTN:BAY:4` / `BTN:BAY:2` (default map) |
-| A1 | Joystick KY-023 | VRy | up / down → `BTN:BAY:1` / `BTN:BAY:3` (default map) |
+| A0 | Joystick KY-023 | VRx | left / right: one panel across → `BTN:BAY:n` (default map) |
+| A1 | Joystick KY-023 | VRy | up / down: one panel up or down → `BTN:BAY:n` (default map) |
 | A2 | Joystick KY-023 | SW | optional: click re-sends the bay, hold 2 s to calibrate |
 | D2 | Clutch KY-004 | S | `CLUTCH:0\|1` |
 | D12 | E-stop KY-004 | S | `ESTOP:0\|1`, each press toggles `POWER:<bay>:0\|1` |
@@ -55,7 +55,7 @@ Free for later, for example the judge fault rig: D0/D1 (UART), D13, A3-A5.
 ```mermaid
 flowchart LR
   subgraph MODS[Modules]
-    JOY["Joystick KY-023<br/>bay select"]
+    JOY["Joystick KY-023<br/>panel select"]
     CL["Clutch KY-004"]
     ES["E-stop KY-004"]
     BZ["Buzzer KY-006"]
@@ -112,8 +112,11 @@ flowchart LR
 
 Each bay LED is one robot in the web fleet console (`teleop atc`): LED 1 is Bay 1, and so on.
 
-- **Select a robot:** flick the joystick. The bay's matrix tile gets a bright underline and the
-  web console highlights that bay.
+- **Select a robot:** flick the joystick to move between the camera panels, laid out as in the
+  web console's grid: Bay 1 | Bay 2 on top, Bay 3 | Bay 4 below. Each flick moves one panel
+  (left, right, up or down); at the edge of the grid the selection stays and the buzzer bumps
+  low. With nothing selected yet, the first flick moves from Bay 1. The selected bay's matrix
+  tile gets a bright underline and the web console highlights that bay.
 - **Drive it:** hold the clutch. The gloves only move the selected robot while the clutch is held,
   and only if that robot has power. Letting go stops it.
 - **E-stop:** a press cuts power to the selected robot. Its brakes hold the arm where it is, its
@@ -137,22 +140,25 @@ The stick's directions depend on how the board sits in the plate. Calibrate once
     uv run teleop unoq --host <board-ip> --calibrate-joystick
 
 You can also hold the stick pressed for 2 s if A2 is wired. All four LEDs go amber: let go of the
-stick so its centre is captured. Then each bay's LED blinks amber in turn, Bay 1 to 4: push the
-stick towards where you want that bay. A direction that's already taken buzzes low, so push
-another one. When all four are set, the map is saved on the board
+stick so its centre is captured. Then push the stick left, right, up and down in turn, while
+Bay 1, 2, 3 and 4's LED blinks amber for each step (the terminal names the direction). A
+direction that's already taken buzzes low, so push another one. When all four are set, the map is saved on the board
 (`~/.config/teleop/unoq_joystick_map`) and restored on every start and MCU reboot.
 
-`--joy-map 2431` sets the map directly (the bays for raw stick X+, X-, Y+, Y-; `2431` is the
-default). `--joy-raw` prints the raw ADC values for 15 s to check the wiring.
+`--joy-map 1234` sets the map directly: the direction (1 left, 2 right, 3 up, 4 down) for raw
+stick X+, X-, Y+, Y-. `1234` is the default (the plate holds the stick upside down). A map saved before panel navigation keeps working:
+its digits used to name bays 1-4 and now name the directions those bays sat in. `--joy-raw` prints
+the raw ADC values for 15 s to check the wiring.
 
 ## Differences from the `T-131` acceptance list
 
 `T-131` was written for four separate bay buttons with `INPUT_PULLUP`. The console as built
 differs:
 
-- **Bay select is a joystick on A0/A1.** The firmware reads the centre position at boot and emits
-  `BTN:BAY:n` once each time the stick passes about 60 % of its travel. The direction-to-bay map
-  is calibrated on the console (see above), not hard-coded. The serial protocol (`BTN:BAY:1..4`)
+- **Bay select is a joystick on A0/A1.** The firmware reads the centre position at boot and,
+  each time the stick passes about 60 % of its travel, moves the selection one camera panel and
+  emits `BTN:BAY:n` for the bay it lands on. Which raw direction is left, right, up or down is
+  calibrated on the console (see above), not hard-coded. The serial protocol (`BTN:BAY:1..4`)
   is unchanged.
 - **Buttons are not assumed active-low.** See wiring rule 3.
 - **The E-stop latches per robot** instead of acting as a global level (see above).

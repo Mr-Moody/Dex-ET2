@@ -676,5 +676,6 @@ def test_copilot_never_imports_the_coordinator_or_sends_keys() -> None:
                 assert not name.startswith("teleop.atc"), f"{path.name} imports {name}"
             if isinstance(node, ast.Constant):
                 assert node.value != "key", f"{path.name}:{node.lineno} has a 'key' message"
-            if isinstance(node, ast.Attribute):
+            if isinstance(node, ast.Attribute) and path.name != "publish.py":
+                # publish.py is the one writer: display-only "copilot" messages (T-215)
                 assert node.attr not in ("send", "send_text"), f"{path.name}:{node.lineno} sends"

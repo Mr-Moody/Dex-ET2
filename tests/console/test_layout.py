@@ -23,12 +23,11 @@ def test_grid_layout_sorts_and_skips_absent_bays() -> None:
 
 def test_rescue_layout() -> None:
     f = feed_layout([1, 2, 3, 4], 2)
-    assert (f[0].slot, f[0].camera, f[0].role) == (0, "bay2/top_ortho", "main")
-    assert (f[1].slot, f[1].camera, f[1].role) == (1, "bay2/side_ortho", "main")
+    assert (f[0].slot, f[0].camera, f[0].role) == (0, "bay2/cctv", "main")
     assert (f[0].width, f[0].height) == MAIN
-    assert [s.camera for s in f[2:]] == [f"bay{k}/cctv" for k in (1, 2, 3, 4)]
-    assert [s.slot for s in f[2:]] == [2, 3, 4, 5]
-    assert all(s.role == "strip" and (s.width, s.height) == STRIP for s in f[2:])
+    assert [s.camera for s in f[1:]] == [f"bay{k}/cctv" for k in (1, 2, 3, 4)]
+    assert [s.slot for s in f[1:]] == [1, 2, 3, 4]
+    assert all(s.role == "strip" and (s.width, s.height) == STRIP for s in f[1:])
 
 
 def test_rescue_of_absent_bay_falls_back_to_grid() -> None:
@@ -100,6 +99,6 @@ def test_rescue_never_changes_a_grid_or_pinned_layout() -> None:
     assert ViewState().mode == "grid"
     for vs in (ViewState(), ViewState(mode="pin", pinned_bay=2)):
         assert feed_layout([1, 2, 3, 4], 2, vs) == feed_layout([1, 2, 3, 4], None, vs)
-    # Only the opt-in auto focus opens the split close-up on the rescued bay.
+    # Opt-in auto focus keeps the bay's own camera; it never opens Top + Side by itself.
     auto = feed_layout([1, 2, 3, 4], 2, ViewState(mode="auto"))
-    assert [f.camera for f in auto[:2]] == ["bay2/top_ortho", "bay2/side_ortho"]
+    assert auto[0].camera == "bay2/cctv" and auto[0].role == "main"

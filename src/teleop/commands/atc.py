@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import dataclasses
 import importlib
+import importlib.util
 import logging
 import subprocess
 import threading
@@ -71,8 +72,10 @@ from teleop.net.hotspot import HotspotConfigError
 from teleop.protocols import InputSource, Retargeter, WristSource
 from teleop.registry import RETARGETERS, WRISTS, resolve
 from teleop.retarget.calibration import Calibration
-from teleop.sim.hands import REPO_ROOT, load_hand
+from teleop.retarget.direct import DirectRetargeter
+from teleop.sim.hands import REPO_ROOT, HandSpec, load_hand
 from teleop.sim.loop import FixedRateLoop
+from teleop.types import Side
 from teleop.unoq.client import UnoQClient
 from teleop.unoq.dmp import HAND_ACTUATORS
 from teleop.unoq.mcu_bridge import McuConsoleBridge
@@ -100,6 +103,7 @@ class AtcConfig:
     hotspot: bool = True  # keep the booth hotspot up (Windows; never with --headless)
     background_bays: bool = True
     cycle_dwell_s: float = 1.0
+    jam_every: int = 0  # every Nth pallet arrives with a raised flap (0: only on a jam press)
     audio: bool = True
     script: bool = False
     hud_log_period_s: float = 5.0
@@ -193,10 +197,32 @@ def load_config(path: Path | None, overrides: Mapping[str, Any]) -> AtcConfig:
 class GloveOperator:
     """Right-hand glove frames -> ``OperatorInput`` (wrist pose + hand targets by name)."""
 
-    def __init__(self, source: InputSource, wrist: WristSource, retargeter: Retargeter) -> None:
+    def __init__(
+        self,
+        source: InputSource,
+        wrist: WristSource,
+        retargeter: Retargeter,
+        *,
+        hand: HandSpec | None = None,
+        ctrlrange: Mapping[str, tuple[float, float]] | None = None,
+    ) -> None:
         self.source = source
         self.wrist = wrist
         self.retargeter = retargeter
+        self.hand = hand
+        self.ctrlrange = dict(ctrlrange) if ctrlrange is not None else None
+
+    def recalibrate(self, calib: Calibration) -> set[tuple[Side, str]]:
+        """Swap in a retargeter built from ``calib``; returns the actuators left on defaults.
+
+        One reference assignment, so the control thread's next ``latest`` uses either the old
+        or the new retargeter, never a half-built one.
+        """
+        if self.hand is None or self.ctrlrange is None:
+            raise RuntimeError("glove operator was built without its hand spec and ctrlrange")
+        retargeter = DirectRetargeter(self.hand, {"right": self.ctrlrange}, calib)
+        self.retargeter = cast("Retargeter", retargeter)
+        return set(retargeter.degenerate)
 
     @classmethod
     def build(
@@ -227,6 +253,8 @@ class GloveOperator:
             source,
             cast("WristSource", wrist_cls(WristConfig(mode=cfg.wrist_mode))),
             cast("Retargeter", retarget_cls(hand, {"right": ranges}, calib)),
+            hand=hand,
+            ctrlrange=ranges,
         )
 
     def latest(self) -> OperatorInput | None:
@@ -269,6 +297,9 @@ def _parser() -> argparse.ArgumentParser:
         "--realism", type=float, default=None, help="pose error / gate randomization scale, 0-1"
     )
     ap.add_argument("--gate-pass-min", type=int, default=None, help="gate passes needed of 20")
+    ap.add_argument(
+        "--jam-every", type=int, default=None, help="every Nth pallet has a raised flap"
+    )
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--console-fps", type=int, default=None)
     ap.add_argument("--no-browser", dest="open_browser", action="store_false", default=None)
@@ -472,6 +503,7 @@ def _run_booth(
         audio=AudioCues(SystemSpeaker() if speak else NullSpeaker(), enabled=speak),
         hardware=hardware,
         cycle_dwell_s=cfg.cycle_dwell_s,
+        auto_jam_every=0 if (cfg.script or cfg.generate is not None) else cfg.jam_every,
         include_background_bays=cfg.background_bays,
         seed=resolve_seed(cfg),
         realism=cfg.realism,
@@ -676,6 +708,8 @@ def _run(
             else:
                 from teleop.console.run import ConsolePortInUse, run_console
 
+                recordings = _recording_desk(cfg, controller, glove)
+                recordings.start()
                 try:
                     run_console(
                         controller,
@@ -686,10 +720,14 @@ def _run(
                         steps=cfg.steps,
                         health=health,
                         dummy=dummy,
+                        calib=_console_calibrator(cfg, glove),
+                        recordings=recordings,
                     )
                 except ConsolePortInUse as exc:
                     print(f"teleop atc: console port {exc.port} in use (try --console-port)")
                     return 1
+                finally:
+                    recordings.close()  # finalises a recording left running at quit
     finally:
         if dummy is not None:
             dummy.close()
@@ -704,6 +742,56 @@ def _run(
         took = f"{r.end_s - r.start_s:5.1f} s" if r.end_s is not None else "   --  "
         print(f"beat {r.name:<30} {'ok' if r.ok else 'FAILED':<6} {took}", flush=True)
     return 0 if director.ok else 1
+
+
+CONSOLE_CALIB_PATH = REPO_ROOT / "data" / "calib" / "atc.json"
+CONSOLE_EPISODES_ROOT = REPO_ROOT / "data" / "episodes"
+
+
+def _recording_desk(
+    cfg: AtcConfig,
+    controller: StageController,
+    glove: GloveOperator | ScriptedGlove | SelectingGlove | None,
+) -> Any:
+    """Start/stop/delete episode recordings from the console's Data page."""
+    from teleop.console.recordings import RecordingDesk
+
+    co = controller.coordinator
+    unavailable: str | None = None
+    if cfg.record_episodes is not None:
+        unavailable = f"Recording every rescue to {cfg.record_episodes} (--record-episodes)"
+    elif importlib.util.find_spec("lerobot") is None:
+        unavailable = "Recording needs lerobot: run `uv sync --group train`"
+    label: str | Callable[[], str] = (
+        "glove" if isinstance(glove, GloveOperator) else rescue_label([glove])
+    )
+    if glove is None or isinstance(glove, ScriptedGlove):
+        label = "scripted"
+
+    def open_sink(folder: Path) -> Any:
+        from teleop.atc.episodes import EpisodeSink, fault_lookup
+
+        return EpisodeSink(folder, co.model, co.data, fault_lookup(controller), label)
+
+    return RecordingDesk(CONSOLE_EPISODES_ROOT, open_sink, co.set_observer, unavailable=unavailable)
+
+
+def _console_calibrator(
+    cfg: AtcConfig, glove: GloveOperator | ScriptedGlove | SelectingGlove | None
+) -> Any:
+    """The console's glove calibration wizard, or ``None`` without a real glove operator."""
+    inner = glove.glove if isinstance(glove, SelectingGlove) else glove
+    if not isinstance(inner, GloveOperator) or inner.hand is None:
+        return None
+    from teleop.console.calib import GloveCalibrator
+
+    return GloveCalibrator(
+        inner.hand,
+        inner.source,
+        inner.recalibrate,
+        persist_path=CONSOLE_CALIB_PATH,
+        loaded_from=cfg.calibration,
+    )
 
 
 def _run_viewer(

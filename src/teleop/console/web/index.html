@@ -51,7 +51,16 @@
       <button type="button" class="vbtn" id="view-auto" title="Grid normally; a bay under rescue takes the stage with its close-up views">Auto focus</button>
       <button type="button" class="vbtn" id="view-overview" title="Mezzanine camera across the warehouse: 4 segmented conveyors and all 4 arms">Plant overview</button>
     </div>
+    <button type="button" class="vbtn vbtn--solo bar__data" id="open-data" aria-pressed="false"
+      title="Record episodes and manage saved recordings">
+      <span class="rec-dot" id="data-rec-dot" hidden aria-hidden="true"></span><span id="open-data-text">Data</span>
+    </button>
     <div class="bar__live">
+      <button type="button" class="rchip" id="recovery-chip" data-tone="dmp" hidden
+        title="Recovery backend for the next stall. Press M to switch.">
+        <span class="rchip__name" id="recovery-name">DMP</span>
+        <span class="rchip__act" id="recovery-act"></span>
+      </button>
       <span class="live" id="live"><span class="live__dot" aria-hidden="true"></span><span id="live-text">Connecting</span></span>
       <time class="bar__clock" id="clock">--:--:--</time>
     </div>
@@ -83,6 +92,11 @@
         <ol class="queue" id="queue"></ol>
       </section>
 
+      <section class="panel panel--copilot" id="panel-copilot" hidden>
+        <h2>Copilot <span class="panel__note">advisory only</span></h2>
+        <ol class="cop" id="copilot-list" aria-live="polite" tabindex="0" aria-label="Copilot call-outs"></ol>
+      </section>
+
       <section class="panel">
         <h2>Confidence C(t) <span class="panel__note" id="threshold-note"></span></h2>
         <div class="sparks" id="sparks"></div>
@@ -91,6 +105,28 @@
       <section class="panel" id="panel-gate" hidden>
         <h2>Skill gate</h2>
         <div class="gate" id="gate"></div>
+      </section>
+
+      <section class="panel calib" id="panel-calib" data-state="off" aria-labelledby="calib-title">
+        <h2 id="calib-title">Glove calibration <span class="panel__note calib__meta" id="calib-meta" aria-live="polite">Unavailable</span></h2>
+        <div class="calib__poses">
+          <div class="calib__tile" id="calib-flat" data-tile="pending">
+            <svg class="calib__icon" viewBox="0 0 48 48" aria-hidden="true">
+              <path d="M15 27V12.5a2.5 2.5 0 0 1 5 0V24M20 24V9.5a2.5 2.5 0 0 1 5 0V24M25 24V10.5a2.5 2.5 0 0 1 5 0V25M30 25V14.5a2.5 2.5 0 0 1 5 0V30c0 8-5 13-12 13s-10-4-13-9l-4.2-7.3a2.4 2.4 0 0 1 4.1-2.5L15 27"/>
+            </svg>
+            <span class="calib__name">Flat</span>
+            <span class="calib__hint" id="calib-flat-hint">Open hand</span>
+          </div>
+          <div class="calib__tile" id="calib-fist" data-tile="pending">
+            <svg class="calib__icon" viewBox="0 0 48 48" aria-hidden="true">
+              <path d="M14 22v-3.5a3 3 0 0 1 6 0V22M20 21v-4.5a3 3 0 0 1 6 0V21M26 21.5v-4a3 3 0 0 1 6 0V23M32 22.5a3 3 0 0 1 6 0V31c0 7-5 12-12 12h-2c-6 0-10-4-10-10v-11a3 3 0 0 1 3-3h6a3 3 0 0 1 0 6h-5"/>
+            </svg>
+            <span class="calib__name">Fist</span>
+            <span class="calib__hint" id="calib-fist-hint">Closed hand</span>
+          </div>
+        </div>
+        <button type="button" class="actbtn actbtn--accent calib__go" id="calib-go" disabled
+          title="Hold a flat hand, then a fist, 2 s each; the new mapping applies live">Calibrate gloves</button>
       </section>
 
       <section class="panel panel--audit panel--grow" id="panel-audit">
@@ -153,7 +189,26 @@
     </aside>
   </main>
 
+  <main class="datapage" id="page-data" aria-labelledby="data-title">
+    <div class="datapage__inner">
+      <header class="datapage__head">
+        <div>
+          <h2 id="data-title">Data collection</h2>
+          <p class="datapage__sub" id="data-sub">Every rescue and autonomous recovery while recording becomes a LeRobot episode.</p>
+        </div>
+        <div class="datapage__ctl">
+          <span class="datapage__timer" id="data-timer" aria-live="polite"></span>
+          <button type="button" class="actbtn rec-btn" id="data-rec" disabled>Start recording</button>
+          <button type="button" class="actbtn" id="data-back">Back to operations</button>
+        </div>
+      </header>
+      <p class="datapage__note" id="data-note" hidden></p>
+      <div class="datapage__list" id="data-list" aria-label="Recordings"></div>
+    </div>
+  </main>
+
   <script src="console.js"></script>
   <script src="health.js"></script>
+  <script src="data.js"></script>
 </body>
 </html>

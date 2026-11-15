@@ -7,13 +7,16 @@ The console sends two kinds of message:
   rest is one JPEG. The slot maps to a camera through the latest telemetry's ``feeds``. A frame
   whose byte 1 does not match the current layout is from an old layout and is dropped.
 
-The client **never sends** anything: the copilot is advisory only. It reconnects with backoff
-(1 s, doubling, at most 5 s) when the console stops or restarts.
+The client sends nothing itself: the copilot is advisory only. Given an ``outbox`` it also
+drains it onto the same connection (``publish.DisplayOutbox``, ``"copilot"`` display messages
+for the console's Copilot panel, nothing else). It reconnects with backoff (1 s, doubling, at
+most 5 s) when the console stops or restarts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -23,6 +26,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from websockets.exceptions import WebSocketException
+
+from teleop.copilot.publish import DisplayOutbox, Writer
 
 logger = logging.getLogger(__name__)
 
@@ -155,12 +160,14 @@ class FeedClient:
         connect: Connect = default_connect,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         mapper: FeedMapper | None = None,
+        outbox: DisplayOutbox | None = None,
         min_backoff_s: float = MIN_BACKOFF_S,
         max_backoff_s: float = MAX_BACKOFF_S,
     ) -> None:
         self.url = url
         self._on_telemetry = on_telemetry
         self._on_frame = on_frame
+        self._outbox = outbox
         self._connect = connect
         self._sleep = sleep
         self.mapper = mapper if mapper is not None else FeedMapper()
@@ -185,7 +192,7 @@ class FeedClient:
                     self.sessions += 1
                     delay = self._min_backoff  # a successful connect resets the backoff
                     logger.info("copilot feed connected to %s", self.url)
-                    await self._read(conn)
+                    await self._session(conn)
             except (OSError, TimeoutError, WebSocketException) as exc:
                 logger.debug("copilot feed: %s", exc)
             finally:
@@ -197,6 +204,18 @@ class FeedClient:
                 break
             await self._sleep(delay)
             delay = min(delay * 2.0, self._max_backoff)
+
+    async def _session(self, conn: Connection) -> None:
+        if self._outbox is None:
+            await self._read(conn)
+            return
+        pump = asyncio.create_task(self._outbox.pump(cast(Writer, conn)))
+        try:
+            await self._read(conn)
+        finally:
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError, WebSocketException, OSError):
+                await pump
 
     async def _read(self, conn: Connection) -> None:
         async for message in conn:

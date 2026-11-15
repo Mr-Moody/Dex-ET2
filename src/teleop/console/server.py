@@ -4,7 +4,13 @@ One port serves the page (``GET /`` and the flat files in ``web/``) and the ``/w
 Server -> client: telemetry JSON (text) and camera frames (binary: byte 0 = feed slot,
 byte 1 = ``layout_id % 256``, then one JPEG). Client -> server: ``{"type": "key", "code": n}``
 (GLFW key codes), handed to ``on_key``; ``{"type": "reconnect", "target": t}`` for ``t`` in
-``RECONNECT_TARGETS``, handed to ``on_reconnect`` (which must not block).
+``RECONNECT_TARGETS``, handed to ``on_reconnect`` (which must not block); ``view``, ``fault``,
+``dummy``, ``calib`` and ``record`` messages, handed whole to ``on_client_message``.
+
+The copilot (``teleop.copilot``, a separate advisory process) posts display-only
+``{"type": "copilot", ...}`` messages. They are validated, stamped with ``seq`` and ``wall``,
+kept (the last ``COPILOT_HISTORY``) and rebroadcast to every other client; a new client gets the
+kept ones first. They never reach ``on_key`` or ``on_client_message``.
 
 Publishing is thread-safe and never blocks the caller. The server keeps the latest telemetry
 and the latest frame per slot: a new client (or a page reload) gets them immediately, and a
@@ -20,7 +26,9 @@ import json
 import logging
 import mimetypes
 import threading
+from collections import deque
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import unquote, urlsplit
@@ -30,6 +38,8 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
+from teleop.atc.types import N_BAYS
+
 logger = logging.getLogger("teleop.console.server")
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -38,6 +48,10 @@ ALLOWED_SUFFIXES = frozenset({".html", ".css", ".js", ".svg", ".png", ".woff2"})
 KEY_MIN, KEY_MAX = 32, 348  # printable GLFW keys .. GLFW_KEY_LAST
 RECONNECT_TARGETS = frozenset({"hotspot", "gloves", "panel"})
 START_TIMEOUT_S = 5.0
+COPILOT_HISTORY = 20
+COPILOT_SEVERITIES = frozenset({"info", "attention", "alarm"})
+COPILOT_VERDICTS = frozenset({"approve", "flag", "insufficient_evidence"})
+_COPILOT_SAY_MAX, _COPILOT_DETAIL_MAX, _COPILOT_SOURCE_MAX = 240, 600, 24
 
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -56,6 +70,7 @@ class _Client:
         self.ws = ws
         self.text: str | None = None
         self.frames: dict[int, bytes] = {}
+        self.copilot: deque[str] = deque(maxlen=COPILOT_HISTORY)  # in order, none skipped
         self.wake = asyncio.Event()
 
     def put_text(self, text: str) -> None:
@@ -66,12 +81,19 @@ class _Client:
         self.frames[slot] = payload
         self.wake.set()
 
+    def put_copilot(self, text: str) -> None:
+        self.copilot.append(text)
+        self.wake.set()
+
     async def run(self) -> None:
         while True:
             await self.wake.wait()
             self.wake.clear()
             text, self.text = self.text, None
             frames, self.frames = self.frames, {}
+            notes, self.copilot = list(self.copilot), deque(maxlen=COPILOT_HISTORY)
+            for note in notes:
+                await self.ws.send(note)
             if text is not None:
                 await self.ws.send(text)
             for slot in sorted(frames):
@@ -103,6 +125,8 @@ class ConsoleServer:
         self._latest_text: str | None = None
         self._latest_frames: dict[int, bytes] = {}
         self._port: int | None = None
+        self._copilot: deque[str] = deque(maxlen=COPILOT_HISTORY)
+        self._copilot_seq = 0
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -203,6 +227,8 @@ class ConsoleServer:
         with self._lock:
             if self._latest_text is not None:
                 client.put_text(self._latest_text)
+            for note in self._copilot:
+                client.put_copilot(note)
             for slot, payload in self._latest_frames.items():
                 client.put_frame(slot, payload)
         self._clients.add(client)
@@ -210,7 +236,7 @@ class ConsoleServer:
         try:
             async for message in ws:
                 if isinstance(message, str):
-                    self._on_message(message)
+                    self._on_message(message, client)
         except ConnectionClosed:
             pass
         finally:
@@ -219,7 +245,7 @@ class ConsoleServer:
             with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
                 await sender
 
-    def _on_message(self, message: str) -> None:
+    def _on_message(self, message: str, sender: _Client | None = None) -> None:
         try:
             raw: Any = json.loads(message)
         except ValueError:
@@ -231,6 +257,9 @@ class ConsoleServer:
         mtype = msg.get("type")
         if mtype == "reconnect":
             self._on_reconnect_message(msg)
+            return
+        if mtype == "copilot":
+            self._on_copilot_message(msg, sender)
             return
         if mtype == "key":
             code = msg.get("code")
@@ -244,11 +273,30 @@ class ConsoleServer:
                 except Exception:
                     logger.exception("console: on_key failed")
             return
-        if mtype in ("view", "fault", "dummy") and self.on_client_message is not None:
+        if (
+            mtype in ("view", "fault", "dummy", "calib", "record")
+            and self.on_client_message is not None
+        ):
             try:
                 self.on_client_message(msg)
             except Exception:
                 logger.exception("console: on_client_message failed")
+
+    def _on_copilot_message(self, msg: dict[str, Any], sender: _Client | None) -> None:
+        """Validate, stamp, keep and rebroadcast one copilot display message (asyncio thread)."""
+        note = _clean_copilot(msg)
+        if note is None:
+            logger.debug("console: ignoring malformed copilot message")
+            return
+        with self._lock:
+            self._copilot_seq += 1
+            note["seq"] = self._copilot_seq
+            note["wall"] = datetime.now().strftime("%H:%M:%S")
+            text = json.dumps(note, separators=(",", ":"))
+            self._copilot.append(text)
+        for client in list(self._clients):
+            if client is not sender:
+                client.put_copilot(text)
 
     def _on_reconnect_message(self, msg: dict[str, Any]) -> None:
         target = msg.get("target")
@@ -277,6 +325,34 @@ class ConsoleServer:
             return _response(404, "Not Found", b"not found", "text/plain; charset=utf-8")
         ctype = _CONTENT_TYPES.get(suffix) or mimetypes.guess_type(name)[0] or "text/plain"
         return _response(200, "OK", target.read_bytes(), ctype)
+
+
+def _clean_copilot(msg: dict[str, Any]) -> dict[str, Any] | None:
+    """The display fields of a copilot message, or ``None`` if it is not one.
+
+    Only known fields survive, with bounded lengths: the page shows them as plain text.
+    """
+    say = msg.get("say")
+    if not isinstance(say, str) or not say.strip():
+        return None
+    bay = msg.get("bay")
+    if bay is not None and (
+        not isinstance(bay, int) or isinstance(bay, bool) or not 1 <= bay <= N_BAYS
+    ):
+        return None
+    severity = msg.get("severity", "info")
+    if not isinstance(severity, str) or severity not in COPILOT_SEVERITIES:
+        return None
+    detail, source, verdict = msg.get("detail"), msg.get("source"), msg.get("verdict")
+    return {
+        "type": "copilot",
+        "bay": bay,
+        "severity": severity,
+        "say": say.strip()[:_COPILOT_SAY_MAX],
+        "detail": detail.strip()[:_COPILOT_DETAIL_MAX] if isinstance(detail, str) else "",
+        "source": source[:_COPILOT_SOURCE_MAX] if isinstance(source, str) else "",
+        "verdict": verdict if isinstance(verdict, str) and verdict in COPILOT_VERDICTS else None,
+    }
 
 
 def _response(status: int, reason: str, body: bytes, ctype: str) -> Response:

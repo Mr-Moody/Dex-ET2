@@ -207,3 +207,12 @@ def test_belt_packs_fall_back_to_boxes_without_mesh_files(
     names = {str(model.geom(i).name) for i in range(model.ngeom)}
     assert "conveyor_bay1_in_q_track" in names and "conveyor_bay1_in_q_bolt" in names
     assert "conveyor_bay1_in_slide_bolt_visual" not in names
+
+
+def test_incoming_belt_flap_rests_down_and_can_be_raised_for_a_jam(
+    scene: tuple[Any, Any],
+) -> None:
+    model, data = scene
+    for bay in (1, 2):
+        bid = model.body(f"conveyor_bay{bay}_in_flap_skin").id
+        assert model.body_quat[bid] == pytest.approx([1.0, 0.0, 0.0, 0.0])
